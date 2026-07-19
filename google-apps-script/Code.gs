@@ -32,7 +32,7 @@ var RU_SHEET_NAMES = {
 /** Выполните эту функцию ОДИН раз вручную: создаст таблицу и первого админа. */
 function setup() {
   var props = PropertiesService.getScriptProperties();
-  var ssId = props.getProperty('SPREADSHEET_ID');
+  var ssId = getSsId();
   var ss;
   if (ssId) {
     ss = SpreadsheetApp.openById(ssId);
@@ -62,8 +62,16 @@ function setup() {
 
 // ---------- Утилиты таблицы ----------
 
+/** ID таблицы из свойств скрипта. Понимает и чистый ID, и полную ссылку на таблицу. */
+function getSsId() {
+  var raw = PropertiesService.getScriptProperties().getProperty('SPREADSHEET_ID') || '';
+  var m = String(raw).match(/\/d\/([-\w]+)/);
+  return m ? m[1] : String(raw).trim();
+}
+
 function getSheet(key) {
-  var ssId = PropertiesService.getScriptProperties().getProperty('SPREADSHEET_ID');
+  var ssId = getSsId();
+  if (!ssId) throw new Error('Свойство SPREADSHEET_ID не задано. Добавьте его в «Свойства скрипта» — значением может быть ссылка на таблицу «Монетки — база данных».');
   return SpreadsheetApp.openById(ssId).getSheetByName(RU_SHEET_NAMES[key]);
 }
 

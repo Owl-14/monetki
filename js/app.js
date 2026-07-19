@@ -845,7 +845,8 @@ function bindEntityForm(root, entity, existing, extra = {}) {
 async function init() {
   if (S.token) {
     await refresh();
-    if (!S.profile) return; // refresh сделал logout
+    // База не ответила или сессия истекла — показываем экран входа, а не пустую страницу
+    if (!S.profile) render();
   } else {
     render();
   }
