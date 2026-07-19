@@ -771,7 +771,7 @@ function viewSettings() {
     <div class="card" style="margin-bottom:12px">
       <div class="section-title" style="margin-top:0">🗄️ Общая база (Google Таблицы)</div>
       <p class="small muted">${backend ? 'База подключена.' : 'База не подключена — работаем в демо-режиме. Инструкция в файле SETUP.md в репозитории.'}</p>
-      <label class="field"><span>Адрес веб-приложения Apps Script</span><input type="url" id="backend-url" placeholder="https://script.google.com/macros/s/…/exec" value="${esc(backend)}"></label>
+      <label class="field"><span>Ссылка на базу (из Google-скрипта, SETUP.md шаг 2)</span><input type="url" id="backend-url" placeholder="https://script.google.com/macros/s/…/exec" value="${esc(backend)}"></label>
       <button class="btn primary" id="backend-save">Сохранить и перезагрузить</button>
     </div>` : ''}
     <div class="card">
