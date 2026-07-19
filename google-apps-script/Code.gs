@@ -339,11 +339,38 @@ function tochkaTest() {
   Logger.log(JSON.stringify(res, null, 2));
 }
 
-/** Определяем способ оплаты по тексту назначения платежа. */
-function classifyMethod(purpose, counterpartyName) {
-  var p = ((purpose || '') + ' ' + (counterpartyName || '')).toLowerCase();
-  if (/сбп|c2b|b2c|нспк|быстрых платежей/.test(p)) return 'sbp';
-  if (/карт|pos |мсс|mcc|покупка|оплата товар|терминал/.test(p)) return 'card';
+/**
+ * Свежие операции по корпоративным картам: маскированный номер карты (pan),
+ * магазин и город. Именно так видно, ЧЬЕЙ картой сделана трата, пока она не
+ * попала в выписку. Выполните вручную — результат в журнале.
+ */
+function tochkaCards() {
+  var accountsRes = tochkaFetch('/open-banking/v1.0/accounts', { method: 'get' });
+  var accounts = (accountsRes.Data && accountsRes.Data.Account) || [];
+  accounts.forEach(function (acc) {
+    var res = tochkaFetch('/open-banking/v1.0/accounts/' + encodeURIComponent(acc.accountId) + '/authorized-card-transactions', { method: 'get' });
+    Logger.log('Счёт ' + acc.accountId + ':\n' + JSON.stringify(res, null, 2));
+  });
+}
+
+/**
+ * Определяем способ оплаты по данным транзакции.
+ * По документации Точки: transactionTypeCode «Банковские карты» = карта,
+ * «Денежный чек, РКО» / «Объявление на взнос наличными, ПКО» = наличные;
+ * schemeName счёта контрагента RU.CBR.PAN = карта, RU.CBR.CellphoneNumber = СБП по телефону.
+ * Остальное — эвристики по тексту назначения платежа.
+ */
+function classifyMethod(t) {
+  var ttc = String(t.transactionTypeCode || '');
+  if (/Банковские карты/i.test(ttc)) return 'card';
+  if (/Денежный чек|взнос наличными/i.test(ttc)) return 'cash';
+  var side = (t.creditDebitIndicator === 'Credit') ? t.DebtorAccount : t.CreditorAccount;
+  var scheme = (side && side.schemeName) || '';
+  if (scheme === 'RU.CBR.PAN') return 'card';
+  if (scheme === 'RU.CBR.CellphoneNumber') return 'sbp';
+  var p = String(t.description || '').toLowerCase();
+  if (/сбп|c2b|нспк|быстрых платежей|qr/.test(p)) return 'sbp';
+  if (/карт|терминал|pos/.test(p)) return 'card';
   if (/наличн|банкомат|atm/.test(p)) return 'cash';
   return 'account';
 }
@@ -376,32 +403,36 @@ function tochkaSync() {
     var stId = init.Data && init.Data.Statement && init.Data.Statement.statementId;
     if (!stId) { Logger.log('Не удалось создать выписку для ' + accountId); return; }
 
-    // 2) ждём готовности и забираем (до ~30 секунд)
+    // 2) ждём готовности (Created → Processing → Ready) и забираем, до ~50 секунд
     var st = null;
-    for (var i = 0; i < 6; i++) {
+    for (var i = 0; i < 10; i++) {
       Utilities.sleep(5000);
       var got = tochkaFetch('/open-banking/v1.0/accounts/' + encodeURIComponent(accountId) + '/statements/' + encodeURIComponent(stId), { method: 'get' });
-      st = got.Data && got.Data.Statement && got.Data.Statement[0];
-      if (st && st.status !== 'Processing') break;
+      var d = got.Data && got.Data.Statement;
+      st = (d && d.length !== undefined) ? d[0] : d; // спека допускает объект или массив
+      if (st && (st.status === 'Ready' || st.status === 'Error' || st.Transaction)) break;
     }
-    var txs = (st && st.Transaction) || [];
+    if (!st || st.status === 'Error') { Logger.log('Выписка не готова для ' + accountId + ': ' + (st && st.status)); return; }
+    var txs = st.Transaction || [];
 
-    // 3) добавляем новые операции
+    // 3) добавляем новые операции (только проведённые — Booked)
     txs.forEach(function (t) {
-      var bankId = t.transactionId || (t.documentNumber + '|' + t.Amount.amount + '|' + t.bookingDate);
+      if (t.status === 'Pending') return;
+      var bankId = t.transactionId || t.paymentId || ((t.documentNumber || '') + '|' + (t.Amount && t.Amount.amount) + '|' + t.documentProcessDate);
       if (known[bankId]) return;
       known[bankId] = true;
       var isIncome = (t.creditDebitIndicator === 'Credit');
-      var cp = t.DebtorParty && t.CreditorParty
-        ? (isIncome ? (t.DebtorParty.name || '') : (t.CreditorParty.name || ''))
-        : ((t.DebtorParty && t.DebtorParty.name) || (t.CreditorParty && t.CreditorParty.name) || '');
-      var purpose = t.description || t.paymentPurpose || '';
+      // по спеке: у входящей операции заполнен DebtorParty (кто прислал), у исходящей — CreditorParty (кому ушло)
+      var cp = isIncome
+        ? ((t.DebtorParty && t.DebtorParty.name) || '')
+        : ((t.CreditorParty && t.CreditorParty.name) || '');
+      var purpose = t.description || '';
       writeRow('finance', {
         id: newId(), unit: unit,
-        date: String(t.bookingDate || t.valueDate || fmt(new Date())).slice(0, 10),
+        date: String(t.documentProcessDate || fmt(new Date())).slice(0, 10),
         type: isIncome ? 'income' : 'expense',
         amount: Number(t.Amount && t.Amount.amount) || 0,
-        method: classifyMethod(purpose, cp),
+        method: classifyMethod(t),
         source: 'bank', category: isIncome ? 'Оплата клиента' : 'Прочее',
         counterparty: cp, comment: String(purpose).slice(0, 300),
         bankId: bankId, created: Date.now(), updated: Date.now()
