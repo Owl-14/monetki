@@ -421,6 +421,15 @@ function tochkaTest() {
 }
 
 /**
+ * Диагностика остатка: выполните вручную и пришлите содержимое журнала —
+ * там видно, какие балансы и с какими знаками отдаёт банк по каждому счёту.
+ */
+function tochkaBalances() {
+  var res = tochkaFetch('/open-banking/v1.0/balances', { method: 'get' });
+  Logger.log(JSON.stringify(res, null, 2));
+}
+
+/**
  * Свежие операции по корпоративным картам: маскированный номер карты (pan),
  * магазин и город. Именно так видно, ЧЬЕЙ картой сделана трата, пока она не
  * попала в выписку. Выполните вручную — результат в журнале.
@@ -563,19 +572,27 @@ function tochkaSyncInner(props, days) {
     });
   });
 
-  // Актуальный остаток по счетам — показывается на сайте в «Финансах»
+  // Актуальный остаток — по каждому счёту отдельно, с расшифровкой для сайта
   try {
     var balRes = tochkaFetch('/open-banking/v1.0/balances', { method: 'get' });
     var bals = (balRes.Data && balRes.Data.Balance) || [];
-    var pick = bals.filter(function (b) { return b.type === 'ClosingAvailable'; });
-    if (!pick.length) pick = bals.filter(function (b) { return b.type === 'Expected'; });
-    if (!pick.length) pick = bals;
-    var total = 0;
-    pick.forEach(function (b) {
-      var a = Number(b.Amount && b.Amount.amount) || 0;
-      total += (b.creditDebitIndicator === 'Debit') ? -a : a;
+    // на каждый счёт берём один баланс: ClosingAvailable, иначе Expected, иначе что есть
+    var byAcc = {};
+    bals.forEach(function (b) {
+      var key = String(b.accountId || '?');
+      var rank = { ClosingAvailable: 3, Expected: 2 }[b.type] || 1;
+      if (!byAcc[key] || rank > byAcc[key].rank) byAcc[key] = { rank: rank, b: b };
     });
-    props.setProperty('BANK_BALANCE', JSON.stringify({ amount: total, updated: new Date().toISOString() }));
+    var accountsOut = [];
+    var total = 0;
+    Object.keys(byAcc).forEach(function (key) {
+      var b = byAcc[key].b;
+      var a = Number(b.Amount && b.Amount.amount) || 0;
+      if (b.creditDebitIndicator === 'Debit') a = -a;
+      total += a;
+      accountsOut.push({ account: '…' + key.split('/')[0].slice(-4), amount: a, type: b.type });
+    });
+    props.setProperty('BANK_BALANCE', JSON.stringify({ amount: total, accounts: accountsOut, updated: new Date().toISOString() }));
   } catch (e) {
     Logger.log('Баланс не получен: ' + e.message);
   }

@@ -636,7 +636,7 @@ function finRow(f) {
       </div>
       <span class="badge ${f.source === 'bank' ? 'blue' : ''}">${f.source === 'bank' ? '🏦 банк' : '✍️ вручную'}${m ? ' · ' + m.name : ''}</span>
       <div class="amount ${f.type === 'income' ? 'green' : 'red'}">${f.type === 'income' ? '+' : '−'}${money(f.amount)}</div>
-      <button class="btn small ghost" data-flip="${f.id}" title="Перекинуть в «${UNITS[other].name}»">→${UNITS[other].emoji}</button>
+      <button class="btn small" data-flip="${f.id}" title="Перекинуть в «${UNITS[other].name}»">${UNITS[other].emoji}</button>
     </div>`;
 }
 
@@ -656,25 +656,32 @@ function viewFinance() {
   setTitle('Финансы');
   const units = activeUnits();
   const m = S.finMonth;
-  const list = (S.data.finance || []).filter((f) => units.includes(f.unit) && (f.date || '').startsWith(m)).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+  const period = S.finPeriod || 'month';
+  const inPeriod = (f) => period === 'all' || (f.date || '').startsWith(m);
+  const list = (S.data.finance || []).filter((f) => units.includes(f.unit) && inPeriod(f)).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
   const income = list.filter((f) => f.type === 'income').reduce((s, f) => s + Number(f.amount || 0), 0);
   const expense = list.filter((f) => f.type === 'expense').reduce((s, f) => s + Number(f.amount || 0), 0);
   const monthName = new Date(m + '-01').toLocaleDateString('ru-RU', { month: 'long', year: 'numeric' });
+  const periodName = period === 'all' ? 'всё время' : monthName;
   const pendingEx = (S.data.staffExpenses || []).filter((e) => e.status === 'pending');
 
   $('#view').innerHTML = `
     <div class="searchbar">
+      ${period === 'month' ? `
       <button class="btn small" id="m-prev">←</button>
       <span class="btn small ghost nowrap" style="cursor:default">${monthName}</span>
-      <button class="btn small" id="m-next">→</button>
+      <button class="btn small" id="m-next">→</button>` : ''}
+      <button class="btn small ${period === 'all' ? 'primary' : ''}" id="period-toggle">${period === 'all' ? '📅 показать по месяцам' : '∑ за всё время'}</button>
       <div class="grow"></div>
       <button class="btn primary" id="add-fin">+ Операция</button>
     </div>
     <div class="cards-row">
-      ${S.data.bankBalance ? `<div class="card stat"><div class="label">На счёте в банке</div><div class="value">${money(S.data.bankBalance.amount)}</div><div class="hint">обновлено ${fmtDT(new Date(S.data.bankBalance.updated).getTime())}</div></div>` : ''}
-      <div class="card stat"><div class="label">Доход</div><div class="value green">${money(income)}</div></div>
-      <div class="card stat"><div class="label">Расход</div><div class="value red">${money(expense)}</div></div>
-      <div class="card stat"><div class="label">Итог за ${monthName}</div><div class="value ${income - expense >= 0 ? 'green' : 'red'}">${money(income - expense)}</div></div>
+      ${S.data.bankBalance ? `<div class="card stat"><div class="label">На счёте в банке</div><div class="value">${money(S.data.bankBalance.amount)}</div>
+        ${(S.data.bankBalance.accounts || []).length > 1 ? S.data.bankBalance.accounts.map((a) => `<div class="hint">счёт ${esc(a.account)}: ${money(a.amount)}</div>`).join('') : ''}
+        <div class="hint">обновлено ${fmtDT(new Date(S.data.bankBalance.updated).getTime())}</div></div>` : ''}
+      <div class="card stat"><div class="label">Доход</div><div class="value green">${money(income)}</div><div class="hint">${periodName}</div></div>
+      <div class="card stat"><div class="label">Расход</div><div class="value red">${money(expense)}</div><div class="hint">${periodName}</div></div>
+      <div class="card stat"><div class="label">Итог</div><div class="value ${income - expense >= 0 ? 'green' : 'red'}">${money(income - expense)}</div><div class="hint">${periodName}</div></div>
     </div>
     ${pendingEx.length ? `
     <div class="card" style="margin-bottom:14px">
@@ -690,14 +697,15 @@ function viewFinance() {
       </div>
       <p class="muted small" style="margin-bottom:0">«Наличкой» — расход добавится в финансы автоматически. «Со счёта» — расход придёт из выписки банка сам.</p>
     </div>` : ''}
-    <div class="list">${list.length ? list.map(finRow).join('') : `<div class="card empty"><div class="big">💸</div>Операций за ${monthName} нет</div>`}</div>`;
+    <div class="list">${list.length ? list.map(finRow).join('') : `<div class="card empty"><div class="big">💸</div>Операций за ${periodName} нет</div>`}</div>`;
 
   const shift = (dir) => {
     const d = new Date(S.finMonth + '-01'); d.setMonth(d.getMonth() + dir);
     S.finMonth = d.toISOString().slice(0, 7); render();
   };
-  $('#m-prev').addEventListener('click', () => shift(-1));
-  $('#m-next').addEventListener('click', () => shift(1));
+  $('#m-prev')?.addEventListener('click', () => shift(-1));
+  $('#m-next')?.addEventListener('click', () => shift(1));
+  $('#period-toggle').addEventListener('click', () => { S.finPeriod = (S.finPeriod === 'all') ? 'month' : 'all'; render(); });
   $('#add-fin').addEventListener('click', () => openFinForm());
   bindFinRows($('#view'));
   const resolve = async (id, how) => {
