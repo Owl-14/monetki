@@ -216,6 +216,7 @@ function bootstrap(u) {
       players: unitFilter(readAll('players')),
       tasks: unitFilter(readAll('tasks')),
       finance: admin ? readAll('finance') : [],
+      bankBalance: admin ? JSON.parse(PropertiesService.getScriptProperties().getProperty('BANK_BALANCE') || 'null') : null,
       notifications: readAll('notifications').filter(function (n) { return n.toId === u.id; })
     }
   };
@@ -323,7 +324,8 @@ function statusInfo() {
     hourlyTrigger: hourly,
     financeTotal: fin.length,
     financeFromBank: fin.filter(function (f) { return f.source === 'bank'; }).length,
-    lastSync: props.getProperty('LAST_SYNC') || null
+    lastSync: props.getProperty('LAST_SYNC') || null,
+    balanceUpdated: (JSON.parse(props.getProperty('BANK_BALANCE') || 'null') || {}).updated || null
   };
 }
 
@@ -419,18 +421,26 @@ function enableHourlySync() {
   tochkaSync();
 }
 
-/** Забирает операции за последние 7 дней и дописывает новые в «Финансы». */
+/**
+ * Забирает операции из банка и дописывает новые в «Финансы».
+ * Глубина по умолчанию — 30 дней (можно поменять свойством TOCHKA_DAYS).
+ */
 function tochkaSync() {
   var props = PropertiesService.getScriptProperties();
   try {
-    tochkaSyncInner(props);
+    tochkaSyncInner(props, Number(props.getProperty('TOCHKA_DAYS')) || 30);
   } catch (err) {
     props.setProperty('LAST_SYNC', new Date().toISOString() + ' | ОШИБКА: ' + err.message);
     throw err;
   }
 }
 
-function tochkaSyncInner(props) {
+/** Первичная загрузка истории: операции за последние 180 дней + баланс. Запустите вручную один раз. */
+function tochkaFirstLoad() {
+  tochkaSyncInner(PropertiesService.getScriptProperties(), 180);
+}
+
+function tochkaSyncInner(props, days) {
   var unit = props.getProperty('TOCHKA_UNIT') || 'dev';
 
   var accountsRes = tochkaFetch('/open-banking/v1.0/accounts', { method: 'get' });
@@ -438,13 +448,18 @@ function tochkaSyncInner(props) {
   if (!accounts.length) { Logger.log('Счета не найдены'); return; }
 
   var end = new Date();
-  var start = new Date(end.getTime() - 7 * 864e5);
+  var start = new Date(end.getTime() - days * 864e5);
   var fmt = function (d) { return Utilities.formatDate(d, 'Europe/Moscow', 'yyyy-MM-dd'); };
 
   var existing = readAll('finance');
   var known = {};
   existing.forEach(function (f) { if (f.bankId) known[f.bankId] = true; });
   var addedTotal = 0;
+  var pendingSkipped = 0;
+
+  // свои счета — чтобы переводы между ними не считались доходом/расходом бизнеса
+  var ownAccounts = {};
+  accounts.forEach(function (a) { ownAccounts[String(a.accountId).split('/')[0]] = true; });
 
   accounts.forEach(function (acc) {
     var accountId = acc.accountId;
@@ -456,9 +471,9 @@ function tochkaSyncInner(props) {
     var stId = init.Data && init.Data.Statement && init.Data.Statement.statementId;
     if (!stId) { Logger.log('Не удалось создать выписку для ' + accountId); return; }
 
-    // 2) ждём готовности (Created → Processing → Ready) и забираем, до ~50 секунд
+    // 2) ждём готовности (Created → Processing → Ready) и забираем, до ~90 секунд
     var st = null;
-    for (var i = 0; i < 10; i++) {
+    for (var i = 0; i < 18; i++) {
       Utilities.sleep(5000);
       var got = tochkaFetch('/open-banking/v1.0/accounts/' + encodeURIComponent(accountId) + '/statements/' + encodeURIComponent(stId), { method: 'get' });
       var d = got.Data && got.Data.Statement;
@@ -470,7 +485,7 @@ function tochkaSyncInner(props) {
 
     // 3) добавляем новые операции (только проведённые — Booked)
     txs.forEach(function (t) {
-      if (t.status === 'Pending') return;
+      if (t.status === 'Pending') { pendingSkipped++; return; }
       var bankId = t.transactionId || t.paymentId || ((t.documentNumber || '') + '|' + (t.Amount && t.Amount.amount) + '|' + t.documentProcessDate);
       if (known[bankId]) return;
       known[bankId] = true;
@@ -479,6 +494,11 @@ function tochkaSyncInner(props) {
       var cp = isIncome
         ? ((t.DebtorParty && t.DebtorParty.name) || '')
         : ((t.CreditorParty && t.CreditorParty.name) || '');
+      // перевод между своими счетами — не доход и не расход бизнеса, помечаем отдельно
+      var otherAcc = isIncome
+        ? (t.DebtorAccount && t.DebtorAccount.identification)
+        : (t.CreditorAccount && t.CreditorAccount.identification);
+      var isInternal = otherAcc && ownAccounts[String(otherAcc).split('/')[0]];
       var purpose = t.description || '';
       writeRow('finance', {
         id: newId(), unit: unit,
@@ -486,13 +506,33 @@ function tochkaSyncInner(props) {
         type: isIncome ? 'income' : 'expense',
         amount: Number(t.Amount && t.Amount.amount) || 0,
         method: classifyMethod(t),
-        source: 'bank', category: isIncome ? 'Оплата клиента' : 'Прочее',
+        source: 'bank',
+        category: isInternal ? 'Перевод между счетами' : (isIncome ? 'Оплата клиента' : 'Прочее'),
         counterparty: cp, comment: String(purpose).slice(0, 300),
         bankId: bankId, created: Date.now(), updated: Date.now()
       });
       addedTotal++;
     });
   });
+
+  // Актуальный остаток по счетам — показывается на сайте в «Финансах»
+  try {
+    var balRes = tochkaFetch('/open-banking/v1.0/balances', { method: 'get' });
+    var bals = (balRes.Data && balRes.Data.Balance) || [];
+    var pick = bals.filter(function (b) { return b.type === 'ClosingAvailable'; });
+    if (!pick.length) pick = bals.filter(function (b) { return b.type === 'Expected'; });
+    if (!pick.length) pick = bals;
+    var total = 0;
+    pick.forEach(function (b) {
+      var a = Number(b.Amount && b.Amount.amount) || 0;
+      total += (b.creditDebitIndicator === 'Debit') ? -a : a;
+    });
+    props.setProperty('BANK_BALANCE', JSON.stringify({ amount: total, updated: new Date().toISOString() }));
+  } catch (e) {
+    Logger.log('Баланс не получен: ' + e.message);
+  }
+
+  if (pendingSkipped) Logger.log('Операций ещё в обработке (появятся позже): ' + pendingSkipped);
   props.setProperty('LAST_SYNC', new Date().toISOString() + ' | добавлено операций: ' + addedTotal);
   Logger.log('Добавлено операций: ' + addedTotal);
 }

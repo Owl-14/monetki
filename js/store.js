@@ -39,7 +39,7 @@ export const FIN_METHODS = [
 ];
 
 export const FIN_CATEGORIES = [
-  'Оплата клиента', 'Аренда', 'Зарплата', 'Реклама', 'Инвентарь', 'Сервисы', 'Налоги', 'Прочее'
+  'Оплата клиента', 'Аренда', 'Зарплата', 'Реклама', 'Инвентарь', 'Сервисы', 'Налоги', 'Перевод между счетами', 'Прочее'
 ];
 
 export const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
@@ -126,6 +126,7 @@ class LocalStore {
         players: db.players.filter((p) => canSee(p.unit)),
         tasks: db.tasks.filter((t) => canSee(t.unit)),
         finance: isAdmin ? db.finance : [],
+        bankBalance: isAdmin ? { amount: 175000, updated: new Date().toISOString() } : null,
         notifications: db.notifications.filter((n) => n.toId === u.id)
       }
     };
@@ -238,6 +239,8 @@ class RemoteStore {
 
 export function makeStore() {
   const cfg = window.MONETKI_CONFIG || {};
-  const url = (localStorage.getItem('monetki_backend') || cfg.backendUrl || '').trim();
+  const override = (localStorage.getItem('monetki_backend') || '').trim();
+  if (override === 'demo') return new LocalStore(); // служебный режим для тестирования интерфейса
+  const url = override || (cfg.backendUrl || '').trim();
   return url ? new RemoteStore(url) : new LocalStore();
 }

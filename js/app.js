@@ -253,7 +253,9 @@ function viewDashboard() {
     padelStat = `<div class="card stat"><div class="label">Игроков в базе</div><div class="value">${(S.data.players || []).length}</div><div class="hint">падел</div></div>`;
   }
 
+  const bb = S.data.bankBalance;
   const finCards = isAdmin() ? `
+    ${bb ? `<div class="card stat"><div class="label">На счёте в банке</div><div class="value">${money(bb.amount)}</div><div class="hint">обновлено ${fmtDT(new Date(bb.updated).getTime())}</div></div>` : ''}
     <div class="card stat"><div class="label">Доход за месяц</div><div class="value green">${money(income)}</div></div>
     <div class="card stat"><div class="label">Расход за месяц</div><div class="value red">${money(expense)}</div></div>
     <div class="card stat"><div class="label">Итог</div><div class="value ${income - expense >= 0 ? 'green' : 'red'}">${money(income - expense)}</div></div>` : '';
@@ -273,7 +275,7 @@ function viewDashboard() {
     ${lastOps.length ? `<div class="section-title">Последние операции</div><div class="list">${lastOps.map(finRow).join('')}</div>` : ''}
   `;
   bindTaskRows();
-  $('#view').querySelectorAll('[data-fin]').forEach((el) => el.addEventListener('click', () => openFinForm((S.data.finance || []).find((f) => f.id === el.dataset.fin))));
+  bindFinRows($('#view'));
 }
 
 // ---------- Задачи ----------
@@ -585,6 +587,7 @@ function openImportPlayers() {
 function finRow(f) {
   const m = FIN_METHODS.find((x) => x.id === f.method);
   const unitTag = activeUnits().length > 1 ? `${UNITS[f.unit]?.emoji || ''} ` : '';
+  const other = f.unit === 'padel' ? 'dev' : 'padel';
   return `
     <div class="row-card" data-fin="${f.id}">
       <div class="grow col">
@@ -593,7 +596,19 @@ function finRow(f) {
       </div>
       <span class="badge ${f.source === 'bank' ? 'blue' : ''}">${f.source === 'bank' ? '🏦 банк' : '✍️ вручную'}${m ? ' · ' + m.name : ''}</span>
       <div class="amount ${f.type === 'income' ? 'green' : 'red'}">${f.type === 'income' ? '+' : '−'}${money(f.amount)}</div>
+      <button class="btn small ghost" data-flip="${f.id}" title="Перекинуть в «${UNITS[other].name}»">→${UNITS[other].emoji}</button>
     </div>`;
+}
+
+function bindFinRows(root) {
+  root.querySelectorAll('[data-fin]').forEach((el) => el.addEventListener('click', () => openFinForm((S.data.finance || []).find((f) => f.id === el.dataset.fin))));
+  root.querySelectorAll('[data-flip]').forEach((el) => el.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    const f = (S.data.finance || []).find((x) => x.id === el.dataset.flip);
+    if (!f) return;
+    const other = f.unit === 'padel' ? 'dev' : 'padel';
+    await mutate(() => S.store.update(S.token, 'finance', { ...f, unit: other }), `Перенесено в «${UNITS[other].name}»`);
+  }));
 }
 
 function viewFinance() {
@@ -615,9 +630,10 @@ function viewFinance() {
       <button class="btn primary" id="add-fin">+ Операция</button>
     </div>
     <div class="cards-row">
+      ${S.data.bankBalance ? `<div class="card stat"><div class="label">На счёте в банке</div><div class="value">${money(S.data.bankBalance.amount)}</div><div class="hint">обновлено ${fmtDT(new Date(S.data.bankBalance.updated).getTime())}</div></div>` : ''}
       <div class="card stat"><div class="label">Доход</div><div class="value green">${money(income)}</div></div>
       <div class="card stat"><div class="label">Расход</div><div class="value red">${money(expense)}</div></div>
-      <div class="card stat"><div class="label">Итог</div><div class="value ${income - expense >= 0 ? 'green' : 'red'}">${money(income - expense)}</div></div>
+      <div class="card stat"><div class="label">Итог за ${monthName}</div><div class="value ${income - expense >= 0 ? 'green' : 'red'}">${money(income - expense)}</div></div>
     </div>
     ${S.store.demo ? '' : `<div class="banner">🏦 Выписка из Точки подтягивается автоматически, если настроена синхронизация (SETUP.md, шаг 4).</div>`}
     <div class="list">${list.length ? list.map(finRow).join('') : `<div class="card empty"><div class="big">💸</div>Операций за ${monthName} нет</div>`}</div>`;
@@ -629,7 +645,7 @@ function viewFinance() {
   $('#m-prev').addEventListener('click', () => shift(-1));
   $('#m-next').addEventListener('click', () => shift(1));
   $('#add-fin').addEventListener('click', () => openFinForm());
-  $('#view').querySelectorAll('[data-fin]').forEach((el) => el.addEventListener('click', () => openFinForm((S.data.finance || []).find((f) => f.id === el.dataset.fin))));
+  bindFinRows($('#view'));
 }
 
 function openFinForm(f) {

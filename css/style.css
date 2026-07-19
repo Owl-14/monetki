@@ -176,6 +176,11 @@ label.field > span { display: block; font-size: 13px; font-weight: 600; color: v
 .row-card.done { opacity: .55; }
 .row-card.overdue { border-left: 3px solid var(--red); }
 
+@media (max-width: 560px) {
+  .row-card { flex-wrap: wrap; }
+  .row-card .grow { flex-basis: 100%; }
+}
+
 .empty { text-align: center; color: var(--muted); padding: 36px 16px; }
 .empty .big { font-size: 34px; margin-bottom: 8px; }
 
