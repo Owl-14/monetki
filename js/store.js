@@ -39,7 +39,7 @@ export const FIN_METHODS = [
 ];
 
 export const FIN_CATEGORIES = [
-  'Оплата клиента', 'Аренда', 'Зарплата', 'Реклама', 'Инвентарь', 'Сервисы', 'Налоги', 'Перевод между счетами', 'Прочее'
+  'Оплата клиента', 'Аренда', 'Зарплата', 'Компенсация сотруднику', 'Реклама', 'Инвентарь', 'Сервисы', 'Налоги', 'Перевод между счетами', 'Прочее'
 ];
 
 export const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
@@ -73,7 +73,11 @@ function seedData() {
       { id: uid(), unit: 'dev', title: 'Показать макет кофейне «Зерно»', desc: '', assigneeId: 'u-dasha', authorId: 'u-admin', status: 'new', priority: 'normal', due: d(2), created: now, updated: now, comments: [] },
       { id: uid(), unit: 'dev', title: 'Выставить счёт барбершопу', desc: 'После согласования КП.', assigneeId: 'u-admin', authorId: 'u-admin', status: 'new', priority: 'low', due: d(5), created: now, updated: now, comments: [] }
     ],
+    staffExpenses: [
+      { id: uid(), employeeId: 'u-oleg', unit: 'padel', date: d(-1), amount: 500, title: 'Бананы и вода на турнир', status: 'pending', created: now, updated: now }
+    ],
     finance: [
+      { id: uid(), unit: 'padel', date: d(-1), type: 'expense', amount: 30000, method: 'cash', source: 'manual', category: 'Зарплата', counterparty: 'Олег (падел)', comment: 'Зарплата за месяц', bankId: '', employeeId: 'u-oleg' },
       { id: uid(), unit: 'dev', date: d(-2), type: 'income', amount: 60000, method: 'account', source: 'manual', category: 'Оплата клиента', counterparty: 'Кофейня «Зерно»', comment: 'Предоплата 50% за сайт', bankId: '' },
       { id: uid(), unit: 'padel', date: d(-3), type: 'income', amount: 24000, method: 'sbp', source: 'manual', category: 'Оплата клиента', counterparty: 'Взносы игроков', comment: 'Турнир 12 участников × 2000', bankId: '' },
       { id: uid(), unit: 'padel', date: d(-3), type: 'expense', amount: 14000, method: 'card', source: 'manual', category: 'Аренда', counterparty: 'Padel Arena', comment: 'Корты на турнир', bankId: '' },
@@ -92,8 +96,11 @@ class LocalStore {
   constructor() { this.demo = true; }
   _db() {
     let raw = localStorage.getItem(LS_KEY);
-    if (!raw) { const db = seedData(); localStorage.setItem(LS_KEY, JSON.stringify(db)); return db; }
-    try { return JSON.parse(raw); } catch { const db = seedData(); localStorage.setItem(LS_KEY, JSON.stringify(db)); return db; }
+    let db;
+    if (!raw) { db = seedData(); localStorage.setItem(LS_KEY, JSON.stringify(db)); return db; }
+    try { db = JSON.parse(raw); } catch { db = seedData(); localStorage.setItem(LS_KEY, JSON.stringify(db)); }
+    if (!db.staffExpenses) db.staffExpenses = [];
+    return db;
   }
   _save(db) { localStorage.setItem(LS_KEY, JSON.stringify(db)); }
 
@@ -125,7 +132,8 @@ class LocalStore {
         venues: db.venues.filter((v) => canSee(v.unit)),
         players: db.players.filter((p) => canSee(p.unit)),
         tasks: db.tasks.filter((t) => canSee(t.unit)),
-        finance: isAdmin ? db.finance : [],
+        finance: isAdmin ? db.finance : db.finance.filter((f) => f.employeeId === u.id),
+        staffExpenses: isAdmin ? db.staffExpenses : db.staffExpenses.filter((e) => e.employeeId === u.id),
         bankBalance: isAdmin ? { amount: 175000, updated: new Date().toISOString() } : null,
         notifications: db.notifications.filter((n) => n.toId === u.id)
       }
@@ -139,10 +147,20 @@ class LocalStore {
     if (entity === 'finance' && u.role !== 'admin') return { ok: false, error: 'Только для админа' };
     item = { ...item, id: item.id || uid(), created: Date.now(), updated: Date.now() };
     if (entity === 'employees' && !item.code) item.code = String(Math.floor(100000 + Math.random() * 900000));
+    if (entity === 'staffExpenses') {
+      if (u.role !== 'admin') { item.employeeId = u.id; item.unit = u.unit === 'all' ? (item.unit || 'padel') : u.unit; }
+      item.status = item.status || 'pending';
+      db.employees.filter((e) => e.role === 'admin' && e.active && e.id !== u.id)
+        .forEach((a) => db.notifications.push({ id: uid(), toId: a.id, text: `${u.name}: трата ${item.amount} ₽ — ${item.title}`, link: '#/finance', read: false, created: Date.now() }));
+    }
     db[entity].push(item);
     // уведомление исполнителю при постановке задачи
     if (entity === 'tasks' && item.assigneeId && item.assigneeId !== u.id) {
       db.notifications.push({ id: uid(), toId: item.assigneeId, text: `Новая задача: ${item.title}`, link: '#/tasks', read: false, created: Date.now() });
+    }
+    // уведомление сотруднику о выплате
+    if (entity === 'finance' && item.employeeId) {
+      db.notifications.push({ id: uid(), toId: item.employeeId, text: `Вам ${item.category === 'Зарплата' ? 'начислена зарплата' : 'проведена выплата'}: ${item.amount} ₽`, link: '#/money', read: false, created: Date.now() });
     }
     this._save(db);
     return { ok: true, item };
@@ -204,6 +222,23 @@ class LocalStore {
     return { ok: true, added };
   }
 
+  async resolveExpense(token, id, how) {
+    const u = this._user(token); if (!u || u.role !== 'admin') return { ok: false, error: 'Только для админа' };
+    const db = this._db();
+    const ex = db.staffExpenses.find((x) => x.id === id);
+    if (!ex) return { ok: false, error: 'Не найдено' };
+    if (ex.status !== 'pending') return { ok: false, error: 'Уже возвращено' };
+    ex.status = how === 'cash' ? 'returned_cash' : 'returned_bank';
+    ex.updated = Date.now();
+    const emp = db.employees.find((e) => e.id === ex.employeeId);
+    if (how === 'cash') {
+      db.finance.push({ id: uid(), unit: ex.unit, date: new Date().toISOString().slice(0, 10), type: 'expense', amount: ex.amount, method: 'cash', source: 'manual', category: 'Компенсация сотруднику', counterparty: emp ? emp.name : '', comment: ex.title, bankId: '', employeeId: ex.employeeId });
+    }
+    db.notifications.push({ id: uid(), toId: ex.employeeId, text: `Вам вернули ${ex.amount} ₽ (${how === 'cash' ? 'наличными' : 'со счёта'}) — ${ex.title}`, link: '#/money', read: false, created: Date.now() });
+    this._save(db);
+    return { ok: true, item: ex };
+  }
+
   async markRead(token, ids) {
     const u = this._user(token); if (!u) return { ok: false, error: 'auth' };
     const db = this._db();
@@ -235,6 +270,7 @@ class RemoteStore {
   addComment(token, taskId, text) { return this._call({ action: 'comment', token, taskId, text }); }
   importPlayers(token, rows) { return this._call({ action: 'import_players', token, rows }); }
   markRead(token, ids) { return this._call({ action: 'mark_read', token, ids }); }
+  resolveExpense(token, id, how) { return this._call({ action: 'resolve_expense', token, id, how }); }
 }
 
 export function makeStore() {

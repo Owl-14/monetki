@@ -18,13 +18,16 @@ var SHEETS = {
   venues:        ['id', 'unit', 'name', 'address', 'contact', 'phone', 'price', 'status', 'notes', 'created', 'updated'],
   players:       ['id', 'unit', 'name', 'phone', 'level', 'city', 'notes', 'created', 'updated'],
   tasks:         ['id', 'unit', 'title', 'desc', 'assigneeId', 'authorId', 'status', 'priority', 'due', 'created', 'updated', 'comments'],
-  finance:       ['id', 'unit', 'date', 'type', 'amount', 'method', 'source', 'category', 'counterparty', 'comment', 'bankId', 'created', 'updated'],
+  // employeeId — в конце, чтобы старые строки таблицы не сдвигались
+  finance:       ['id', 'unit', 'date', 'type', 'amount', 'method', 'source', 'category', 'counterparty', 'comment', 'bankId', 'created', 'updated', 'employeeId'],
+  staffExpenses: ['id', 'employeeId', 'unit', 'date', 'amount', 'title', 'status', 'created', 'updated'],
   notifications: ['id', 'toId', 'text', 'link', 'read', 'created']
 };
 
 var RU_SHEET_NAMES = {
   employees: 'Сотрудники', clients: 'Клиенты', venues: 'Площадки',
-  players: 'Игроки', tasks: 'Задачи', finance: 'Финансы', notifications: 'Уведомления'
+  players: 'Игроки', tasks: 'Задачи', finance: 'Финансы',
+  staffExpenses: 'Траты сотрудников', notifications: 'Уведомления'
 };
 
 // ---------- Первичная настройка ----------
@@ -43,10 +46,9 @@ function setup() {
   Object.keys(SHEETS).forEach(function (key) {
     var name = RU_SHEET_NAMES[key];
     var sheet = ss.getSheetByName(name) || ss.insertSheet(name);
-    if (sheet.getLastRow() === 0) {
-      sheet.appendRow(SHEETS[key]);
-      sheet.setFrozenRows(1);
-    }
+    // всегда обновляем строку заголовков — так добавляются новые колонки без потери данных
+    sheet.getRange(1, 1, 1, SHEETS[key].length).setValues([SHEETS[key]]);
+    sheet.setFrozenRows(1);
   });
   var def = ss.getSheetByName('Лист1') || ss.getSheetByName('Sheet1');
   if (def && ss.getSheets().length > 1) ss.deleteSheet(def);
@@ -190,6 +192,7 @@ function doPost(e) {
       case 'comment':        return json(addComment(user, body.taskId, body.text));
       case 'import_players': return json(importPlayers(user, body.rows));
       case 'mark_read':      return json(markRead(user, body.ids));
+      case 'resolve_expense': return json(resolveExpense(user, body.id, body.how));
       default:               return json({ ok: false, error: 'Неизвестное действие' });
     }
   } catch (err) {
@@ -215,7 +218,8 @@ function bootstrap(u) {
       venues: unitFilter(readAll('venues')),
       players: unitFilter(readAll('players')),
       tasks: unitFilter(readAll('tasks')),
-      finance: admin ? readAll('finance') : [],
+      finance: admin ? readAll('finance') : readAll('finance').filter(function (f) { return f.employeeId === u.id; }),
+      staffExpenses: admin ? readAll('staffExpenses') : readAll('staffExpenses').filter(function (e) { return e.employeeId === u.id; }),
       bankBalance: admin ? JSON.parse(PropertiesService.getScriptProperties().getProperty('BANK_BALANCE') || 'null') : null,
       notifications: readAll('notifications').filter(function (n) { return n.toId === u.id; })
     }
@@ -244,6 +248,17 @@ function createItem(u, entity, item) {
     item.comments = item.comments || [];
     if (item.assigneeId && item.assigneeId !== u.id) notify(item.assigneeId, 'Новая задача: ' + item.title);
   }
+  if (entity === 'staffExpenses') {
+    // сотрудник может заводить траты только на себя и в своём направлении
+    if (!isAdmin(u)) { item.employeeId = u.id; item.unit = (u.unit === 'all') ? (item.unit || 'padel') : u.unit; }
+    item.status = item.status || 'pending';
+    readAll('employees').forEach(function (a) {
+      if (a.role === 'admin' && a.active && a.id !== u.id) notify(a.id, u.name + ': трата ' + item.amount + ' ₽ — ' + item.title, '#/finance');
+    });
+  }
+  if (entity === 'finance' && item.employeeId) {
+    notify(item.employeeId, 'Вам ' + (item.category === 'Зарплата' ? 'начислена зарплата' : 'проведена выплата') + ': ' + item.amount + ' ₽', '#/money');
+  }
   writeRow(entity, item);
   return { ok: true, item: item };
 }
@@ -254,6 +269,12 @@ function updateItem(u, entity, item) {
   var before = readAll(entity).filter(function (x) { return x.id === item.id; })[0];
   if (!before) return { ok: false, error: 'Не найдено' };
   if (!canSeeUnit(u, before.unit || item.unit)) return { ok: false, error: 'Нет доступа' };
+  if (entity === 'staffExpenses' && !isAdmin(u)) {
+    if (before.employeeId !== u.id) return { ok: false, error: 'Нет доступа' };
+    if (before.status !== 'pending') return { ok: false, error: 'Эта трата уже возвращена' };
+    item.employeeId = u.id;
+    item.status = 'pending';
+  }
   var merged = {};
   SHEETS[entity].forEach(function (c) { merged[c] = (item[c] !== undefined) ? item[c] : before[c]; });
   merged.updated = Date.now();
@@ -274,8 +295,34 @@ function deleteItem(u, entity, id) {
   if (!before) return { ok: false, error: 'Не найдено' };
   var deny = checkWriteAccess(u, entity, before);
   if (deny) return { ok: false, error: deny };
+  if (entity === 'staffExpenses' && !isAdmin(u) && (before.employeeId !== u.id || before.status !== 'pending')) {
+    return { ok: false, error: 'Нет доступа' };
+  }
   deleteRow(entity, id);
   return { ok: true };
+}
+
+/** Админ отмечает трату сотрудника возвращённой: наличкой (расход создаётся сам) или со счёта (расход придёт из банка). */
+function resolveExpense(u, id, how) {
+  if (!isAdmin(u)) return { ok: false, error: 'Только для админа' };
+  var ex = readAll('staffExpenses').filter(function (x) { return x.id === id; })[0];
+  if (!ex) return { ok: false, error: 'Не найдено' };
+  if (ex.status !== 'pending') return { ok: false, error: 'Уже возвращено' };
+  ex.status = (how === 'cash') ? 'returned_cash' : 'returned_bank';
+  ex.updated = Date.now();
+  updateRow('staffExpenses', ex);
+  if (how === 'cash') {
+    var emp = readAll('employees').filter(function (e) { return e.id === ex.employeeId; })[0];
+    writeRow('finance', {
+      id: newId(), unit: ex.unit,
+      date: Utilities.formatDate(new Date(), 'Europe/Moscow', 'yyyy-MM-dd'),
+      type: 'expense', amount: ex.amount, method: 'cash', source: 'manual',
+      category: 'Компенсация сотруднику', counterparty: emp ? emp.name : '',
+      comment: ex.title, bankId: '', created: Date.now(), updated: Date.now(), employeeId: ex.employeeId
+    });
+  }
+  notify(ex.employeeId, 'Вам вернули ' + ex.amount + ' ₽ (' + (how === 'cash' ? 'наличными' : 'со счёта') + ') — ' + ex.title, '#/money');
+  return { ok: true, item: ex };
 }
 
 function addComment(u, taskId, text) {
@@ -324,6 +371,7 @@ function statusInfo() {
     hourlyTrigger: hourly,
     financeTotal: fin.length,
     financeFromBank: fin.filter(function (f) { return f.source === 'bank'; }).length,
+    staffExpensesPending: readAll('staffExpenses').filter(function (e) { return e.status === 'pending'; }).length,
     lastSync: props.getProperty('LAST_SYNC') || null,
     balanceUpdated: (JSON.parse(props.getProperty('BANK_BALANCE') || 'null') || {}).updated || null
   };

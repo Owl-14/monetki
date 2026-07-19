@@ -85,11 +85,40 @@ function maybeSystemNotify(prevUnreadIds) {
   });
 }
 
-async function mutate(fn, okText) {
-  const res = await fn();
+// Быстрые изменения: применяем к данным на экране сразу, не дожидаясь полной
+// перезагрузки базы (сверка с сервером происходит фоновым refresh'ем).
+function applyLocal(entity, op, itemOrId) {
+  if (!S.data) return;
+  const arr = S.data[entity] || (S.data[entity] = []);
+  if (op === 'create') arr.push(itemOrId);
+  if (op === 'update') { const i = arr.findIndex((x) => x.id === itemOrId.id); if (i >= 0) arr[i] = itemOrId; else arr.push(itemOrId); }
+  if (op === 'delete') S.data[entity] = arr.filter((x) => x.id !== itemOrId);
+}
+
+async function doCreate(entity, item, okText) {
+  const res = await S.store.create(S.token, entity, item);
   if (!res.ok) { toast(res.error || 'Ошибка', true); return null; }
+  applyLocal(entity, 'create', res.item || item);
   if (okText) toast(okText);
-  await refresh(true);
+  render();
+  return res;
+}
+
+async function doUpdate(entity, item, okText) {
+  applyLocal(entity, 'update', item);
+  render();
+  if (okText) toast(okText);
+  const res = await S.store.update(S.token, entity, item);
+  if (!res.ok) { toast(res.error || 'Ошибка', true); refresh(true); return null; }
+  return res;
+}
+
+async function doDelete(entity, id, okText) {
+  applyLocal(entity, 'delete', id);
+  render();
+  if (okText) toast(okText);
+  const res = await S.store.remove(S.token, entity, id);
+  if (!res.ok) { toast(res.error || 'Ошибка', true); refresh(true); return null; }
   return res;
 }
 
@@ -101,7 +130,7 @@ function logout() {
 }
 
 // ---------- Роутер ----------
-const routes = ['dashboard', 'tasks', 'clients', 'venues', 'players', 'finance', 'team', 'settings', 'login'];
+const routes = ['dashboard', 'tasks', 'clients', 'venues', 'players', 'finance', 'money', 'team', 'settings', 'login'];
 function currentRoute() {
   const r = (location.hash || '').replace('#/', '').split('?')[0];
   return routes.includes(r) ? r : 'dashboard';
@@ -115,6 +144,7 @@ function navItems() {
     { r: 'dashboard', ico: '🏠', label: 'Дашборд' },
     { r: 'tasks', ico: '✅', label: 'Задачи', badge: (S.data?.tasks || []).filter((t) => t.assigneeId === S.profile.id && t.status !== 'done').length || '' }
   ];
+  if (!isAdmin()) items.push({ r: 'money', ico: '💰', label: 'Деньги' });
   if (units.includes('dev')) items.push({ r: 'clients', ico: '🤝', label: 'Клиенты' });
   if (units.includes('padel')) {
     items.push({ r: 'venues', ico: '🏟️', label: 'Площадки' });
@@ -184,7 +214,7 @@ function render() {
   }));
   $('#bell').addEventListener('click', showNotifications);
 
-  const views = { dashboard: viewDashboard, tasks: viewTasks, clients: viewClients, venues: viewVenues, players: viewPlayers, finance: viewFinance, team: viewTeam, settings: viewSettings };
+  const views = { dashboard: viewDashboard, tasks: viewTasks, clients: viewClients, venues: viewVenues, players: viewPlayers, finance: viewFinance, money: viewMoney, team: viewTeam, settings: viewSettings };
   (views[route] || viewDashboard)();
 }
 
@@ -253,6 +283,8 @@ function viewDashboard() {
     padelStat = `<div class="card stat"><div class="label">Игроков в базе</div><div class="value">${(S.data.players || []).length}</div><div class="hint">падел</div></div>`;
   }
 
+  const staffPaid = !isAdmin() ? (S.data.finance || []).filter((f) => (f.date || '').startsWith(month)).reduce((s, f) => s + Number(f.amount || 0), 0) : 0;
+  const staffCard = !isAdmin() ? `<div class="card stat"><div class="label">Выплачено мне за месяц</div><div class="value green">${money(staffPaid)}</div><div class="hint">подробнее — в «Деньгах»</div></div>` : '';
   const bb = S.data.bankBalance;
   const finCards = isAdmin() ? `
     ${bb ? `<div class="card stat"><div class="label">На счёте в банке</div><div class="value">${money(bb.amount)}</div><div class="hint">обновлено ${fmtDT(new Date(bb.updated).getTime())}</div></div>` : ''}
@@ -266,7 +298,7 @@ function viewDashboard() {
   $('#view').innerHTML = `
     <div class="cards-row">
       <div class="card stat"><div class="label">Мои задачи</div><div class="value">${mine.length}</div>${overdue.length ? `<div class="hint" style="color:var(--red)">${overdue.length} просрочено</div>` : '<div class="hint">активных</div>'}</div>
-      ${clientsStat}${padelStat}${finCards}
+      ${clientsStat}${padelStat}${staffCard}${finCards}
     </div>
     <div class="section-title">Мои ближайшие задачи</div>
     <div class="list">
@@ -371,26 +403,30 @@ function openTaskForm(task) {
       const fd = new FormData(e.target);
       const item = Object.fromEntries(fd.entries());
       if (isNew) {
-        await mutate(() => S.store.create(S.token, 'tasks', { ...item, authorId: S.profile.id, comments: [] }), 'Задача создана');
+        closeModal();
+        await doCreate('tasks', { ...item, authorId: S.profile.id, comments: [] }, 'Задача создана');
       } else {
-        await mutate(() => S.store.update(S.token, 'tasks', { ...task, ...item }), 'Сохранено');
+        closeModal();
+        await doUpdate('tasks', { ...task, ...item }, 'Сохранено');
       }
-      closeModal();
     });
     $('#task-del', root)?.addEventListener('click', async () => {
       if (!confirm('Удалить задачу?')) return;
-      await mutate(() => S.store.remove(S.token, 'tasks', task.id), 'Удалено');
       closeModal();
+      await doDelete('tasks', task.id, 'Удалено');
     });
     $('#task-done', root)?.addEventListener('click', async () => {
-      await mutate(() => S.store.update(S.token, 'tasks', { ...task, status: 'done' }), 'Отличная работа! ✓');
       closeModal();
+      await doUpdate('tasks', { ...task, status: 'done' }, 'Отличная работа! ✓');
     });
     $('#chat-send', root)?.addEventListener('click', async () => {
       const text = $('#chat-text', root).value.trim();
       if (!text) return;
-      const res = await mutate(() => S.store.addComment(S.token, task.id, text));
-      if (res) { closeModal(); openTaskForm((S.data.tasks || []).find((t) => t.id === task.id)); }
+      const res = await S.store.addComment(S.token, task.id, text);
+      if (!res.ok) { toast(res.error || 'Ошибка', true); return; }
+      applyLocal('tasks', 'update', res.item);
+      closeModal();
+      openTaskForm(res.item);
     });
   });
 }
@@ -577,8 +613,12 @@ function openImportPlayers() {
     $('#import-go', root).addEventListener('click', async () => {
       const rows = parse();
       if (!rows.length) { toast('Нечего импортировать', true); return; }
-      const res = await mutate(() => S.store.importPlayers(S.token, rows));
-      if (res) { toast(`Добавлено: ${res.added}`); closeModal(); }
+      toast('Импортирую…');
+      const res = await S.store.importPlayers(S.token, rows);
+      if (!res.ok) { toast(res.error || 'Ошибка', true); return; }
+      toast(`Добавлено: ${res.added}`);
+      closeModal();
+      refresh(true);
     });
   });
 }
@@ -607,7 +647,7 @@ function bindFinRows(root) {
     const f = (S.data.finance || []).find((x) => x.id === el.dataset.flip);
     if (!f) return;
     const other = f.unit === 'padel' ? 'dev' : 'padel';
-    await mutate(() => S.store.update(S.token, 'finance', { ...f, unit: other }), `Перенесено в «${UNITS[other].name}»`);
+    await doUpdate('finance', { ...f, unit: other }, `Перенесено в «${UNITS[other].name}»`);
   }));
 }
 
@@ -620,6 +660,7 @@ function viewFinance() {
   const income = list.filter((f) => f.type === 'income').reduce((s, f) => s + Number(f.amount || 0), 0);
   const expense = list.filter((f) => f.type === 'expense').reduce((s, f) => s + Number(f.amount || 0), 0);
   const monthName = new Date(m + '-01').toLocaleDateString('ru-RU', { month: 'long', year: 'numeric' });
+  const pendingEx = (S.data.staffExpenses || []).filter((e) => e.status === 'pending');
 
   $('#view').innerHTML = `
     <div class="searchbar">
@@ -635,7 +676,20 @@ function viewFinance() {
       <div class="card stat"><div class="label">Расход</div><div class="value red">${money(expense)}</div></div>
       <div class="card stat"><div class="label">Итог за ${monthName}</div><div class="value ${income - expense >= 0 ? 'green' : 'red'}">${money(income - expense)}</div></div>
     </div>
-    ${S.store.demo ? '' : `<div class="banner">🏦 Выписка из Точки подтягивается автоматически, если настроена синхронизация (SETUP.md, шаг 4).</div>`}
+    ${pendingEx.length ? `
+    <div class="card" style="margin-bottom:14px">
+      <div class="section-title" style="margin-top:0">🧾 Траты сотрудников — ждут возврата</div>
+      <div class="list">
+        ${pendingEx.map((e) => `
+          <div class="row-card" style="cursor:default">
+            <div class="grow col"><div class="title">${esc(empName(e.employeeId))}: ${esc(e.title)}</div><div class="sub">${fmtDate(e.date)}</div></div>
+            <div class="amount red">−${money(e.amount)}</div>
+            <button class="btn small" data-res-cash="${e.id}">💵 Вернул наличкой</button>
+            <button class="btn small" data-res-bank="${e.id}">🏦 Вернул со счёта</button>
+          </div>`).join('')}
+      </div>
+      <p class="muted small" style="margin-bottom:0">«Наличкой» — расход добавится в финансы автоматически. «Со счёта» — расход придёт из выписки банка сам.</p>
+    </div>` : ''}
     <div class="list">${list.length ? list.map(finRow).join('') : `<div class="card empty"><div class="big">💸</div>Операций за ${monthName} нет</div>`}</div>`;
 
   const shift = (dir) => {
@@ -646,6 +700,15 @@ function viewFinance() {
   $('#m-next').addEventListener('click', () => shift(1));
   $('#add-fin').addEventListener('click', () => openFinForm());
   bindFinRows($('#view'));
+  const resolve = async (id, how) => {
+    const res = await S.store.resolveExpense(S.token, id, how);
+    if (!res.ok) { toast(res.error || 'Ошибка', true); return; }
+    applyLocal('staffExpenses', 'update', res.item);
+    toast('Отмечено как возвращённое');
+    if (how === 'cash') refresh(true); else render();
+  };
+  $('#view').querySelectorAll('[data-res-cash]').forEach((b) => b.addEventListener('click', () => resolve(b.dataset.resCash, 'cash')));
+  $('#view').querySelectorAll('[data-res-bank]').forEach((b) => b.addEventListener('click', () => resolve(b.dataset.resBank, 'bank')));
 }
 
 function openFinForm(f) {
@@ -679,6 +742,12 @@ function openFinForm(f) {
         </label>
       </div>
       <label class="field"><span>Контрагент</span><input type="text" name="counterparty" value="${esc(f?.counterparty || '')}"></label>
+      <label class="field"><span>Сотрудник — если это зарплата или компенсация ему</span>
+        <select name="employeeId">
+          <option value="">— не относится к сотруднику —</option>
+          ${(S.data.employees || []).filter((p) => p.active !== false).map((p) => `<option value="${p.id}" ${f?.employeeId === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
+        </select>
+      </label>
       <label class="field"><span>Комментарий</span><input type="text" name="comment" value="${esc(f?.comment || '')}"></label>
       <div class="actions">
         ${!isNew && f?.source !== 'bank' ? `<button type="button" class="btn danger ghost left" id="ent-del">Удалить</button>` : ''}
@@ -687,6 +756,72 @@ function openFinForm(f) {
       </div>
     </form>
   `, (root) => bindEntityForm(root, 'finance', f, { source: f?.source || 'manual' }));
+}
+
+// ---------- Мои деньги (сотрудник) ----------
+const EX_STATUS = { pending: { name: 'Жду возврата', color: 'amber' }, returned_cash: { name: 'Возвращено наличными', color: 'green' }, returned_bank: { name: 'Возвращено со счёта', color: 'green' } };
+
+function viewMoney() {
+  if (isAdmin()) { location.hash = '#/finance'; return; }
+  setTitle('Мои деньги');
+  const month = today().slice(0, 7);
+  const paid = (S.data.finance || []).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+  const paidMonth = paid.filter((f) => (f.date || '').startsWith(month)).reduce((s, f) => s + Number(f.amount || 0), 0);
+  const paidTotal = paid.reduce((s, f) => s + Number(f.amount || 0), 0);
+  const ex = (S.data.staffExpenses || []).sort((a, b) => (b.created || 0) - (a.created || 0));
+  const pendingSum = ex.filter((e) => e.status === 'pending').reduce((s, e) => s + Number(e.amount || 0), 0);
+
+  $('#view').innerHTML = `
+    <div class="cards-row">
+      <div class="card stat"><div class="label">Выплачено за месяц</div><div class="value green">${money(paidMonth)}</div></div>
+      <div class="card stat"><div class="label">Выплачено всего</div><div class="value">${money(paidTotal)}</div></div>
+      <div class="card stat"><div class="label">Жду возврата</div><div class="value ${pendingSum ? 'red' : ''}">${money(pendingSum)}</div></div>
+    </div>
+    <div class="section-title">Мои траты <button class="btn small primary" id="add-expense" style="margin-left:auto">+ Трата</button></div>
+    <div class="list">
+      ${ex.length ? ex.map((e) => {
+        const st = EX_STATUS[e.status] || EX_STATUS.pending;
+        return `<div class="row-card" data-ex="${e.id}">
+          <div class="grow col"><div class="title">${esc(e.title)}</div><div class="sub">${fmtDate(e.date)}</div></div>
+          <div class="amount">${money(e.amount)}</div>
+          <span class="badge ${st.color} dot">${st.name}</span>
+        </div>`;
+      }).join('') : `<div class="card empty"><div class="big">🧾</div>Купили что-то для работы за свои — добавьте трату, и вам вернут деньги</div>`}
+    </div>
+    <div class="section-title">Выплаты мне</div>
+    <div class="list">
+      ${paid.length ? paid.map((f) => `
+        <div class="row-card" style="cursor:default">
+          <div class="grow col"><div class="title">${esc(f.category || 'Выплата')}</div><div class="sub">${fmtDate(f.date)}${f.comment ? ' · ' + esc(f.comment) : ''}</div></div>
+          <div class="amount green">+${money(f.amount)}</div>
+        </div>`).join('') : `<div class="card empty"><div class="big">💰</div>Выплат пока не было</div>`}
+    </div>`;
+
+  $('#add-expense').addEventListener('click', () => openStaffExpenseForm());
+  $('#view').querySelectorAll('[data-ex]').forEach((el) => el.addEventListener('click', () => {
+    const e = ex.find((x) => x.id === el.dataset.ex);
+    if (e && e.status === 'pending') openStaffExpenseForm(e);
+  }));
+}
+
+function openStaffExpenseForm(ex) {
+  const isNew = !ex;
+  openModal(`
+    <h2>${isNew ? 'Новая трата' : 'Трата'}</h2>
+    <p class="muted small">Опишите, что вы купили для работы за свои деньги — админ получит уведомление и вернёт вам сумму.</p>
+    <form id="ent-form">
+      <label class="field"><span>Что купили</span><input type="text" name="title" required value="${esc(ex?.title || '')}" placeholder="Например: бананы и вода на турнир"></label>
+      <div class="form-row">
+        <label class="field"><span>Сумма, ₽</span><input type="number" name="amount" required step="0.01" value="${esc(ex?.amount || '')}"></label>
+        <label class="field"><span>Дата</span><input type="date" name="date" required value="${esc(ex?.date || today())}"></label>
+      </div>
+      <div class="actions">
+        ${!isNew ? `<button type="button" class="btn danger ghost left" id="ent-del">Удалить</button>` : ''}
+        <button type="button" class="btn" id="modal-cancel">Отмена</button>
+        <button type="submit" class="btn primary">${isNew ? 'Отправить' : 'Сохранить'}</button>
+      </div>
+    </form>
+  `, (root) => bindEntityForm(root, 'staffExpenses', ex, {}));
 }
 
 // ---------- Команда ----------
@@ -754,9 +889,9 @@ function openEmpForm(emp) {
       e.preventDefault();
       const item = Object.fromEntries(new FormData(e.target).entries());
       if (item.active !== undefined) item.active = item.active === 'true';
-      if (isNew) await mutate(() => S.store.create(S.token, 'employees', item), 'Сотрудник добавлен');
-      else await mutate(() => S.store.update(S.token, 'employees', { ...emp, ...item }), 'Сохранено');
       closeModal();
+      if (isNew) await doCreate('employees', item, 'Сотрудник добавлен');
+      else await doUpdate('employees', { ...emp, ...item }, 'Сохранено');
     });
   });
 }
@@ -826,16 +961,19 @@ function showNotifications() {
     </div>
   `, (root) => {
     $('#modal-cancel', root).addEventListener('click', closeModal);
-    $('#read-all', root)?.addEventListener('click', async () => {
+    $('#read-all', root)?.addEventListener('click', () => {
       const ids = list.filter((n) => !n.read).map((n) => n.id);
-      await mutate(() => S.store.markRead(S.token, ids));
+      (S.data.notifications || []).forEach((n) => { if (ids.includes(n.id)) n.read = true; });
       closeModal();
+      render();
+      S.store.markRead(S.token, ids);
     });
-    root.querySelectorAll('[data-notif]').forEach((el) => el.addEventListener('click', async () => {
-      await S.store.markRead(S.token, [el.dataset.notif]);
+    root.querySelectorAll('[data-notif]').forEach((el) => el.addEventListener('click', () => {
+      const n = (S.data.notifications || []).find((x) => x.id === el.dataset.notif);
+      if (n) n.read = true;
       closeModal();
-      if (el.dataset.link) location.hash = el.dataset.link;
-      refresh(true);
+      if (el.dataset.link) location.hash = el.dataset.link; else render();
+      S.store.markRead(S.token, [el.dataset.notif]);
     }));
   });
 }
@@ -846,14 +984,14 @@ function bindEntityForm(root, entity, existing, extra = {}) {
   $('#ent-form', root).addEventListener('submit', async (e) => {
     e.preventDefault();
     const item = Object.fromEntries(new FormData(e.target).entries());
-    if (existing) await mutate(() => S.store.update(S.token, entity, { ...existing, ...item }), 'Сохранено');
-    else await mutate(() => S.store.create(S.token, entity, { ...item, ...extra }), 'Добавлено');
     closeModal();
+    if (existing) await doUpdate(entity, { ...existing, ...item }, 'Сохранено');
+    else await doCreate(entity, { ...item, ...extra }, 'Добавлено');
   });
   $('#ent-del', root)?.addEventListener('click', async () => {
     if (!confirm('Удалить запись?')) return;
-    await mutate(() => S.store.remove(S.token, entity, existing.id), 'Удалено');
     closeModal();
+    await doDelete(entity, existing.id, 'Удалено');
   });
 }
 
