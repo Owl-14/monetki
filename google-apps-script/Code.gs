@@ -168,6 +168,9 @@ function doPost(e) {
       return json({ ok: true, token: u.code, profile: profileOf(u) });
     }
 
+    // Техническая диагностика без личных данных: только счётчики и флаги настройки.
+    if (action === 'status') return json(statusInfo());
+
     var user = findUser(body.token);
     if (!user) return json({ ok: false, error: 'auth' });
 
@@ -296,6 +299,26 @@ function importPlayers(u, rows) {
   return { ok: true, added: added };
 }
 
+/** Диагностика для проверки подключения: без имён, сумм и других личных данных. */
+function statusInfo() {
+  var props = PropertiesService.getScriptProperties();
+  var fin = readAll('finance');
+  var hourly = false;
+  try {
+    hourly = ScriptApp.getProjectTriggers().filter(function (t) { return t.getHandlerFunction() === 'tochkaSync'; }).length > 0;
+  } catch (e) { hourly = 'нет прав (не запускали enableHourlySync)'; }
+  return {
+    ok: true,
+    employees: readAll('employees').length,
+    tochkaTokenSet: !!props.getProperty('TOCHKA_TOKEN'),
+    tochkaUnit: props.getProperty('TOCHKA_UNIT') || 'dev (по умолчанию)',
+    hourlyTrigger: hourly,
+    financeTotal: fin.length,
+    financeFromBank: fin.filter(function (f) { return f.source === 'bank'; }).length,
+    lastSync: props.getProperty('LAST_SYNC') || null
+  };
+}
+
 function markRead(u, ids) {
   (ids || []).forEach(function (id) {
     var n = readAll('notifications').filter(function (x) { return x.id === id && x.toId === u.id; })[0];
@@ -375,9 +398,31 @@ function classifyMethod(t) {
   return 'account';
 }
 
+/**
+ * Включает автосинхронизацию с банком КАЖДЫЙ ЧАС и сразу запускает первую.
+ * Запустите один раз вручную (повторный запуск не создаст дублей).
+ */
+function enableHourlySync() {
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === 'tochkaSync') ScriptApp.deleteTrigger(t);
+  });
+  ScriptApp.newTrigger('tochkaSync').timeBased().everyHours(1).create();
+  Logger.log('Готово: выписка будет обновляться каждый час.');
+  tochkaSync();
+}
+
 /** Забирает операции за последние 7 дней и дописывает новые в «Финансы». */
 function tochkaSync() {
   var props = PropertiesService.getScriptProperties();
+  try {
+    tochkaSyncInner(props);
+  } catch (err) {
+    props.setProperty('LAST_SYNC', new Date().toISOString() + ' | ОШИБКА: ' + err.message);
+    throw err;
+  }
+}
+
+function tochkaSyncInner(props) {
   var unit = props.getProperty('TOCHKA_UNIT') || 'dev';
 
   var accountsRes = tochkaFetch('/open-banking/v1.0/accounts', { method: 'get' });
@@ -440,5 +485,6 @@ function tochkaSync() {
       addedTotal++;
     });
   });
+  props.setProperty('LAST_SYNC', new Date().toISOString() + ' | добавлено операций: ' + addedTotal);
   Logger.log('Добавлено операций: ' + addedTotal);
 }
