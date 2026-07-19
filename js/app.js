@@ -142,7 +142,10 @@ function render() {
       <span class="ico">${i.ico}</span>${i.label}
       ${i.badge ? `<span class="badge red">${i.badge}</span>` : ''}
     </button>`).join('');
-  const bottomNav = items.filter((i) => !['team'].includes(i.r)).slice(0, 5).map((i) => `
+  // Внизу максимум 5 кнопок: первые разделы + всегда «Ещё» (через него доступно остальное)
+  const bottomItems = items.filter((i) => i.r !== 'team' && i.r !== 'settings').slice(0, 4);
+  bottomItems.push(items.find((i) => i.r === 'settings'));
+  const bottomNav = bottomItems.map((i) => `
     <button class="${route === i.r ? 'active' : ''}" data-nav="${i.r}"><span class="ico">${i.ico}</span>${i.label}</button>`).join('');
 
   const showUnitSwitch = myUnits().length > 1;
@@ -747,7 +750,14 @@ function viewSettings() {
   setTitle('Ещё');
   const backend = localStorage.getItem('monetki_backend') || (window.MONETKI_CONFIG?.backendUrl || '');
   const notifState = !('Notification' in window) ? 'нет поддержки' : Notification.permission === 'granted' ? 'включены ✓' : Notification.permission === 'denied' ? 'запрещены в браузере' : 'не включены';
+  const quickLinks = navItems().filter((i) => !['settings', 'dashboard'].includes(i.r));
   $('#view').innerHTML = `
+    <div class="card" style="margin-bottom:12px">
+      <div class="section-title" style="margin-top:0">📂 Все разделы</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        ${quickLinks.map((i) => `<button class="btn" data-nav2="${i.r}">${i.ico} ${i.label}</button>`).join('')}
+      </div>
+    </div>
     <div class="card" style="margin-bottom:12px">
       <div class="section-title" style="margin-top:0">🔔 Уведомления</div>
       <p class="small muted">Статус: <b>${notifState}</b>. Уведомления приходят о новых задачах, сообщениях и дедлайнах, пока приложение открыто или установлено на телефон.</p>
@@ -772,6 +782,7 @@ function viewSettings() {
         <button class="btn danger" id="do-logout">Выйти</button>
       </div>
     </div>`;
+  $('#view').querySelectorAll('[data-nav2]').forEach((b) => b.addEventListener('click', () => { location.hash = '#/' + b.dataset.nav2; }));
   $('#notif-on')?.addEventListener('click', () => Notification.requestPermission().then(() => render()));
   $('#backend-save')?.addEventListener('click', () => {
     const v = $('#backend-url').value.trim();
