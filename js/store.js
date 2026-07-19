@@ -222,6 +222,29 @@ class LocalStore {
     return { ok: true, added };
   }
 
+  async status() {
+    const db = this._db();
+    return { ok: true, backend: 'demo', employees: db.employees.length };
+  }
+
+  async migrateImport(token, data) {
+    const u = this._user(token);
+    const db = this._db();
+    if (db.employees.length && (!u || u.role !== 'admin')) return { ok: false, error: 'Только для админа' };
+    let imported = 0;
+    ['employees', 'clients', 'venues', 'players', 'tasks', 'finance', 'staffExpenses', 'notifications'].forEach((entity) => {
+      (data?.[entity] || []).forEach((item) => {
+        if (!item?.id) return;
+        db[entity] = db[entity] || [];
+        const i = db[entity].findIndex((x) => x.id === item.id);
+        if (i >= 0) db[entity][i] = item; else db[entity].push(item);
+        imported++;
+      });
+    });
+    this._save(db);
+    return { ok: true, imported };
+  }
+
   async resolveExpense(token, id, how) {
     const u = this._user(token); if (!u || u.role !== 'admin') return { ok: false, error: 'Только для админа' };
     const db = this._db();
@@ -271,6 +294,8 @@ class RemoteStore {
   importPlayers(token, rows) { return this._call({ action: 'import_players', token, rows }); }
   markRead(token, ids) { return this._call({ action: 'mark_read', token, ids }); }
   resolveExpense(token, id, how) { return this._call({ action: 'resolve_expense', token, id, how }); }
+  status() { return this._call({ action: 'status' }); }
+  migrateImport(token, data) { return this._call({ action: 'migrate_import', token, data }); }
 }
 
 export function makeStore() {

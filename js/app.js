@@ -241,6 +241,32 @@ function renderLogin(app) {
         </div>` : ''}
       </div>
     </div>`;
+  // Пустая база (свежий переезд)? Предлагаем загрузить резервную копию
+  S.store.status?.().then((st) => {
+    if (!(st?.ok && st.employees === 0)) return;
+    const el = document.createElement('div');
+    el.className = 'demo-note';
+    el.innerHTML = `База новая и пустая. Переезжаете со старой? Загрузите резервную копию:<br><br>
+      <input type="file" id="restore-file" accept="application/json,.json" style="display:none">
+      <button class="btn" id="restore-btn">📦 Загрузить копию</button>`;
+    $('.login-card').appendChild(el);
+    $('#restore-btn').addEventListener('click', () => $('#restore-file').click());
+    $('#restore-file').addEventListener('change', async (ev) => {
+      const file = ev.target.files[0];
+      if (!file) return;
+      try {
+        const data = JSON.parse(await file.text());
+        toast('Загружаю…');
+        const res = await S.store.migrateImport('', data);
+        if (!res.ok) { toast(res.error || 'Ошибка', true); return; }
+        toast(`Готово! Записей загружено: ${res.imported}. Войдите со своим кодом.`);
+        el.remove();
+      } catch {
+        toast('Не удалось прочитать файл', true);
+      }
+    });
+  }).catch(() => {});
+
   $('#login-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const code = $('#code').value;
@@ -677,7 +703,6 @@ function viewFinance() {
     </div>
     <div class="cards-row">
       ${S.data.bankBalance ? `<div class="card stat"><div class="label">На счёте в банке</div><div class="value">${money(S.data.bankBalance.amount)}</div>
-        ${(S.data.bankBalance.accounts || []).length > 1 ? S.data.bankBalance.accounts.map((a) => `<div class="hint">счёт ${esc(a.account)}: ${money(a.amount)}</div>`).join('') : ''}
         <div class="hint">обновлено ${fmtDT(new Date(S.data.bankBalance.updated).getTime())}</div></div>` : ''}
       <div class="card stat"><div class="label">Доход</div><div class="value green">${money(income)}</div><div class="hint">${periodName}</div></div>
       <div class="card stat"><div class="label">Расход</div><div class="value red">${money(expense)}</div><div class="hint">${periodName}</div></div>
@@ -933,6 +958,12 @@ function viewSettings() {
       <label class="field"><span>Ссылка на базу (из Google-скрипта, SETUP.md шаг 2)</span><input type="url" id="backend-url" placeholder="https://script.google.com/macros/s/…/exec" value="${esc(backend)}"></label>
       <button class="btn primary" id="backend-save">Сохранить и перезагрузить</button>
     </div>` : ''}
+    ${isAdmin() ? `
+    <div class="card" style="margin-bottom:12px">
+      <div class="section-title" style="margin-top:0">💾 Резервная копия</div>
+      <p class="small muted">Скачивает все данные (клиенты, задачи, финансы, коды сотрудников) в один файл. Нужна для переезда на новую базу и просто на всякий случай.</p>
+      <button class="btn" id="backup-download">⬇️ Скачать копию</button>
+    </div>` : ''}
     <div class="card">
       <div class="section-title" style="margin-top:0">👤 ${esc(S.profile.name)}</div>
       <p class="small muted">${isAdmin() ? 'Администратор' : 'Сотрудник'} · Монетки v${window.MONETKI_CONFIG?.version || ''}</p>
@@ -947,6 +978,19 @@ function viewSettings() {
     const v = $('#backend-url').value.trim();
     if (v) localStorage.setItem('monetki_backend', v); else localStorage.removeItem('monetki_backend');
     location.reload();
+  });
+  $('#backup-download')?.addEventListener('click', async () => {
+    toast('Собираю копию…');
+    const res = await S.store.bootstrap(S.token);
+    if (!res.ok) { toast('Не удалось собрать копию', true); return; }
+    const payload = { app: 'monetki', exported: new Date().toISOString(), ...res.data };
+    const blob = new Blob([JSON.stringify(payload, null, 1)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `monetki-backup-${today()}.json`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    toast('Копия скачана');
   });
   $('#do-refresh').addEventListener('click', () => { refresh(); toast('Обновлено'); });
   $('#do-logout').addEventListener('click', logout);

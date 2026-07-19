@@ -1,0 +1,3 @@
+# Конфигурация Supabase CLI для деплоя функций
+[functions.api]
+verify_jwt = false
