@@ -44,6 +44,17 @@ export const OWNERS = [
 export const EXPENSE_UNITS = ['padel'];
 export const canUseExpenses = (unit) => unit === 'all' || EXPENSE_UNITS.includes(unit);
 
+// Варианты «чей расход»: конкретный владелец или совместный (делится между ними).
+// Возвращает [[ownerId, доля], ...] для личного расхода, либо null — если общий.
+export const OWNER_GROUPS = { savva_andrey: { name: 'Савва и Андрей', parts: [['savva', 0.5], ['andrey', 0.5]] } };
+export function ownerParts(owner) {
+  if (!owner) return null;
+  if (OWNER_GROUPS[owner]) return OWNER_GROUPS[owner].parts;
+  if (OWNERS.some((o) => o.id === owner)) return [[owner, 1]];
+  return null; // неизвестное значение — считаем расход общим
+}
+export const ownerLabel = (owner) => OWNER_GROUPS[owner]?.name || OWNERS.find((o) => o.id === owner)?.name || '';
+
 /**
  * Личные счета владельцев, посчитанные из операций (п.15: всегда согласованы, где бы ни меняли).
  * Каждое направление: (доходы − расходы) делятся по долям OWNERS.
@@ -62,9 +73,11 @@ export function ownerBalances(finance) {
         const sh = o.shares[f.unit] || 0;
         if (sh) res[o.id][f.unit] += amt * sh;
       });
-    } else if (f.owner && res[f.owner]) {
-      // личный расход владельца — целиком с его счёта
-      res[f.owner].personal += amt;
+    } else if (ownerParts(f.owner)) {
+      // расход на конкретного владельца или на пару (Савва и Андрей — пополам)
+      for (const [oid, sh] of ownerParts(f.owner)) {
+        if (res[oid]) res[oid].personal += amt * sh;
+      }
     } else {
       // общий расход направления — уменьшает делимое по тем же долям
       OWNERS.forEach((o) => {
