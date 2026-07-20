@@ -55,6 +55,12 @@
 
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; }
+/* Телефон: не дёргается вбок, нет «резинки» с цветным фоном за краями, нет случайного зума */
+html {
+  background: var(--bg);
+  overscroll-behavior: none;
+  overflow-x: hidden;
+}
 body {
   background: var(--bg);
   color: var(--text);
@@ -62,6 +68,9 @@ body {
   font-size: 15px;
   line-height: 1.45;
   -webkit-tap-highlight-color: transparent;
+  overflow-x: hidden;
+  overscroll-behavior: none;
+  touch-action: pan-y;
 }
 a { color: var(--blue); text-decoration: none; }
 h1, h2, h3 { margin: 0; }
@@ -183,8 +192,8 @@ label.field > span { display: block; font-size: 13px; font-weight: 600; color: v
 .row-card:hover { border-color: var(--accent); }
 .row-card .col { min-width: 0; }
 .row-card .grow { flex: 1; min-width: 0; }
-.row-card .title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.row-card .sub { font-size: 13px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row-card .title { font-weight: 600; overflow-wrap: anywhere; }
+.row-card .sub { font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
 .row-card .amount { font-weight: 700; white-space: nowrap; }
 .row-card .amount.green { color: var(--green); }
 .row-card .amount.red { color: var(--red); }

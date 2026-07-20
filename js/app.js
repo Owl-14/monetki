@@ -372,9 +372,10 @@ function viewTasks() {
     <div class="searchbar">
       <button class="btn primary" id="add-task">+ Задача</button>
     </div>
-    <div class="chip-row">
+    <div class="chip-row" style="margin-bottom:6px">
       ${[['mine', 'Мои'], ['from-me', 'От меня'], ['all', 'Все']].map(([k, l]) => `<button class="chip ${f.who === k ? 'active' : ''}" data-who="${k}">${l}</button>`).join('')}
-      <span style="width:10px"></span>
+    </div>
+    <div class="chip-row">
       ${[['active', 'Активные'], ['done', 'Выполнены'], ['any', 'Любые']].map(([k, l]) => `<button class="chip ${f.status === k ? 'active' : ''}" data-status="${k}">${l}</button>`).join('')}
     </div>
     <div class="list">${tasks.length ? tasks.map(taskRow).join('') : `<div class="card empty"><div class="big">📭</div>Задач нет</div>`}</div>`;
@@ -1436,6 +1437,7 @@ function viewSettings() {
     const t = b.dataset.themePick;
     if (t) localStorage.setItem('monetki_theme', t); else localStorage.removeItem('monetki_theme');
     document.documentElement.dataset.theme = t;
+    syncThemeColor();
     render();
   }));
   $('#view').querySelectorAll('[data-nav2]').forEach((b) => b.addEventListener('click', () => { location.hash = '#/' + b.dataset.nav2; }));
@@ -1490,7 +1492,9 @@ function showNotifications() {
       const n = (S.data.notifications || []).find((x) => x.id === el.dataset.notif);
       if (n) n.read = true;
       closeModal();
-      if (el.dataset.link) location.hash = el.dataset.link; else render();
+      if (el.dataset.link) location.hash = el.dataset.link;
+      // рендерим всегда: если hash не поменялся, hashchange не сработает, а счётчик у колокольчика должен погаснуть сразу
+      render();
       S.store.markRead(S.token, [el.dataset.notif]);
     }));
   });
@@ -1514,7 +1518,16 @@ function bindEntityForm(root, entity, existing, extra = {}) {
 }
 
 // ---------- Старт ----------
+/** Цвет системной панели браузера следует за темой приложения. */
+function syncThemeColor() {
+  const forced = document.documentElement.dataset.theme;
+  const dark = forced === 'dark' || (!forced && matchMedia('(prefers-color-scheme: dark)').matches);
+  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', dark ? '#16181d' : '#faf8f5');
+}
+
 async function init() {
+  syncThemeColor();
+  matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', syncThemeColor);
   if (S.token) {
     await refresh();
     // База не ответила или сессия истекла — показываем экран входа, а не пустую страницу

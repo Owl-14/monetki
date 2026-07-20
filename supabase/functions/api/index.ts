@@ -235,8 +235,34 @@ async function deleteItem(u: Rec, entity: string, id: string) {
   if (entity === "tasks" && !isAdmin(u) && before.authorId !== u.id) {
     return { ok: false, error: "Удалять можно только свои задачи" };
   }
+  if (entity === "tasks" && before.assigneeId && before.assigneeId !== u.id && before.status !== "done") {
+    await notify(before.assigneeId, `Задача удалена: ${before.title}`);
+  }
   await deleteRow(entity, id);
   return { ok: true };
+}
+
+/**
+ * Ежедневные напоминания о дедлайнах (запускаются с ежечасным cron'ом,
+ * срабатывают один раз в день после 9:00 по Москве).
+ */
+async function remindDeadlines() {
+  try {
+    const now = new Date();
+    const mskHour = Number(new Intl.DateTimeFormat("ru-RU", { hour: "numeric", hour12: false, timeZone: "Europe/Moscow" }).format(now));
+    const todayMsk = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Moscow" }).format(now);
+    if (mskHour < 9) return;
+    if (await kvGet("LAST_REMIND") === todayMsk) return;
+    const tasks = await readAll("tasks");
+    for (const t of tasks) {
+      if (t.status === "done" || !t.due || !t.assigneeId) continue;
+      const due = String(t.due).slice(0, 10);
+      if (due <= todayMsk) {
+        await notify(t.assigneeId, `⏰ ${due < todayMsk ? "Просрочена задача" : "Сегодня срок задачи"}: ${t.title}`);
+      }
+    }
+    await kvSet("LAST_REMIND", todayMsk);
+  } catch (_e) { /* напоминания не должны ломать синхронизацию */ }
 }
 
 async function addComment(u: Rec, taskId: string, text: string) {
@@ -495,7 +521,10 @@ Deno.serve(async (req) => {
       return json({ ok: true, token: u.code, profile: profileOf(u) });
     }
     if (action === "status") return json(await statusInfo());
-    if (action === "tochka_sync") return json(await tochkaSync(body.days || 30));
+    if (action === "tochka_sync") {
+      await remindDeadlines();
+      return json(await tochkaSync(body.days || 30));
+    }
     if (action === "migrate_import") {
       return json(await migrateImport(await findUser(body.token), body.data));
     }
