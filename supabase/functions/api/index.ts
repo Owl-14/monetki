@@ -105,7 +105,8 @@ async function bootstrap(u: Rec) {
       clients: unitF(clients),
       venues: unitF(venues),
       players: unitF(players),
-      tasks: unitF(tasks),
+      // сотрудник получает только свои задачи (не все задачи направления)
+      tasks: admin ? tasks : unitF(tasks).filter((t) => t.assigneeId === u.id),
       finance: admin ? finance : finance.filter((f) => f.employeeId === u.id),
       staffExpenses: admin ? staffExpenses : staffExpenses.filter((e) => e.employeeId === u.id),
       cash: admin ? cash : cash.filter((c) => c.employeeId === u.id),
