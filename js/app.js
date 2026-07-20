@@ -933,9 +933,10 @@ function renderFinAccounts(tabsHtml) {
       }).join('')}
     </div>
     <div class="card muted small">
-      <b>Как считается.</b> Доходы разработки делятся пополам: Савва 50% / Андрей 50%.
-      Падел: (доходы − аренда кортов, операции с пометкой <span class="mono">PADEL KLUB</span>) делятся: Андрей 34% / Савва 33% / Дмитрий 33%.
-      Расход, записанный на конкретного человека (поле «Чей расход» в операции), вычитается только из его счёта.
+      <b>Как считается.</b> По каждому направлению берётся (все доходы − все расходы) и делится по долям:
+      Разработка — Савва 50% / Андрей 50%; Падел — Андрей 34% / Савва 33% / Дмитрий 33%.
+      Исключения: расход, записанный на конкретного человека («Чей расход» в операции), вычитается целиком только у него и не делится на всех;
+      «Перевод между счетами» не считается вообще. Наличные кассы живут отдельно (вкладка «Наличные»).
       Всё пересчитывается из операций автоматически, где бы вы их ни меняли.
     </div>`;
 }
@@ -987,6 +988,13 @@ function openCashForm(c) {
       <label class="field"><span>Категория</span>
         <select name="category">${FIN_CATEGORIES.map((x) => `<option ${c?.category === x ? 'selected' : ''}>${x}</option>`).join('')}</select>
       </label>
+      <label class="field"><span>Сотрудник — если это зарплата или выплата ему</span>
+        <select name="employeeId">
+          <option value="">— не относится к сотруднику —</option>
+          ${(S.data.employees || []).filter((p) => p.active !== false).map((p) => `<option value="${p.id}" ${c?.employeeId === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
+        </select>
+      </label>
+      <div id="salary-extra"></div>
       <label class="field"><span>Комментарий</span><input type="text" name="comment" value="${esc(c?.comment || '')}"></label>
       <div class="actions">
         ${!isNew ? `<button type="button" class="btn danger ghost left" id="ent-del">Удалить</button>` : ''}
@@ -994,7 +1002,51 @@ function openCashForm(c) {
         <button type="submit" class="btn primary">${isNew ? 'Добавить' : 'Сохранить'}</button>
       </div>
     </form>
-  `, (root) => bindEntityForm(root, 'cash', c, {}));
+  `, (root) => {
+    $('#modal-cancel', root).addEventListener('click', closeModal);
+
+    // Зачёт непогашенных трат сотрудника при зарплате наличными
+    const updHint = () => {
+      const hint = $('#offset-hint', root);
+      if (!hint) return;
+      const amt = Number(root.querySelector('[name=amount]').value) || 0;
+      const sum = [...root.querySelectorAll('[name=offset]:checked')].reduce((s, cb) => s + Number(cb.dataset.amt), 0);
+      hint.textContent = sum ? `К выплате: ${money(amt)} − ${money(sum)} = ${money(amt - sum)}. Выбранные траты будут погашены.` : '';
+    };
+    const updSalary = () => {
+      const box = $('#salary-extra', root);
+      const cat = root.querySelector('[name=category]').value;
+      const empId = root.querySelector('[name=employeeId]').value;
+      if (!isNew || cat !== 'Зарплата' || !empId) { box.innerHTML = ''; return; }
+      const pend = (S.data.staffExpenses || []).filter((e) => e.status === 'pending' && e.employeeId === empId);
+      box.innerHTML = pend.length ? `
+        <div class="field"><span class="small" style="font-weight:600;color:var(--muted)">Зачесть траты сотрудника</span>
+          ${pend.map((e2) => `<label class="checkline"><input type="checkbox" name="offset" value="${e2.id}" data-amt="${e2.amount}"><span>${esc(e2.title)} — ${money(e2.amount)}</span></label>`).join('')}
+          <div class="muted small" id="offset-hint"></div>
+        </div>` : '';
+      box.querySelectorAll('[name=offset]').forEach((cb) => cb.addEventListener('change', updHint));
+    };
+    root.querySelector('[name=category]').addEventListener('change', updSalary);
+    root.querySelector('[name=employeeId]').addEventListener('change', updSalary);
+    root.querySelector('[name=amount]').addEventListener('input', updHint);
+    updSalary();
+
+    $('#ent-form', root).addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const item = Object.fromEntries(new FormData(e.target).entries());
+      const offsetIds = [...root.querySelectorAll('[name=offset]:checked')].map((cb) => cb.value);
+      delete item.offset;
+      closeModal();
+      if (isNew) await doCreate('cash', { ...item, offsetIds }, 'Добавлено');
+      else await doUpdate('cash', { ...c, ...item }, 'Сохранено');
+      if (offsetIds.length) refresh(true);
+    });
+    $('#ent-del', root)?.addEventListener('click', async () => {
+      if (!confirm('Удалить запись?')) return;
+      closeModal();
+      await doDelete('cash', c.id, 'Удалено');
+    });
+  });
 }
 
 function openFinForm(f) {
