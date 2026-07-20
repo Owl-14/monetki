@@ -577,12 +577,116 @@ function openVenueForm(v) {
       <label class="field"><span>Заметки</span><textarea name="notes">${esc(v?.notes || '')}</textarea></label>
       <div class="actions">
         ${!isNew ? `<button type="button" class="btn danger ghost left" id="ent-del">Удалить</button>` : ''}
+        ${!isNew ? `<button type="button" class="btn" id="open-courts">📅 Корты</button>` : ''}
         ${v?.phone ? `<a class="btn" href="${telHref(v.phone)}">📞 Позвонить</a>` : ''}
         <button type="button" class="btn" id="modal-cancel">Отмена</button>
         <button type="submit" class="btn primary">${isNew ? 'Добавить' : 'Сохранить'}</button>
       </div>
     </form>
-  `, (root) => bindEntityForm(root, 'venues', v, { unit: 'padel' }));
+  `, (root) => {
+    bindEntityForm(root, 'venues', v, { unit: 'padel' });
+    $('#open-courts', root)?.addEventListener('click', () => openCourts(v.id, 0));
+  });
+}
+
+// ---------- Корты: недельная сетка брони (будни, 18:00–23:00) ----------
+const SLOT_TAGS = [
+  { id: 'booked', name: 'Забронировано', short: 'бронь', cls: 'booked' },
+  { id: 'free', name: 'Свободно', short: 'своб.', cls: 'free' },
+  { id: 'busy', name: 'Занято', short: 'занято', cls: 'busy' },
+  { id: 'want', name: 'Хотелось бы', short: 'хотим', cls: 'want' }
+];
+const COURT_HOURS = [18, 19, 20, 21, 22];
+
+function mondayOf(weekOffset) {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() - ((d.getDay() + 6) % 7) + weekOffset * 7);
+  return d;
+}
+const isoDay = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+function openCourts(venueId, week = 0) {
+  const v = (S.data.venues || []).find((x) => x.id === venueId);
+  if (!v) { closeModal(); return; }
+  const slots = v.slots || {};
+  const mon = mondayOf(week);
+  const days = [0, 1, 2, 3, 4].map((i) => { const d = new Date(mon); d.setDate(mon.getDate() + i); return d; });
+  const dayNames = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт'];
+  const todayIso = today();
+
+  const cells = COURT_HOURS.map((h) => `
+    <div class="time-label">${h}:00</div>
+    ${days.map((d) => {
+      const key = `${isoDay(d)}_${h}`;
+      const s = slots[key];
+      const tag = s ? SLOT_TAGS.find((t) => t.id === s.tag) : null;
+      return `<div class="slot ${tag ? tag.cls : ''}" data-slot="${key}">
+        ${tag ? tag.short : ''}
+        ${s?.price ? `<span class="price">${new Intl.NumberFormat('ru-RU').format(s.price)}₽</span>` : ''}
+      </div>`;
+    }).join('')}`).join('');
+
+  openModal(`
+    <h2>📅 Корты — ${esc(v.name)}</h2>
+    <div class="searchbar" style="margin-bottom:2px">
+      <button class="btn small" id="w-prev">←</button>
+      <span class="btn small ghost nowrap" style="cursor:default">${fmtDate(isoDay(days[0]))} – ${fmtDate(isoDay(days[4]))}</span>
+      <button class="btn small" id="w-next">→</button>
+      ${week !== 0 ? `<button class="btn small" id="w-today">сегодня</button>` : ''}
+    </div>
+    <div class="courts-grid">
+      <div></div>
+      ${days.map((d, i) => `<div class="head ${isoDay(d) === todayIso ? '' : ''}">${dayNames[i]}<b>${d.getDate()}</b></div>`).join('')}
+      ${cells}
+    </div>
+    <div class="legend">
+      ${SLOT_TAGS.map((t) => `<span><i class="slot ${t.cls}" style="padding:0;min-height:10px"></i>${t.name}</span>`).join('')}
+    </div>
+    <p class="muted small">Нажмите на ячейку, чтобы отметить статус и цену.</p>
+    <div class="actions"><button class="btn" id="modal-cancel">Закрыть</button></div>
+  `, (root) => {
+    $('#modal-cancel', root).addEventListener('click', closeModal);
+    $('#w-prev', root).addEventListener('click', () => openCourts(venueId, week - 1));
+    $('#w-next', root).addEventListener('click', () => openCourts(venueId, week + 1));
+    $('#w-today', root)?.addEventListener('click', () => openCourts(venueId, 0));
+    root.querySelectorAll('[data-slot]').forEach((el) => el.addEventListener('click', () => openSlotEditor(venueId, week, el.dataset.slot)));
+  });
+}
+
+function openSlotEditor(venueId, week, key) {
+  const v = (S.data.venues || []).find((x) => x.id === venueId);
+  if (!v) { closeModal(); return; }
+  const cur = (v.slots || {})[key];
+  const [dateIso, hour] = key.split('_');
+  openModal(`
+    <h2>${fmtDate(dateIso)}, ${hour}:00–${Number(hour) + 1}:00</h2>
+    <p class="muted small">${esc(v.name)}${v.price ? ` · обычная цена: ${esc(v.price)}` : ''}</p>
+    <label class="field"><span>Цена за этот час, ₽ (пусто — как обычно)</span>
+      <input type="number" id="slot-price" value="${esc(cur?.price || '')}" placeholder="${esc(String(v.price || '').replace(/[^\d]/g, ''))}">
+    </label>
+    <div class="slot-pick">
+      ${SLOT_TAGS.map((t) => `<button class="slot ${t.cls}" data-tag="${t.id}">${cur?.tag === t.id ? '✓ ' : ''}${t.name}</button>`).join('')}
+    </div>
+    <div class="actions">
+      ${cur ? `<button class="btn danger ghost left" id="slot-clear">Очистить</button>` : ''}
+      <button class="btn" id="slot-back">← Назад</button>
+    </div>
+  `, (root) => {
+    const save = async (slotsMutator) => {
+      const fresh = (S.data.venues || []).find((x) => x.id === venueId);
+      const slots = { ...(fresh?.slots || {}) };
+      slotsMutator(slots);
+      await doUpdate('venues', { ...fresh, slots });
+      openCourts(venueId, week);
+    };
+    root.querySelectorAll('[data-tag]').forEach((b) => b.addEventListener('click', () => {
+      const price = Number($('#slot-price', root).value) || '';
+      save((slots) => { slots[key] = { tag: b.dataset.tag, price }; });
+    }));
+    $('#slot-clear', root)?.addEventListener('click', () => save((slots) => { delete slots[key]; }));
+    $('#slot-back', root).addEventListener('click', () => openCourts(venueId, week));
+  });
 }
 
 // ---------- Игроки (падел) ----------
@@ -1240,6 +1344,13 @@ function viewSettings() {
       </div>
     </div>
     <div class="card" style="margin-bottom:12px">
+      <div class="section-title" style="margin-top:0">🎨 Тема</div>
+      <div class="chip-row" style="margin-bottom:0">
+        ${[['', 'Как в системе'], ['light', '☀️ Светлая'], ['dark', '🌙 Тёмная']].map(([k, l]) =>
+          `<button class="chip ${(localStorage.getItem('monetki_theme') || '') === k ? 'active' : ''}" data-theme-pick="${k}">${l}</button>`).join('')}
+      </div>
+    </div>
+    <div class="card" style="margin-bottom:12px">
       <div class="section-title" style="margin-top:0">🔔 Уведомления</div>
       <p class="small muted">Статус: <b>${notifState}</b>. Уведомления приходят о новых задачах, сообщениях и дедлайнах, пока приложение открыто или установлено на телефон.</p>
       ${('Notification' in window) && Notification.permission !== 'granted' ? `<button class="btn" id="notif-on">Включить уведомления</button>` : ''}
@@ -1269,6 +1380,12 @@ function viewSettings() {
         <button class="btn danger" id="do-logout">Выйти</button>
       </div>
     </div>`;
+  $('#view').querySelectorAll('[data-theme-pick]').forEach((b) => b.addEventListener('click', () => {
+    const t = b.dataset.themePick;
+    if (t) localStorage.setItem('monetki_theme', t); else localStorage.removeItem('monetki_theme');
+    document.documentElement.dataset.theme = t;
+    render();
+  }));
   $('#view').querySelectorAll('[data-nav2]').forEach((b) => b.addEventListener('click', () => { location.hash = '#/' + b.dataset.nav2; }));
   $('#notif-on')?.addEventListener('click', () => Notification.requestPermission().then(() => render()));
   $('#backend-save')?.addEventListener('click', () => {

@@ -21,8 +21,9 @@
   --radius: 14px;
   --nav-w: 232px;
 }
+/* Тёмная тема: автоматически по системе или принудительно (переключатель в «Ещё») */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --bg: #16181d;
     --surface: #1f2229;
     --surface2: #262a33;
@@ -36,6 +37,20 @@
     --purple-soft: #322250;
     --shadow: 0 1px 3px rgba(0,0,0,.35), 0 4px 16px rgba(0,0,0,.25);
   }
+}
+:root[data-theme="dark"] {
+  --bg: #16181d;
+  --surface: #1f2229;
+  --surface2: #262a33;
+  --text: #e5e7eb;
+  --muted: #9ca3af;
+  --line: #333845;
+  --accent-soft: #423512;
+  --green-soft: #123f31;
+  --red-soft: #47201f;
+  --blue-soft: #1d2c4f;
+  --purple-soft: #322250;
+  --shadow: 0 1px 3px rgba(0,0,0,.35), 0 4px 16px rgba(0,0,0,.25);
 }
 
 * { box-sizing: border-box; }
@@ -248,6 +263,28 @@ label.field > span { display: block; font-size: 13px; font-weight: 600; color: v
 .chip-row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
 .chip { border: 1px solid var(--line); background: var(--surface); border-radius: 999px; padding: 5px 13px; font-size: 13px; font-weight: 600; color: var(--muted); }
 .chip.active { background: var(--text); color: var(--bg); border-color: var(--text); }
+
+/* Календарь кортов */
+.courts-grid { display: grid; grid-template-columns: 46px repeat(5, minmax(52px, 1fr)); gap: 4px; margin: 10px 0; }
+.courts-grid .head { font-size: 11px; text-align: center; color: var(--muted); font-weight: 700; padding: 4px 0; }
+.courts-grid .head b { display: block; font-size: 13px; color: var(--text); }
+.time-label { font-size: 11px; color: var(--muted); display: flex; align-items: center; justify-content: center; font-weight: 600; }
+.slot {
+  border: 1px dashed var(--line); border-radius: 8px; min-height: 46px;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  font-size: 10px; font-weight: 700; cursor: pointer; background: var(--surface); color: var(--muted);
+  padding: 2px; text-align: center;
+}
+.slot .price { font-size: 10px; font-weight: 500; }
+.slot.booked { background: var(--green-soft); color: var(--green); border: 1px solid transparent; }
+.slot.free { background: var(--blue-soft); color: var(--blue); border: 1px solid transparent; }
+.slot.busy { background: var(--red-soft); color: var(--red); border: 1px solid transparent; }
+.slot.want { background: var(--accent-soft); color: var(--accent-strong); border: 1px solid transparent; }
+.slot-pick { display: flex; flex-direction: column; gap: 8px; margin: 12px 0; }
+.slot-pick .slot { min-height: 44px; font-size: 14px; flex-direction: row; gap: 8px; }
+.legend { display: flex; gap: 10px; flex-wrap: wrap; font-size: 11px; color: var(--muted); margin-top: 6px; }
+.legend span { display: inline-flex; align-items: center; gap: 4px; }
+.legend i { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
 
 .receipt-img { max-width: 100%; max-height: 55dvh; border-radius: 12px; margin-top: 8px; border: 1px solid var(--line); }
 .checkline { display: flex; gap: 10px; align-items: center; padding: 7px 0; font-size: 14px; cursor: pointer; }
