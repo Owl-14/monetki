@@ -1,5 +1,5 @@
 // ============ Монетки: приложение ============
-import { makeStore, UNITS, CLIENT_STATUSES, TASK_STATUSES, FIN_METHODS, FIN_CATEGORIES } from './store.js';
+import { makeStore, UNITS, CLIENT_STATUSES, TASK_STATUSES, FIN_METHODS, FIN_CATEGORIES, OWNERS, ownerBalances } from './store.js';
 
 // ---------- Утилиты ----------
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -172,9 +172,11 @@ function render() {
       <span class="ico">${i.ico}</span>${i.label}
       ${i.badge ? `<span class="badge red">${i.badge}</span>` : ''}
     </button>`).join('');
-  // Внизу максимум 5 кнопок: первые разделы + всегда «Ещё» (через него доступно остальное)
-  const bottomItems = items.filter((i) => i.r !== 'team' && i.r !== 'settings').slice(0, 4);
-  bottomItems.push(items.find((i) => i.r === 'settings'));
+  // Нижняя навигация (телефон): главное всегда под рукой — админу Финансы, сотруднику Деньги
+  const sectionIds = items.map((i) => i.r);
+  const unitFirst = ['clients', 'venues', 'players'].find((r) => sectionIds.includes(r));
+  const wanted = ['dashboard', 'tasks', isAdmin() ? 'finance' : 'money', unitFirst, 'settings'].filter(Boolean);
+  const bottomItems = wanted.map((r) => items.find((i) => i.r === r)).filter(Boolean);
   const bottomNav = bottomItems.map((i) => `
     <button class="${route === i.r ? 'active' : ''}" data-nav="${i.r}"><span class="ico">${i.ico}</span>${i.label}</button>`).join('');
 
@@ -309,7 +311,7 @@ function viewDashboard() {
     padelStat = `<div class="card stat"><div class="label">Игроков в базе</div><div class="value">${(S.data.players || []).length}</div><div class="hint">падел</div></div>`;
   }
 
-  const staffPaid = !isAdmin() ? (S.data.finance || []).filter((f) => (f.date || '').startsWith(month)).reduce((s, f) => s + Number(f.amount || 0), 0) : 0;
+  const staffPaid = !isAdmin() ? [...(S.data.finance || []), ...(S.data.cash || [])].filter((f) => (f.date || '').startsWith(month)).reduce((s, f) => s + Number(f.amount || 0), 0) : 0;
   const staffCard = !isAdmin() ? `<div class="card stat"><div class="label">Выплачено мне за месяц</div><div class="value green">${money(staffPaid)}</div><div class="hint">подробнее — в «Деньгах»</div></div>` : '';
   const bb = S.data.bankBalance;
   const finCards = isAdmin() ? `
@@ -342,7 +344,7 @@ function taskRow(t) {
   const over = t.due && t.due < today() && t.status !== 'done';
   const unitTag = activeUnits().length > 1 ? `<span class="badge">${UNITS[t.unit]?.emoji || ''}</span>` : '';
   return `
-    <div class="row-card ${t.status === 'done' ? 'done' : ''} ${over ? 'overdue' : ''}" data-task="${t.id}">
+    <div class="row-card ${t.status === 'done' ? 'done' : ''} ${over || t.status === 'new' ? 'overdue' : ''}" data-task="${t.id}">
       <div class="grow col">
         <div class="title">${t.priority === 'high' ? '🔥 ' : ''}${esc(t.title)}</div>
         <div class="sub">${esc(empName(t.assigneeId))}${t.due ? ' · до ' + fmtDate(t.due) : ''}${t.comments?.length ? ' · 💬 ' + t.comments.length : ''}</div>
@@ -373,7 +375,7 @@ function viewTasks() {
     <div class="chip-row">
       ${[['mine', 'Мои'], ['from-me', 'От меня'], ['all', 'Все']].map(([k, l]) => `<button class="chip ${f.who === k ? 'active' : ''}" data-who="${k}">${l}</button>`).join('')}
       <span style="width:10px"></span>
-      ${[['active', 'Активные'], ['done', 'Готово'], ['any', 'Любые']].map(([k, l]) => `<button class="chip ${f.status === k ? 'active' : ''}" data-status="${k}">${l}</button>`).join('')}
+      ${[['active', 'Активные'], ['done', 'Выполнены'], ['any', 'Любые']].map(([k, l]) => `<button class="chip ${f.status === k ? 'active' : ''}" data-status="${k}">${l}</button>`).join('')}
     </div>
     <div class="list">${tasks.length ? tasks.map(taskRow).join('') : `<div class="card empty"><div class="big">📭</div>Задач нет</div>`}</div>`;
 
@@ -388,62 +390,78 @@ function openTaskForm(task) {
   const units = activeUnits();
   const unit = task?.unit || (units.length === 1 ? units[0] : (S.unit !== 'all' ? S.unit : units[0]));
   const people = (S.data.employees || []).filter((e) => e.active !== false);
-  const canEdit = isNew || isAdmin() || task.authorId === S.profile.id || task.assigneeId === S.profile.id;
+  // Права: содержимое меняет админ или автор задачи; сотрудник в чужой задаче меняет только статус
+  const canEditContent = isNew || isAdmin() || task.authorId === S.profile.id;
+  const isAssignee = !isNew && task.assigneeId === S.profile.id;
+  const st = task ? (TASK_STATUSES.find((s) => s.id === task.status) || TASK_STATUSES[0]) : null;
 
+  // Кнопки смены статуса для исполнителя
+  let statusButtons = '';
+  if (isAssignee && !isAdmin()) {
+    const btn = (to, label, primary) => `<button type="button" class="btn ${primary ? 'primary' : ''}" data-setstatus="${to}">${label}</button>`;
+    if (task.status === 'new') statusButtons = btn('progress', '▶ Взял в работу', true);
+    else if (task.status === 'progress') statusButtons = btn('done', '✅ Выполнена', true) + btn('question', '❓ Есть вопросы');
+    else if (task.status === 'question') statusButtons = btn('progress', '▶ Снова в работе') + btn('done', '✅ Выполнена', true);
+  }
+  if (isAssignee && isAdmin() && task.status !== 'done') {
+    statusButtons = `<button type="button" class="btn primary" data-setstatus="done">✅ Выполнена</button>`;
+  }
+
+  const ro = canEditContent ? '' : 'disabled';
   openModal(`
-    <h2>${isNew ? 'Новая задача' : 'Задача'}</h2>
+    <h2>${isNew ? 'Новая задача' : 'Задача'} ${st ? `<span class="badge ${st.color} dot">${st.name}</span>` : ''}</h2>
     <form id="task-form">
-      <label class="field"><span>Название</span><input type="text" name="title" required value="${esc(task?.title || '')}" ${canEdit ? '' : 'disabled'}></label>
-      <label class="field"><span>Описание</span><textarea name="desc" ${canEdit ? '' : 'disabled'}>${esc(task?.desc || '')}</textarea></label>
+      <label class="field"><span>Название</span><input type="text" name="title" required value="${esc(task?.title || '')}" ${ro}></label>
+      <label class="field"><span>Описание</span><textarea name="desc" ${ro}>${esc(task?.desc || '')}</textarea></label>
       <div class="form-row">
-        <label class="field"><span>Исполнитель</span>
-          <select name="assigneeId">${people.map((p) => `<option value="${p.id}" ${(task?.assigneeId || S.profile.id) === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>
-        </label>
-        <label class="field"><span>Срок</span><input type="date" name="due" value="${esc(task?.due || '')}"></label>
+        ${isAdmin() ? `<label class="field"><span>Исполнитель</span>
+          <select name="assigneeId" ${ro}>${people.map((p) => `<option value="${p.id}" ${(task?.assigneeId || S.profile.id) === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select>
+        </label>` : `<label class="field"><span>Исполнитель</span><input type="text" value="${esc(isNew ? 'Вы' : empName(task.assigneeId))}" disabled></label>`}
+        <label class="field"><span>Срок</span><input type="date" name="due" value="${esc(task?.due || '')}" ${ro}></label>
       </div>
       <div class="form-row">
-        <label class="field"><span>Статус</span>
+        ${canEditContent ? `<label class="field"><span>Статус</span>
           <select name="status">${TASK_STATUSES.map((s) => `<option value="${s.id}" ${(task?.status || 'new') === s.id ? 'selected' : ''}>${s.name}</option>`).join('')}</select>
-        </label>
+        </label>` : ''}
         <label class="field"><span>Приоритет</span>
-          <select name="priority">${[['low', 'Низкий'], ['normal', 'Обычный'], ['high', '🔥 Высокий']].map(([k, l]) => `<option value="${k}" ${(task?.priority || 'normal') === k ? 'selected' : ''}>${l}</option>`).join('')}</select>
+          <select name="priority" ${ro}>${[['low', 'Низкий'], ['normal', 'Обычный'], ['high', '🔥 Высокий']].map(([k, l]) => `<option value="${k}" ${(task?.priority || 'normal') === k ? 'selected' : ''}>${l}</option>`).join('')}</select>
         </label>
       </div>
-      ${units.length > 1 ? `<label class="field"><span>Направление</span>
+      ${canEditContent && units.length > 1 ? `<label class="field"><span>Направление</span>
         <select name="unit">${units.map((u) => `<option value="${u}" ${unit === u ? 'selected' : ''}>${UNITS[u].name}</option>`).join('')}</select></label>` : `<input type="hidden" name="unit" value="${unit}">`}
       ${!isNew ? `
         <div class="section-title" style="margin-top:8px">Обсуждение</div>
         <div class="chat">${(task.comments || []).map((c) => `<div class="msg ${c.authorId === S.profile.id ? 'mine' : ''}"><span class="who">${esc(empName(c.authorId))}</span><span class="when">${fmtDT(c.ts)}</span><div>${esc(c.text)}</div></div>`).join('') || '<div class="muted small">Пока пусто — напишите первым.</div>'}</div>
         <div class="chat-input"><input type="text" id="chat-text" placeholder="Написать сообщение…"><button type="button" class="btn" id="chat-send">➤</button></div>` : ''}
+      ${statusButtons ? `<div class="actions" style="justify-content:center">${statusButtons}</div>` : ''}
       <div class="actions">
-        ${!isNew && canEdit ? `<button type="button" class="btn danger ghost left" id="task-del">Удалить</button>` : ''}
-        <button type="button" class="btn" id="modal-cancel">Отмена</button>
-        ${canEdit ? `<button type="submit" class="btn primary">${isNew ? 'Создать' : 'Сохранить'}</button>` : ''}
-        ${!isNew && task.status !== 'done' && task.assigneeId === S.profile.id ? `<button type="button" class="btn primary" id="task-done">✓ Выполнено</button>` : ''}
+        ${!isNew && canEditContent ? `<button type="button" class="btn danger ghost left" id="task-del">Удалить</button>` : ''}
+        <button type="button" class="btn" id="modal-cancel">${canEditContent ? 'Отмена' : 'Закрыть'}</button>
+        ${canEditContent ? `<button type="submit" class="btn primary">${isNew ? 'Создать' : 'Сохранить'}</button>` : ''}
       </div>
     </form>
   `, (root) => {
     $('#modal-cancel', root).addEventListener('click', closeModal);
     $('#task-form', root).addEventListener('submit', async (e) => {
       e.preventDefault();
+      if (!canEditContent) return;
       const fd = new FormData(e.target);
       const item = Object.fromEntries(fd.entries());
-      if (isNew) {
-        closeModal();
-        await doCreate('tasks', { ...item, authorId: S.profile.id, comments: [] }, 'Задача создана');
-      } else {
-        closeModal();
-        await doUpdate('tasks', { ...task, ...item }, 'Сохранено');
-      }
+      if (!isAdmin()) item.assigneeId = S.profile.id;
+      closeModal();
+      if (isNew) await doCreate('tasks', { ...item, authorId: S.profile.id, comments: [] }, 'Задача создана');
+      else await doUpdate('tasks', { ...task, ...item }, 'Сохранено');
     });
+    root.querySelectorAll('[data-setstatus]').forEach((b) => b.addEventListener('click', async () => {
+      closeModal();
+      const to = b.dataset.setstatus;
+      const msg = { progress: 'Взято в работу', done: 'Отличная работа! ✓', question: 'Отмечено: есть вопросы — напишите их в обсуждении задачи' }[to];
+      await doUpdate('tasks', { ...task, status: to }, msg);
+    }));
     $('#task-del', root)?.addEventListener('click', async () => {
       if (!confirm('Удалить задачу?')) return;
       closeModal();
       await doDelete('tasks', task.id, 'Удалено');
-    });
-    $('#task-done', root)?.addEventListener('click', async () => {
-      closeModal();
-      await doUpdate('tasks', { ...task, status: 'done' }, 'Отличная работа! ✓');
     });
     $('#chat-send', root)?.addEventListener('click', async () => {
       const text = $('#chat-text', root).value.trim();
@@ -680,6 +698,16 @@ function bindFinRows(root) {
 function viewFinance() {
   if (!isAdmin()) { location.hash = '#/dashboard'; return; }
   setTitle('Финансы');
+  const tab = S.finTab || 'ops';
+  const pendingCount = (S.data.staffExpenses || []).filter((e) => e.status === 'pending').length;
+  const tabs = [['ops', '💸 Операции'], ['staff', `🧾 Траты${pendingCount ? ' (' + pendingCount + ')' : ''}`], ['accounts', '👥 Счета'], ['cash', '💵 Наличные']];
+  const tabsHtml = `<div class="chip-row">${tabs.map(([k, l]) => `<button class="chip ${tab === k ? 'active' : ''}" data-fintab="${k}">${l}</button>`).join('')}</div>`;
+  const renderers = { ops: renderFinOps, staff: renderFinStaff, accounts: renderFinAccounts, cash: renderFinCash };
+  (renderers[tab] || renderFinOps)(tabsHtml);
+  $('#view').querySelectorAll('[data-fintab]').forEach((b) => b.addEventListener('click', () => { S.finTab = b.dataset.fintab; render(); }));
+}
+
+function renderFinOps(tabsHtml) {
   const units = activeUnits();
   const m = S.finMonth;
   const period = S.finPeriod || 'month';
@@ -689,15 +717,15 @@ function viewFinance() {
   const expense = list.filter((f) => f.type === 'expense').reduce((s, f) => s + Number(f.amount || 0), 0);
   const monthName = new Date(m + '-01').toLocaleDateString('ru-RU', { month: 'long', year: 'numeric' });
   const periodName = period === 'all' ? 'всё время' : monthName;
-  const pendingEx = (S.data.staffExpenses || []).filter((e) => e.status === 'pending');
 
   $('#view').innerHTML = `
+    ${tabsHtml}
     <div class="searchbar">
       ${period === 'month' ? `
       <button class="btn small" id="m-prev">←</button>
       <span class="btn small ghost nowrap" style="cursor:default">${monthName}</span>
       <button class="btn small" id="m-next">→</button>` : ''}
-      <button class="btn small ${period === 'all' ? 'primary' : ''}" id="period-toggle">${period === 'all' ? '📅 показать по месяцам' : '∑ за всё время'}</button>
+      <button class="btn small ${period === 'all' ? 'primary' : ''}" id="period-toggle">${period === 'all' ? '📅 по месяцам' : '∑ за всё время'}</button>
       <div class="grow"></div>
       <button class="btn primary" id="add-fin">+ Операция</button>
     </div>
@@ -708,20 +736,6 @@ function viewFinance() {
       <div class="card stat"><div class="label">Расход</div><div class="value red">${money(expense)}</div><div class="hint">${periodName}</div></div>
       <div class="card stat"><div class="label">Итог</div><div class="value ${income - expense >= 0 ? 'green' : 'red'}">${money(income - expense)}</div><div class="hint">${periodName}</div></div>
     </div>
-    ${pendingEx.length ? `
-    <div class="card" style="margin-bottom:14px">
-      <div class="section-title" style="margin-top:0">🧾 Траты сотрудников — ждут возврата</div>
-      <div class="list">
-        ${pendingEx.map((e) => `
-          <div class="row-card" style="cursor:default">
-            <div class="grow col"><div class="title">${esc(empName(e.employeeId))}: ${esc(e.title)}</div><div class="sub">${fmtDate(e.date)}</div></div>
-            <div class="amount red">−${money(e.amount)}</div>
-            <button class="btn small" data-res-cash="${e.id}">💵 Вернул наличкой</button>
-            <button class="btn small" data-res-bank="${e.id}">🏦 Вернул со счёта</button>
-          </div>`).join('')}
-      </div>
-      <p class="muted small" style="margin-bottom:0">«Наличкой» — расход добавится в финансы автоматически. «Со счёта» — расход придёт из выписки банка сам.</p>
-    </div>` : ''}
     <div class="list">${list.length ? list.map(finRow).join('') : `<div class="card empty"><div class="big">💸</div>Операций за ${periodName} нет</div>`}</div>`;
 
   const shift = (dir) => {
@@ -733,15 +747,150 @@ function viewFinance() {
   $('#period-toggle').addEventListener('click', () => { S.finPeriod = (S.finPeriod === 'all') ? 'month' : 'all'; render(); });
   $('#add-fin').addEventListener('click', () => openFinForm());
   bindFinRows($('#view'));
-  const resolve = async (id, how) => {
-    const res = await S.store.resolveExpense(S.token, id, how);
-    if (!res.ok) { toast(res.error || 'Ошибка', true); return; }
-    applyLocal('staffExpenses', 'update', res.item);
-    toast('Отмечено как возвращённое');
-    if (how === 'cash') refresh(true); else render();
+}
+
+const EX_STATUS = {
+  pending: { name: 'Не погашена', color: 'red' },
+  returned_cash: { name: 'Возвращена наличными', color: 'green' },
+  returned_bank: { name: 'Возвращена со счёта', color: 'green' },
+  returned_salary: { name: 'Зачтена в зарплате', color: 'green' }
+};
+
+function renderFinStaff(tabsHtml) {
+  const all = (S.data.staffExpenses || []).sort((a, b) => (b.created || 0) - (a.created || 0));
+  const pending = all.filter((e) => e.status === 'pending');
+  const rest = all.filter((e) => e.status !== 'pending');
+  const exRow = (e) => {
+    const st = EX_STATUS[e.status] || EX_STATUS.pending;
+    return `<div class="row-card" data-ex-view="${e.id}">
+      <div class="grow col"><div class="title">${esc(empName(e.employeeId))}: ${esc(e.title)}</div><div class="sub">${fmtDate(e.date)}</div></div>
+      <div class="amount ${e.status === 'pending' ? 'red' : 'green'}">${money(e.amount)}</div>
+      <span class="badge ${st.color} dot">${st.name}</span>
+    </div>`;
   };
-  $('#view').querySelectorAll('[data-res-cash]').forEach((b) => b.addEventListener('click', () => resolve(b.dataset.resCash, 'cash')));
-  $('#view').querySelectorAll('[data-res-bank]').forEach((b) => b.addEventListener('click', () => resolve(b.dataset.resBank, 'bank')));
+  $('#view').innerHTML = `
+    ${tabsHtml}
+    <div class="section-title" style="margin-top:4px">Ждут возврата</div>
+    <div class="list">${pending.length ? pending.map(exRow).join('') : `<div class="card empty">Всё возвращено 👍</div>`}</div>
+    <p class="muted small">Нажмите на трату: посмотреть чек и вернуть деньги. Зачесть трату в зарплате можно при начислении зарплаты (Операции → + Операция → Зарплата).</p>
+    ${rest.length ? `<div class="section-title">История</div><div class="list">${rest.map(exRow).join('')}</div>` : ''}`;
+  $('#view').querySelectorAll('[data-ex-view]').forEach((el) => el.addEventListener('click', () => openExpenseDetails(el.dataset.exView)));
+}
+
+function openExpenseDetails(id) {
+  const e = (S.data.staffExpenses || []).find((x) => x.id === id);
+  if (!e) return;
+  const st = EX_STATUS[e.status] || EX_STATUS.pending;
+  openModal(`
+    <h2>${esc(e.title)} <span class="badge ${st.color} dot">${st.name}</span></h2>
+    <p class="small">${esc(empName(e.employeeId))} · ${fmtDate(e.date)} · <b>${money(e.amount)}</b></p>
+    <div id="receipt-holder"><button class="btn small" id="show-receipt">📷 Показать чек</button></div>
+    ${e.status === 'pending' ? `
+    <div class="actions" style="justify-content:center;margin-top:16px">
+      <button class="btn" data-resolve="cash:savva">💵 Вернул из наличных Саввы</button>
+      <button class="btn" data-resolve="cash:andrey">💵 Вернул из наличных Андрея</button>
+      <button class="btn" data-resolve="bank">🏦 Вернул со счёта</button>
+    </div>
+    <p class="muted small" style="text-align:center">«Из наличных» — спишется с кассы владельца. «Со счёта» — расход придёт из выписки банка.</p>` : ''}
+    <div class="actions"><button class="btn" id="modal-cancel">Закрыть</button></div>
+  `, (root) => {
+    $('#modal-cancel', root).addEventListener('click', closeModal);
+    $('#show-receipt', root)?.addEventListener('click', async () => {
+      $('#receipt-holder', root).innerHTML = '<div class="muted small">Загружаю…</div>';
+      const r = await S.store.getFile(S.token, e.receiptId);
+      $('#receipt-holder', root).innerHTML = r.ok && String(r.b64).startsWith('data:image/')
+        ? `<img class="receipt-img" src="${r.b64}" alt="Чек">`
+        : `<div class="muted small">${esc(r.error || 'Чек не найден')}</div>`;
+    });
+    root.querySelectorAll('[data-resolve]').forEach((b) => b.addEventListener('click', async () => {
+      const res = await S.store.resolveExpense(S.token, e.id, b.dataset.resolve);
+      if (!res.ok) { toast(res.error || 'Ошибка', true); return; }
+      applyLocal('staffExpenses', 'update', res.item);
+      closeModal();
+      toast('Возврат отмечен');
+      refresh(true);
+    }));
+  });
+}
+
+function renderFinAccounts(tabsHtml) {
+  const bal = ownerBalances(S.data.finance || []);
+  $('#view').innerHTML = `
+    ${tabsHtml}
+    <div class="cards-row">
+      ${OWNERS.map((o) => {
+        const b = bal[o.id];
+        return `<div class="card stat"><div class="label">${o.name}</div>
+          <div class="value ${b.total >= 0 ? '' : 'red'}">${money(b.total)}</div>
+          <div class="hint">💻 Разработка: ${money(b.dev)}</div>
+          <div class="hint">🎾 Падел: ${money(b.padel)}</div>
+          ${b.personal ? `<div class="hint" style="color:var(--red)">личные расходы: −${money(b.personal)}</div>` : ''}
+        </div>`;
+      }).join('')}
+    </div>
+    <div class="card muted small">
+      <b>Как считается.</b> Доходы разработки делятся пополам: Савва 50% / Андрей 50%.
+      Падел: (доходы − аренда кортов, операции с пометкой <span class="mono">PADEL KLUB</span>) делятся: Андрей 34% / Савва 33% / Дмитрий 33%.
+      Расход, записанный на конкретного человека (поле «Чей расход» в операции), вычитается только из его счёта.
+      Всё пересчитывается из операций автоматически, где бы вы их ни меняли.
+    </div>`;
+}
+
+function renderFinCash(tabsHtml) {
+  const cash = (S.data.cash || []).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+  const cashOwners = OWNERS.filter((o) => o.cashbox);
+  const balOf = (oid) => cash.filter((c) => c.owner === oid).reduce((s, c) => s + (c.type === 'income' ? 1 : -1) * Number(c.amount || 0), 0);
+  $('#view').innerHTML = `
+    ${tabsHtml}
+    <div class="searchbar"><div class="grow"></div><button class="btn primary" id="add-cash">+ Операция с наличными</button></div>
+    <div class="cards-row">
+      ${cashOwners.map((o) => `<div class="card stat"><div class="label">Наличные — ${o.name}</div><div class="value">${money(balOf(o.id))}</div></div>`).join('')}
+    </div>
+    <div class="banner">💵 Наличные — отдельная касса: в общую статистику доходов/расходов не попадают. Зарплату наличными начисляйте через Операции → «+ Операция» → категория «Зарплата» → источник «Наличные».</div>
+    <div class="list">
+      ${cash.length ? cash.map((c) => `
+        <div class="row-card" data-cash="${c.id}">
+          <div class="grow col"><div class="title">${esc(OWNERS.find((o) => o.id === c.owner)?.name || c.owner)}: ${esc(c.category || '')}</div>
+          <div class="sub">${fmtDate(c.date)}${c.employeeId ? ' · ' + esc(empName(c.employeeId)) : ''}${c.comment ? ' · ' + esc(c.comment) : ''}</div></div>
+          <div class="amount ${c.type === 'income' ? 'green' : 'red'}">${c.type === 'income' ? '+' : '−'}${money(c.amount)}</div>
+        </div>`).join('') : `<div class="card empty"><div class="big">💵</div>Операций с наличными пока нет</div>`}
+    </div>`;
+  $('#add-cash').addEventListener('click', () => openCashForm());
+  $('#view').querySelectorAll('[data-cash]').forEach((el) => el.addEventListener('click', () => openCashForm((S.data.cash || []).find((c) => c.id === el.dataset.cash))));
+}
+
+function openCashForm(c) {
+  const isNew = !c;
+  const cashOwners = OWNERS.filter((o) => o.cashbox);
+  openModal(`
+    <h2>${isNew ? 'Операция с наличными' : 'Наличные'}</h2>
+    <form id="ent-form">
+      <div class="form-row">
+        <label class="field"><span>Чья касса</span>
+          <select name="owner">${cashOwners.map((o) => `<option value="${o.id}" ${(c?.owner || 'savva') === o.id ? 'selected' : ''}>${o.name}</option>`).join('')}</select>
+        </label>
+        <label class="field"><span>Тип</span>
+          <select name="type">
+            <option value="income" ${(c?.type || 'income') === 'income' ? 'selected' : ''}>Пришло</option>
+            <option value="expense" ${c?.type === 'expense' ? 'selected' : ''}>Ушло</option>
+          </select>
+        </label>
+      </div>
+      <div class="form-row">
+        <label class="field"><span>Сумма, ₽</span><input type="number" name="amount" required step="0.01" value="${esc(c?.amount || '')}"></label>
+        <label class="field"><span>Дата</span><input type="date" name="date" required value="${esc(c?.date || today())}"></label>
+      </div>
+      <label class="field"><span>Категория</span>
+        <select name="category">${FIN_CATEGORIES.map((x) => `<option ${c?.category === x ? 'selected' : ''}>${x}</option>`).join('')}</select>
+      </label>
+      <label class="field"><span>Комментарий</span><input type="text" name="comment" value="${esc(c?.comment || '')}"></label>
+      <div class="actions">
+        ${!isNew ? `<button type="button" class="btn danger ghost left" id="ent-del">Удалить</button>` : ''}
+        <button type="button" class="btn" id="modal-cancel">Отмена</button>
+        <button type="submit" class="btn primary">${isNew ? 'Добавить' : 'Сохранить'}</button>
+      </div>
+    </form>
+  `, (root) => bindEntityForm(root, 'cash', c, {}));
 }
 
 function openFinForm(f) {
@@ -775,12 +924,19 @@ function openFinForm(f) {
         </label>
       </div>
       <label class="field"><span>Контрагент</span><input type="text" name="counterparty" value="${esc(f?.counterparty || '')}"></label>
+      <label class="field"><span>Чей расход — спишется с личного счёта</span>
+        <select name="owner">
+          <option value="">— общий, ни на кого —</option>
+          ${OWNERS.map((o) => `<option value="${o.id}" ${f?.owner === o.id ? 'selected' : ''}>${o.name}</option>`).join('')}
+        </select>
+      </label>
       <label class="field"><span>Сотрудник — если это зарплата или компенсация ему</span>
         <select name="employeeId">
           <option value="">— не относится к сотруднику —</option>
           ${(S.data.employees || []).filter((p) => p.active !== false).map((p) => `<option value="${p.id}" ${f?.employeeId === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
         </select>
       </label>
+      <div id="salary-extra"></div>
       <label class="field"><span>Комментарий</span><input type="text" name="comment" value="${esc(f?.comment || '')}"></label>
       <div class="actions">
         ${!isNew && f?.source !== 'bank' ? `<button type="button" class="btn danger ghost left" id="ent-del">Удалить</button>` : ''}
@@ -788,17 +944,79 @@ function openFinForm(f) {
         <button type="submit" class="btn primary">${isNew ? 'Добавить' : 'Сохранить'}</button>
       </div>
     </form>
-  `, (root) => bindEntityForm(root, 'finance', f, { source: f?.source || 'manual' }));
+  `, (root) => {
+    $('#modal-cancel', root).addEventListener('click', closeModal);
+
+    // Блок «зарплата»: источник выплаты + зачёт трат сотрудника
+    const updHint = () => {
+      const hint = $('#offset-hint', root);
+      if (!hint) return;
+      const amt = Number(root.querySelector('[name=amount]').value) || 0;
+      const sum = [...root.querySelectorAll('[name=offset]:checked')].reduce((s, c) => s + Number(c.dataset.amt), 0);
+      hint.textContent = sum ? `К выплате: ${money(amt)} − ${money(sum)} = ${money(amt - sum)}. Выбранные траты будут погашены.` : '';
+    };
+    const updSalary = () => {
+      const box = $('#salary-extra', root);
+      const cat = root.querySelector('[name=category]').value;
+      const empId = root.querySelector('[name=employeeId]').value;
+      if (!isNew || cat !== 'Зарплата' || !empId) { box.innerHTML = ''; return; }
+      const pend = (S.data.staffExpenses || []).filter((e) => e.status === 'pending' && e.employeeId === empId);
+      box.innerHTML = `
+        <label class="field"><span>Источник выплаты</span>
+          <select name="paySource">
+            <option value="account">Счёт / безнал</option>
+            <option value="cash:savva">💵 Наличные Саввы</option>
+            <option value="cash:andrey">💵 Наличные Андрея</option>
+          </select>
+        </label>
+        ${pend.length ? `<div class="field"><span class="small" style="font-weight:600;color:var(--muted)">Зачесть траты сотрудника</span>
+          ${pend.map((e2) => `<label class="checkline"><input type="checkbox" name="offset" value="${e2.id}" data-amt="${e2.amount}"><span>${esc(e2.title)} — ${money(e2.amount)}</span></label>`).join('')}
+          <div class="muted small" id="offset-hint"></div>
+        </div>` : ''}`;
+      box.querySelectorAll('[name=offset]').forEach((cb) => cb.addEventListener('change', updHint));
+      updHint();
+    };
+    root.querySelector('[name=category]').addEventListener('change', updSalary);
+    root.querySelector('[name=employeeId]').addEventListener('change', updSalary);
+    root.querySelector('[name=amount]').addEventListener('input', updHint);
+    updSalary();
+
+    $('#ent-form', root).addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const item = Object.fromEntries(new FormData(e.target).entries());
+      const offsetIds = [...root.querySelectorAll('[name=offset]:checked')].map((c) => c.value);
+      const paySource = item.paySource || 'account';
+      delete item.paySource;
+      delete item.offset;
+      closeModal();
+      if (isNew && item.category === 'Зарплата' && paySource.startsWith('cash:')) {
+        await doCreate('cash', { owner: paySource.slice(5), date: item.date, type: 'expense', amount: item.amount, category: 'Зарплата', comment: item.comment || '', employeeId: item.employeeId || '', offsetIds }, 'Зарплата выплачена наличными');
+        S.finTab = 'cash';
+      } else if (isNew) {
+        await doCreate('finance', { ...item, source: 'manual', offsetIds }, 'Добавлено');
+      } else {
+        await doUpdate('finance', { ...f, ...item }, 'Сохранено');
+      }
+      if (offsetIds.length) refresh(true);
+      render();
+    });
+    $('#ent-del', root)?.addEventListener('click', async () => {
+      if (!confirm('Удалить запись?')) return;
+      closeModal();
+      await doDelete('finance', f.id, 'Удалено');
+    });
+  });
 }
 
 // ---------- Мои деньги (сотрудник) ----------
-const EX_STATUS = { pending: { name: 'Жду возврата', color: 'amber' }, returned_cash: { name: 'Возвращено наличными', color: 'green' }, returned_bank: { name: 'Возвращено со счёта', color: 'green' } };
-
 function viewMoney() {
   if (isAdmin()) { location.hash = '#/finance'; return; }
   setTitle('Мои деньги');
   const month = today().slice(0, 7);
-  const paid = (S.data.finance || []).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+  const paid = [
+    ...(S.data.finance || []),
+    ...(S.data.cash || []).map((c) => ({ ...c, _cash: true }))
+  ].sort((a, b) => (b.date || '').localeCompare(a.date || ''));
   const paidMonth = paid.filter((f) => (f.date || '').startsWith(month)).reduce((s, f) => s + Number(f.amount || 0), 0);
   const paidTotal = paid.reduce((s, f) => s + Number(f.amount || 0), 0);
   const ex = (S.data.staffExpenses || []).sort((a, b) => (b.created || 0) - (a.created || 0));
@@ -826,6 +1044,7 @@ function viewMoney() {
       ${paid.length ? paid.map((f) => `
         <div class="row-card" style="cursor:default">
           <div class="grow col"><div class="title">${esc(f.category || 'Выплата')}</div><div class="sub">${fmtDate(f.date)}${f.comment ? ' · ' + esc(f.comment) : ''}</div></div>
+          ${f._cash ? '<span class="badge">💵 наличными</span>' : ''}
           <div class="amount green">+${money(f.amount)}</div>
         </div>`).join('') : `<div class="card empty"><div class="big">💰</div>Выплат пока не было</div>`}
     </div>`;
@@ -833,28 +1052,106 @@ function viewMoney() {
   $('#add-expense').addEventListener('click', () => openStaffExpenseForm());
   $('#view').querySelectorAll('[data-ex]').forEach((el) => el.addEventListener('click', () => {
     const e = ex.find((x) => x.id === el.dataset.ex);
-    if (e && e.status === 'pending') openStaffExpenseForm(e);
+    if (!e) return;
+    if (e.status === 'pending') openStaffExpenseForm(e);
+    else showMyReceipt(e);
   }));
+}
+
+/** Сжимаем фото на телефоне до разумного размера перед отправкой. */
+function resizePhoto(file, max = 1280, quality = 0.72) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const sc = Math.min(1, max / Math.max(img.width, img.height));
+      const c = document.createElement('canvas');
+      c.width = Math.round(img.width * sc);
+      c.height = Math.round(img.height * sc);
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      URL.revokeObjectURL(img.src);
+      resolve(c.toDataURL('image/jpeg', quality));
+    };
+    img.onerror = () => { URL.revokeObjectURL(img.src); reject(new Error('bad image')); };
+    img.src = URL.createObjectURL(file);
+  });
+}
+
+function showMyReceipt(e) {
+  const st = EX_STATUS[e.status] || EX_STATUS.pending;
+  openModal(`
+    <h2>${esc(e.title)} <span class="badge ${st.color} dot">${st.name}</span></h2>
+    <p class="small">${fmtDate(e.date)} · <b>${money(e.amount)}</b></p>
+    <div id="receipt-holder" class="muted small">Загружаю чек…</div>
+    <div class="actions"><button class="btn" id="modal-cancel">Закрыть</button></div>
+  `, async (root) => {
+    $('#modal-cancel', root).addEventListener('click', closeModal);
+    const r = await S.store.getFile(S.token, e.receiptId);
+    $('#receipt-holder', root).innerHTML = r.ok && String(r.b64).startsWith('data:image/')
+      ? `<img class="receipt-img" src="${r.b64}" alt="Чек">`
+      : `<div class="muted small">${esc(r.error || 'Чек не найден')}</div>`;
+  });
 }
 
 function openStaffExpenseForm(ex) {
   const isNew = !ex;
   openModal(`
     <h2>${isNew ? 'Новая трата' : 'Трата'}</h2>
-    <p class="muted small">Опишите, что вы купили для работы за свои деньги — админ получит уведомление и вернёт вам сумму.</p>
+    <p class="muted small">Опишите, что вы купили для работы за свои деньги, и сфотографируйте чек — админ получит уведомление и вернёт вам сумму.</p>
     <form id="ent-form">
       <label class="field"><span>Что купили</span><input type="text" name="title" required value="${esc(ex?.title || '')}" placeholder="Например: бананы и вода на турнир"></label>
       <div class="form-row">
         <label class="field"><span>Сумма, ₽</span><input type="number" name="amount" required step="0.01" value="${esc(ex?.amount || '')}"></label>
         <label class="field"><span>Дата</span><input type="date" name="date" required value="${esc(ex?.date || today())}"></label>
       </div>
+      <label class="field"><span>Фото чека — обязательно</span>
+        <input type="file" id="receipt-input" accept="image/*" ${isNew ? 'required' : ''}>
+        <img id="receipt-preview" class="receipt-img" style="display:none" alt="Чек">
+        ${!isNew && ex.receiptId ? `<p class="muted small" style="margin:6px 0 0">Чек уже прикреплён — выберите файл, только если хотите заменить.</p>` : ''}
+      </label>
       <div class="actions">
         ${!isNew ? `<button type="button" class="btn danger ghost left" id="ent-del">Удалить</button>` : ''}
         <button type="button" class="btn" id="modal-cancel">Отмена</button>
-        <button type="submit" class="btn primary">${isNew ? 'Отправить' : 'Сохранить'}</button>
+        <button type="submit" class="btn primary" id="ex-submit">${isNew ? 'Отправить' : 'Сохранить'}</button>
       </div>
     </form>
-  `, (root) => bindEntityForm(root, 'staffExpenses', ex, {}));
+  `, (root) => {
+    $('#modal-cancel', root).addEventListener('click', closeModal);
+    let photoB64 = null;
+    $('#receipt-input', root).addEventListener('change', async (e2) => {
+      const file = e2.target.files[0];
+      if (!file) { photoB64 = null; return; }
+      try {
+        photoB64 = await resizePhoto(file);
+        const prev = $('#receipt-preview', root);
+        prev.src = photoB64;
+        prev.style.display = 'block';
+      } catch {
+        photoB64 = null;
+        toast('Не удалось прочитать фото', true);
+      }
+    });
+    $('#ent-form', root).addEventListener('submit', async (e2) => {
+      e2.preventDefault();
+      const item = Object.fromEntries(new FormData(e2.target).entries());
+      if (isNew && !photoB64) { toast('Прикрепите фото чека', true); return; }
+      const btn = $('#ex-submit', root);
+      btn.disabled = true;
+      let receiptId = ex?.receiptId || '';
+      if (photoB64) {
+        const up = await S.store.uploadFile(S.token, photoB64);
+        if (!up.ok) { toast(up.error || 'Не удалось загрузить фото', true); btn.disabled = false; return; }
+        receiptId = up.id;
+      }
+      closeModal();
+      if (isNew) await doCreate('staffExpenses', { title: item.title, amount: item.amount, date: item.date, receiptId }, 'Трата отправлена — админу пришло уведомление');
+      else await doUpdate('staffExpenses', { ...ex, title: item.title, amount: item.amount, date: item.date, receiptId }, 'Сохранено');
+    });
+    $('#ent-del', root)?.addEventListener('click', async () => {
+      if (!confirm('Удалить трату?')) return;
+      closeModal();
+      await doDelete('staffExpenses', ex.id, 'Удалено');
+    });
+  });
 }
 
 // ---------- Команда ----------

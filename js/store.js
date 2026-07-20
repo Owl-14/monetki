@@ -25,10 +25,52 @@ export const CLIENT_STATUSES = {
 };
 
 export const TASK_STATUSES = [
-  { id: 'new', name: 'Новая', color: 'blue' },
-  { id: 'progress', name: 'В работе', color: 'amber' },
-  { id: 'done', name: 'Готово', color: 'green' }
+  { id: 'new', name: 'Не видел', color: 'red' },
+  { id: 'progress', name: 'В работе', color: 'blue' },
+  { id: 'question', name: 'Есть вопросы', color: 'amber' },
+  { id: 'done', name: 'Выполнена', color: 'green' }
 ];
+
+// Владельцы бизнеса и их доли в направлениях.
+// Разработка: пополам Савва/Андрей. Падел: Андрей 34%, Савва 33%, Дмитрий 33%,
+// причём делится (приходы − аренда кортов): аренда — операции с пометкой PADEL KLUB.
+export const OWNERS = [
+  { id: 'savva', name: 'Савва', shares: { dev: 0.5, padel: 0.33 }, cashbox: true },
+  { id: 'andrey', name: 'Андрей', shares: { dev: 0.5, padel: 0.34 }, cashbox: true },
+  { id: 'dmitry', name: 'Дмитрий', shares: { dev: 0, padel: 0.33 }, cashbox: false }
+];
+
+export const isCourtRent = (f) => /padel\s*klub/i.test((f.comment || '') + ' ' + (f.counterparty || ''));
+
+/** Личные счета владельцев, посчитанные из операций (п.15: всегда согласованы, где бы ни меняли). */
+export function ownerBalances(finance) {
+  const res = {};
+  OWNERS.forEach((o) => { res[o.id] = { dev: 0, padel: 0, personal: 0, total: 0 }; });
+  for (const f of finance || []) {
+    const amt = Number(f.amount || 0);
+    if (!amt) continue;
+    if (f.type === 'income') {
+      OWNERS.forEach((o) => {
+        const sh = o.shares[f.unit] || 0;
+        if (sh) res[o.id][f.unit] += amt * sh;
+      });
+    } else if (f.unit === 'padel' && isCourtRent(f)) {
+      // аренда кортов уменьшает делимую сумму падела по тем же долям
+      OWNERS.forEach((o) => {
+        const sh = o.shares.padel || 0;
+        if (sh) res[o.id].padel -= amt * sh;
+      });
+    } else if (f.owner && res[f.owner]) {
+      // расход, записанный на конкретного владельца
+      res[f.owner].personal += amt;
+    }
+  }
+  OWNERS.forEach((o) => {
+    const r = res[o.id];
+    r.total = r.dev + r.padel - r.personal;
+  });
+  return res;
+}
 
 export const FIN_METHODS = [
   { id: 'account', name: 'Счёт' },
@@ -74,13 +116,19 @@ function seedData() {
       { id: uid(), unit: 'dev', title: 'Выставить счёт барбершопу', desc: 'После согласования КП.', assigneeId: 'u-admin', authorId: 'u-admin', status: 'new', priority: 'low', due: d(5), created: now, updated: now, comments: [] }
     ],
     staffExpenses: [
-      { id: uid(), employeeId: 'u-oleg', unit: 'padel', date: d(-1), amount: 500, title: 'Бананы и вода на турнир', status: 'pending', created: now, updated: now }
+      { id: uid(), employeeId: 'u-oleg', unit: 'padel', date: d(-1), amount: 500, title: 'Бананы и вода на турнир', status: 'pending', receiptId: 'f-demo', created: now, updated: now }
+    ],
+    files: [
+      { id: 'f-demo', b64: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', byId: 'u-oleg', created: now }
+    ],
+    cash: [
+      { id: uid(), owner: 'savva', date: d(-4), type: 'income', amount: 20000, category: 'Прочее', comment: 'Пополнение кассы', created: now, updated: now }
     ],
     finance: [
       { id: uid(), unit: 'padel', date: d(-1), type: 'expense', amount: 30000, method: 'cash', source: 'manual', category: 'Зарплата', counterparty: 'Олег (падел)', comment: 'Зарплата за месяц', bankId: '', employeeId: 'u-oleg' },
       { id: uid(), unit: 'dev', date: d(-2), type: 'income', amount: 60000, method: 'account', source: 'manual', category: 'Оплата клиента', counterparty: 'Кофейня «Зерно»', comment: 'Предоплата 50% за сайт', bankId: '' },
       { id: uid(), unit: 'padel', date: d(-3), type: 'income', amount: 24000, method: 'sbp', source: 'manual', category: 'Оплата клиента', counterparty: 'Взносы игроков', comment: 'Турнир 12 участников × 2000', bankId: '' },
-      { id: uid(), unit: 'padel', date: d(-3), type: 'expense', amount: 14000, method: 'card', source: 'manual', category: 'Аренда', counterparty: 'Padel Arena', comment: 'Корты на турнир', bankId: '' },
+      { id: uid(), unit: 'padel', date: d(-3), type: 'expense', amount: 14000, method: 'card', source: 'manual', category: 'Аренда', counterparty: 'Padel Arena', comment: 'PADEL KLUB корты на турнир', bankId: '' },
       { id: uid(), unit: 'dev', date: d(-6), type: 'expense', amount: 3500, method: 'card', source: 'manual', category: 'Сервисы', counterparty: 'Хостинг', comment: '', bankId: '' }
     ],
     notifications: [
@@ -99,7 +147,7 @@ class LocalStore {
     let db;
     if (!raw) { db = seedData(); localStorage.setItem(LS_KEY, JSON.stringify(db)); return db; }
     try { db = JSON.parse(raw); } catch { db = seedData(); localStorage.setItem(LS_KEY, JSON.stringify(db)); }
-    if (!db.staffExpenses) db.staffExpenses = [];
+    ['staffExpenses', 'cash', 'files'].forEach((k) => { if (!db[k]) db[k] = []; });
     return db;
   }
   _save(db) { localStorage.setItem(LS_KEY, JSON.stringify(db)); }
@@ -127,40 +175,71 @@ class LocalStore {
       ok: true,
       profile: this._profile(u),
       data: {
-        employees: db.employees.filter((e) => isAdmin || canSee(e.unit) || e.unit === 'all').map((e) => (isAdmin ? e : { id: e.id, name: e.name, role: e.role, unit: e.unit })),
+        // сотрудник видит только людей своего направления (и админов) — п.7
+        employees: db.employees
+          .filter((e) => isAdmin || e.unit === u.unit || e.unit === 'all' || e.role === 'admin')
+          .map((e) => (isAdmin ? e : { id: e.id, name: e.name, role: e.role, unit: e.unit, active: e.active })),
         clients: db.clients.filter((c) => canSee(c.unit)),
         venues: db.venues.filter((v) => canSee(v.unit)),
         players: db.players.filter((p) => canSee(p.unit)),
         tasks: db.tasks.filter((t) => canSee(t.unit)),
         finance: isAdmin ? db.finance : db.finance.filter((f) => f.employeeId === u.id),
         staffExpenses: isAdmin ? db.staffExpenses : db.staffExpenses.filter((e) => e.employeeId === u.id),
+        cash: isAdmin ? db.cash : db.cash.filter((c) => c.employeeId === u.id),
         bankBalance: isAdmin ? { amount: 175000, updated: new Date().toISOString() } : null,
         notifications: db.notifications.filter((n) => n.toId === u.id)
       }
     };
   }
 
+  _salaryOffsets(db, u, item) {
+    // Зарплата с зачётом трат: вычитаем выбранные траты, помечаем их погашенными
+    const ids = item.offsetIds || [];
+    delete item.offsetIds;
+    if (!ids.length || item.category !== 'Зарплата' || !item.employeeId) return null;
+    const exps = db.staffExpenses.filter((e) => ids.includes(e.id) && e.employeeId === item.employeeId && e.status === 'pending');
+    const sum = exps.reduce((s, e) => s + Number(e.amount || 0), 0);
+    if (!sum) return null;
+    if (Number(item.amount) < sum) return { error: 'Сумма трат больше зарплаты' };
+    item.amount = Number(item.amount) - sum;
+    item.comment = ((item.comment || '') + ` (за вычетом трат ${sum} ₽)`).trim();
+    exps.forEach((e) => { e.status = 'returned_salary'; e.updated = Date.now(); });
+    return { sum, titles: exps.map((e) => e.title).join(', ') };
+  }
+
   async create(token, entity, item) {
     const u = this._user(token); if (!u) return { ok: false, error: 'auth' };
     const db = this._db();
-    if (entity === 'employees' && u.role !== 'admin') return { ok: false, error: 'Только для админа' };
-    if (entity === 'finance' && u.role !== 'admin') return { ok: false, error: 'Только для админа' };
+    if (['employees', 'finance', 'cash'].includes(entity) && u.role !== 'admin') return { ok: false, error: 'Только для админа' };
     item = { ...item, id: item.id || uid(), created: Date.now(), updated: Date.now() };
     if (entity === 'employees' && !item.code) item.code = String(Math.floor(100000 + Math.random() * 900000));
+    if (entity === 'tasks' && u.role !== 'admin') item.assigneeId = u.id; // п.3: сотрудник ставит задачи только себе
     if (entity === 'staffExpenses') {
+      if (!item.receiptId) return { ok: false, error: 'Прикрепите фото чека' };
       if (u.role !== 'admin') { item.employeeId = u.id; item.unit = u.unit === 'all' ? (item.unit || 'padel') : u.unit; }
       item.status = item.status || 'pending';
       db.employees.filter((e) => e.role === 'admin' && e.active && e.id !== u.id)
         .forEach((a) => db.notifications.push({ id: uid(), toId: a.id, text: `${u.name}: трата ${item.amount} ₽ — ${item.title}`, link: '#/finance', read: false, created: Date.now() }));
     }
+    let offsets = null;
+    if ((entity === 'finance' || entity === 'cash') && item.category === 'Зарплата') {
+      offsets = this._salaryOffsets(db, u, item);
+      if (offsets?.error) return { ok: false, error: offsets.error };
+    }
     db[entity].push(item);
-    // уведомление исполнителю при постановке задачи
+    if (offsets?.sum) {
+      db[entity].push({
+        id: uid(), unit: item.unit, owner: item.owner, date: item.date,
+        type: 'expense', amount: offsets.sum, method: item.method || 'cash', source: 'manual',
+        category: 'Компенсация сотруднику', counterparty: '', comment: `Зачтено в зарплате: ${offsets.titles}`,
+        employeeId: item.employeeId, created: Date.now(), updated: Date.now()
+      });
+    }
     if (entity === 'tasks' && item.assigneeId && item.assigneeId !== u.id) {
       db.notifications.push({ id: uid(), toId: item.assigneeId, text: `Новая задача: ${item.title}`, link: '#/tasks', read: false, created: Date.now() });
     }
-    // уведомление сотруднику о выплате
-    if (entity === 'finance' && item.employeeId) {
-      db.notifications.push({ id: uid(), toId: item.employeeId, text: `Вам ${item.category === 'Зарплата' ? 'начислена зарплата' : 'проведена выплата'}: ${item.amount} ₽`, link: '#/money', read: false, created: Date.now() });
+    if ((entity === 'finance' || entity === 'cash') && item.employeeId) {
+      db.notifications.push({ id: uid(), toId: item.employeeId, text: `Вам ${item.category === 'Зарплата' ? 'начислена зарплата' : 'проведена выплата'}: ${item.amount} ₽${entity === 'cash' ? ' (наличными)' : ''}`, link: '#/money', read: false, created: Date.now() });
     }
     this._save(db);
     return { ok: true, item };
@@ -169,14 +248,21 @@ class LocalStore {
   async update(token, entity, item) {
     const u = this._user(token); if (!u) return { ok: false, error: 'auth' };
     const db = this._db();
+    if (['employees', 'finance', 'cash'].includes(entity) && u.role !== 'admin') return { ok: false, error: 'Только для админа' };
     const i = db[entity].findIndex((x) => x.id === item.id);
     if (i < 0) return { ok: false, error: 'Не найдено' };
     const before = db[entity][i];
+    // п.1–2: сотрудник меняет содержимое только своих задач; в чужих (от админа) — только статус
+    if (entity === 'tasks' && u.role !== 'admin' && before.authorId !== u.id) {
+      if (before.assigneeId !== u.id) return { ok: false, error: 'Нет доступа' };
+      item = { id: before.id, status: item.status };
+    }
     db[entity][i] = { ...before, ...item, updated: Date.now() };
     if (entity === 'tasks') {
       const t = db[entity][i];
-      if (before.status !== 'done' && t.status === 'done' && t.authorId && t.authorId !== u.id) {
-        db.notifications.push({ id: uid(), toId: t.authorId, text: `Задача выполнена: ${t.title}`, link: '#/tasks', read: false, created: Date.now() });
+      if (before.status !== t.status && t.authorId && t.authorId !== u.id) {
+        const st = TASK_STATUSES.find((s) => s.id === t.status);
+        db.notifications.push({ id: uid(), toId: t.authorId, text: `${u.name} — «${t.title}»: ${st ? st.name : t.status}`, link: '#/tasks', read: false, created: Date.now() });
       }
       if (before.assigneeId !== t.assigneeId && t.assigneeId && t.assigneeId !== u.id) {
         db.notifications.push({ id: uid(), toId: t.assigneeId, text: `Вам передали задачу: ${t.title}`, link: '#/tasks', read: false, created: Date.now() });
@@ -186,9 +272,34 @@ class LocalStore {
     return { ok: true, item: db[entity][i] };
   }
 
+  async uploadFile(token, b64) {
+    const u = this._user(token); if (!u) return { ok: false, error: 'auth' };
+    if (!b64 || b64.length > 2000000) return { ok: false, error: 'Фото слишком большое' };
+    const db = this._db();
+    const item = { id: uid(), b64, byId: u.id, created: Date.now() };
+    db.files.push(item);
+    this._save(db);
+    return { ok: true, id: item.id };
+  }
+
+  async getFile(token, id) {
+    const u = this._user(token); if (!u) return { ok: false, error: 'auth' };
+    const db = this._db();
+    const f = db.files.find((x) => x.id === id);
+    if (!f) return { ok: false, error: 'Не найдено' };
+    const linked = db.staffExpenses.find((e) => e.receiptId === id);
+    if (u.role !== 'admin' && f.byId !== u.id && linked?.employeeId !== u.id) return { ok: false, error: 'Нет доступа' };
+    return { ok: true, b64: f.b64 };
+  }
+
   async remove(token, entity, id) {
     const u = this._user(token); if (!u) return { ok: false, error: 'auth' };
     const db = this._db();
+    if (['employees', 'finance', 'cash'].includes(entity) && u.role !== 'admin') return { ok: false, error: 'Только для админа' };
+    const before = db[entity].find((x) => x.id === id);
+    if (!before) return { ok: false, error: 'Не найдено' };
+    if (entity === 'tasks' && u.role !== 'admin' && before.authorId !== u.id) return { ok: false, error: 'Удалять можно только свои задачи' };
+    if (entity === 'staffExpenses' && u.role !== 'admin' && (before.employeeId !== u.id || before.status !== 'pending')) return { ok: false, error: 'Нет доступа' };
     db[entity] = db[entity].filter((x) => x.id !== id);
     this._save(db);
     return { ok: true };
@@ -232,7 +343,7 @@ class LocalStore {
     const db = this._db();
     if (db.employees.length && (!u || u.role !== 'admin')) return { ok: false, error: 'Только для админа' };
     let imported = 0;
-    ['employees', 'clients', 'venues', 'players', 'tasks', 'finance', 'staffExpenses', 'notifications'].forEach((entity) => {
+    ['employees', 'clients', 'venues', 'players', 'tasks', 'finance', 'staffExpenses', 'cash', 'files', 'notifications'].forEach((entity) => {
       (data?.[entity] || []).forEach((item) => {
         if (!item?.id) return;
         db[entity] = db[entity] || [];
@@ -251,13 +362,15 @@ class LocalStore {
     const ex = db.staffExpenses.find((x) => x.id === id);
     if (!ex) return { ok: false, error: 'Не найдено' };
     if (ex.status !== 'pending') return { ok: false, error: 'Уже возвращено' };
-    ex.status = how === 'cash' ? 'returned_cash' : 'returned_bank';
-    ex.updated = Date.now();
     const emp = db.employees.find((e) => e.id === ex.employeeId);
-    if (how === 'cash') {
-      db.finance.push({ id: uid(), unit: ex.unit, date: new Date().toISOString().slice(0, 10), type: 'expense', amount: ex.amount, method: 'cash', source: 'manual', category: 'Компенсация сотруднику', counterparty: emp ? emp.name : '', comment: ex.title, bankId: '', employeeId: ex.employeeId });
+    const cashOwner = String(how).startsWith('cash:') ? String(how).slice(5) : null;
+    ex.status = cashOwner ? 'returned_cash' : 'returned_bank';
+    ex.updated = Date.now();
+    if (cashOwner) {
+      // возврат наличными — списывается с кассы владельца, в общую статистику не попадает
+      db.cash.push({ id: uid(), owner: cashOwner, date: new Date().toISOString().slice(0, 10), type: 'expense', amount: ex.amount, category: 'Компенсация сотруднику', comment: ex.title, employeeId: ex.employeeId, created: Date.now(), updated: Date.now() });
     }
-    db.notifications.push({ id: uid(), toId: ex.employeeId, text: `Вам вернули ${ex.amount} ₽ (${how === 'cash' ? 'наличными' : 'со счёта'}) — ${ex.title}`, link: '#/money', read: false, created: Date.now() });
+    db.notifications.push({ id: uid(), toId: ex.employeeId, text: `Вам вернули ${ex.amount} ₽ (${cashOwner ? 'наличными' : 'со счёта'}) — ${ex.title}`, link: '#/money', read: false, created: Date.now() });
     this._save(db);
     return { ok: true, item: ex };
   }
@@ -296,6 +409,8 @@ class RemoteStore {
   resolveExpense(token, id, how) { return this._call({ action: 'resolve_expense', token, id, how }); }
   status() { return this._call({ action: 'status' }); }
   migrateImport(token, data) { return this._call({ action: 'migrate_import', token, data }); }
+  uploadFile(token, b64) { return this._call({ action: 'upload_file', token, b64 }); }
+  getFile(token, id) { return this._call({ action: 'get_file', token, id }); }
 }
 
 export function makeStore() {

@@ -17,8 +17,10 @@ const CORS = {
 
 const ENTITIES = [
   "employees", "clients", "venues", "players",
-  "tasks", "finance", "staffExpenses", "notifications",
+  "tasks", "finance", "staffExpenses", "cash", "notifications",
 ];
+// files (фото чеков) намеренно не входят в ENTITIES: их не тянем в bootstrap,
+// отдаём поштучно через get_file.
 
 type Rec = Record<string, unknown> & { id: string };
 
@@ -85,22 +87,26 @@ async function notifyAdmins(exceptId: string, text: string, link: string) {
 
 async function bootstrap(u: Rec) {
   const admin = isAdmin(u);
-  const [employees, clients, venues, players, tasks, finance, staffExpenses, notifications] =
+  const [employees, clients, venues, players, tasks, finance, staffExpenses, cash, notifications] =
     await Promise.all(ENTITIES.map(readAll));
   const unitF = (list: Rec[]) => list.filter((x) => canSeeUnit(u, x.unit));
   return {
     ok: true,
     profile: profileOf(u),
     data: {
+      // сотрудник видит только людей своего направления (и админов)
       employees: admin
         ? employees
-        : employees.map((e) => ({ id: e.id, name: e.name, role: e.role, unit: e.unit, active: e.active })),
+        : employees
+          .filter((e) => e.unit === u.unit || e.unit === "all" || e.role === "admin")
+          .map((e) => ({ id: e.id, name: e.name, role: e.role, unit: e.unit, active: e.active })),
       clients: unitF(clients),
       venues: unitF(venues),
       players: unitF(players),
       tasks: unitF(tasks),
       finance: admin ? finance : finance.filter((f) => f.employeeId === u.id),
       staffExpenses: admin ? staffExpenses : staffExpenses.filter((e) => e.employeeId === u.id),
+      cash: admin ? cash : cash.filter((c) => c.employeeId === u.id),
       bankBalance: admin ? await kvGet("BANK_BALANCE") : null,
       notifications: notifications.filter((n) => n.toId === u.id),
     },
@@ -109,12 +115,32 @@ async function bootstrap(u: Rec) {
 
 function checkWriteAccess(u: Rec, entity: string, item: Rec | null): string | null {
   if (!ENTITIES.includes(entity)) return "Неизвестная сущность";
-  if ((entity === "employees" || entity === "finance") && !isAdmin(u)) return "Только для админа";
+  if ((entity === "employees" || entity === "finance" || entity === "cash") && !isAdmin(u)) return "Только для админа";
   if (entity === "notifications") return "Нельзя";
   if (item && item.unit && item.unit !== "all" && !canSeeUnit(u, item.unit)) {
     return "Нет доступа к этому направлению";
   }
   return null;
+}
+
+// Зарплата с зачётом трат сотрудника: уменьшаем сумму, помечаем траты погашенными
+async function applySalaryOffsets(item: Rec): Promise<{ error?: string; sum?: number; titles?: string }> {
+  const ids = (item.offsetIds as string[]) || [];
+  delete item.offsetIds;
+  if (!ids.length || item.category !== "Зарплата" || !item.employeeId) return {};
+  const all = await readAll("staffExpenses");
+  const exps = all.filter((e) => ids.includes(e.id) && e.employeeId === item.employeeId && e.status === "pending");
+  const sum = exps.reduce((s, e) => s + Number(e.amount || 0), 0);
+  if (!sum) return {};
+  if (Number(item.amount) < sum) return { error: "Сумма трат больше зарплаты" };
+  item.amount = Number(item.amount) - sum;
+  item.comment = (String(item.comment || "") + ` (за вычетом трат ${sum} ₽)`).trim();
+  for (const e of exps) {
+    e.status = "returned_salary";
+    e.updated = Date.now();
+    await writeRow("staffExpenses", e);
+  }
+  return { sum, titles: exps.map((e) => e.title).join(", ") };
 }
 
 async function createItem(u: Rec, entity: string, item: Rec) {
@@ -129,11 +155,13 @@ async function createItem(u: Rec, entity: string, item: Rec) {
   if (entity === "tasks") {
     item.authorId = item.authorId || u.id;
     item.comments = item.comments || [];
+    if (!isAdmin(u)) item.assigneeId = u.id; // сотрудник ставит задачи только себе
     if (item.assigneeId && item.assigneeId !== u.id) {
       await notify(item.assigneeId, `Новая задача: ${item.title}`);
     }
   }
   if (entity === "staffExpenses") {
+    if (!item.receiptId) return { ok: false, error: "Прикрепите фото чека" };
     if (!isAdmin(u)) {
       item.employeeId = u.id;
       item.unit = u.unit === "all" ? (item.unit || "padel") : u.unit;
@@ -141,14 +169,27 @@ async function createItem(u: Rec, entity: string, item: Rec) {
     item.status = item.status || "pending";
     await notifyAdmins(u.id as string, `${u.name}: трата ${item.amount} ₽ — ${item.title}`, "#/finance");
   }
-  if (entity === "finance" && item.employeeId) {
+  let offsets: { error?: string; sum?: number; titles?: string } = {};
+  if ((entity === "finance" || entity === "cash") && item.category === "Зарплата") {
+    offsets = await applySalaryOffsets(item);
+    if (offsets.error) return { ok: false, error: offsets.error };
+  }
+  await writeRow(entity, item);
+  if (offsets.sum) {
+    await writeRow(entity, {
+      id: newId(), unit: item.unit, owner: item.owner, date: item.date,
+      type: "expense", amount: offsets.sum, method: item.method || "cash", source: "manual",
+      category: "Компенсация сотруднику", counterparty: "", comment: `Зачтено в зарплате: ${offsets.titles}`,
+      employeeId: item.employeeId, created: Date.now(), updated: Date.now(),
+    });
+  }
+  if ((entity === "finance" || entity === "cash") && item.employeeId) {
     await notify(
       item.employeeId,
-      `Вам ${item.category === "Зарплата" ? "начислена зарплата" : "проведена выплата"}: ${item.amount} ₽`,
+      `Вам ${item.category === "Зарплата" ? "начислена зарплата" : "проведена выплата"}: ${item.amount} ₽${entity === "cash" ? " (наличными)" : ""}`,
       "#/money",
     );
   }
-  await writeRow(entity, item);
   return { ok: true, item };
 }
 
@@ -164,10 +205,16 @@ async function updateItem(u: Rec, entity: string, item: Rec) {
     item.employeeId = u.id;
     item.status = "pending";
   }
+  // сотрудник меняет содержимое только своих задач; в поставленных админом — только статус
+  if (entity === "tasks" && !isAdmin(u) && before.authorId !== u.id) {
+    if (before.assigneeId !== u.id) return { ok: false, error: "Нет доступа" };
+    item = { id: before.id, status: item.status } as Rec;
+  }
   const merged = { ...before, ...item, updated: Date.now() } as Rec;
   if (entity === "tasks") {
-    if (before.status !== "done" && merged.status === "done" && merged.authorId && merged.authorId !== u.id) {
-      await notify(merged.authorId, `Задача выполнена: ${merged.title}`);
+    if (before.status !== merged.status && merged.authorId && merged.authorId !== u.id) {
+      const names: Record<string, string> = { new: "Не видел", progress: "В работе", question: "Есть вопросы", done: "Выполнена" };
+      await notify(merged.authorId, `${u.name} — «${merged.title}»: ${names[merged.status as string] || merged.status}`);
     }
     if (before.assigneeId !== merged.assigneeId && merged.assigneeId && merged.assigneeId !== u.id) {
       await notify(merged.assigneeId, `Вам передали задачу: ${merged.title}`);
@@ -184,6 +231,9 @@ async function deleteItem(u: Rec, entity: string, id: string) {
   if (deny) return { ok: false, error: deny };
   if (entity === "staffExpenses" && !isAdmin(u) && (before.employeeId !== u.id || before.status !== "pending")) {
     return { ok: false, error: "Нет доступа" };
+  }
+  if (entity === "tasks" && !isAdmin(u) && before.authorId !== u.id) {
+    return { ok: false, error: "Удалять можно только свои задачи" };
   }
   await deleteRow(entity, id);
   return { ok: true };
@@ -241,21 +291,43 @@ async function resolveExpense(u: Rec, id: string, how: string) {
   const ex = (await readAll("staffExpenses")).find((x) => x.id === id);
   if (!ex) return { ok: false, error: "Не найдено" };
   if (ex.status !== "pending") return { ok: false, error: "Уже возвращено" };
-  ex.status = how === "cash" ? "returned_cash" : "returned_bank";
+  const cashOwner = String(how).startsWith("cash:") ? String(how).slice(5) : null;
+  ex.status = cashOwner ? "returned_cash" : "returned_bank";
   ex.updated = Date.now();
   await writeRow("staffExpenses", ex);
-  if (how === "cash") {
-    const emp = (await readAll("employees")).find((e) => e.id === ex.employeeId);
-    await writeRow("finance", {
-      id: newId(), unit: ex.unit, date: new Date().toISOString().slice(0, 10),
-      type: "expense", amount: ex.amount, method: "cash", source: "manual",
-      category: "Компенсация сотруднику", counterparty: emp ? emp.name : "",
-      comment: ex.title, bankId: "", employeeId: ex.employeeId,
+  if (cashOwner) {
+    // возврат наличными — списание из кассы владельца, в общую статистику не попадает
+    await writeRow("cash", {
+      id: newId(), owner: cashOwner, date: new Date().toISOString().slice(0, 10),
+      type: "expense", amount: ex.amount, category: "Компенсация сотруднику",
+      comment: ex.title, employeeId: ex.employeeId,
       created: Date.now(), updated: Date.now(),
     });
   }
-  await notify(ex.employeeId, `Вам вернули ${ex.amount} ₽ (${how === "cash" ? "наличными" : "со счёта"}) — ${ex.title}`, "#/money");
+  await notify(ex.employeeId, `Вам вернули ${ex.amount} ₽ (${cashOwner ? "наличными" : "со счёта"}) — ${ex.title}`, "#/money");
   return { ok: true, item: ex };
+}
+
+// ---------- Файлы (фото чеков) ----------
+
+async function uploadFile(u: Rec, b64: unknown) {
+  const s = String(b64 || "");
+  if (!s.startsWith("data:image/")) return { ok: false, error: "Нужно фото" };
+  if (s.length > 2_000_000) return { ok: false, error: "Фото слишком большое" };
+  const item = { id: newId(), b64: s, byId: u.id, created: Date.now() };
+  await writeRow("files", item as Rec);
+  return { ok: true, id: item.id };
+}
+
+async function getFile(u: Rec, id: string) {
+  const { data } = await db.from("records").select("data").eq("entity", "files").eq("id", id).maybeSingle();
+  const f = data?.data as Rec | undefined;
+  if (!f) return { ok: false, error: "Не найдено" };
+  if (!isAdmin(u) && f.byId !== u.id) {
+    const linked = (await readAll("staffExpenses")).find((e) => e.receiptId === id);
+    if (linked?.employeeId !== u.id) return { ok: false, error: "Нет доступа" };
+  }
+  return { ok: true, b64: f.b64 };
 }
 
 async function statusInfo() {
@@ -440,6 +512,8 @@ Deno.serve(async (req) => {
       case "import_players": return json(await importPlayers(user, body.rows));
       case "mark_read": return json(await markRead(user, body.ids));
       case "resolve_expense": return json(await resolveExpense(user, body.id, body.how));
+      case "upload_file": return json(await uploadFile(user, body.b64));
+      case "get_file": return json(await getFile(user, body.id));
       default: return json({ ok: false, error: "Неизвестное действие" });
     }
   } catch (e) {
