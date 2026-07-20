@@ -190,7 +190,7 @@ class LocalStore {
         clients: db.clients.filter((c) => canSee(c.unit)),
         venues: db.venues.filter((v) => canSee(v.unit)),
         players: db.players.filter((p) => canSee(p.unit)),
-        tasks: db.tasks.filter((t) => canSee(t.unit)),
+        tasks: db.tasks.filter((t) => canSee(t.unit) && (isAdmin || t.assigneeId === u.id)),
         finance: isAdmin ? db.finance : db.finance.filter((f) => f.employeeId === u.id),
         staffExpenses: isAdmin ? db.staffExpenses : db.staffExpenses.filter((e) => e.employeeId === u.id),
         cash: isAdmin ? db.cash : db.cash.filter((c) => c.employeeId === u.id),

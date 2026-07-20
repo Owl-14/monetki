@@ -361,9 +361,11 @@ function viewTasks() {
   setTitle('Задачи');
   const units = activeUnits();
   const f = S.taskFilter;
+  // Переключатель «Мои / От меня / Все» — только у админов; сотрудник видит лишь свои задачи
+  const who = isAdmin() ? f.who : 'mine';
   let tasks = (S.data.tasks || []).filter((t) => units.includes(t.unit));
-  if (f.who === 'mine') tasks = tasks.filter((t) => t.assigneeId === S.profile.id);
-  if (f.who === 'from-me') tasks = tasks.filter((t) => t.authorId === S.profile.id && t.assigneeId !== S.profile.id);
+  if (who === 'mine') tasks = tasks.filter((t) => t.assigneeId === S.profile.id);
+  if (who === 'from-me') tasks = tasks.filter((t) => t.authorId === S.profile.id && t.assigneeId !== S.profile.id);
   if (f.status === 'active') tasks = tasks.filter((t) => t.status !== 'done');
   if (f.status === 'done') tasks = tasks.filter((t) => t.status === 'done');
   tasks.sort((a, b) => (a.status === 'done') - (b.status === 'done') || (a.due || '9999').localeCompare(b.due || '9999'));
@@ -372,9 +374,9 @@ function viewTasks() {
     <div class="searchbar">
       <button class="btn primary" id="add-task">+ Задача</button>
     </div>
-    <div class="chip-row" style="margin-bottom:6px">
-      ${[['mine', 'Мои'], ['from-me', 'От меня'], ['all', 'Все']].map(([k, l]) => `<button class="chip ${f.who === k ? 'active' : ''}" data-who="${k}">${l}</button>`).join('')}
-    </div>
+    ${isAdmin() ? `<div class="chip-row" style="margin-bottom:6px">
+      ${[['mine', 'Мои'], ['from-me', 'От меня'], ['all', 'Все']].map(([k, l]) => `<button class="chip ${who === k ? 'active' : ''}" data-who="${k}">${l}</button>`).join('')}
+    </div>` : ''}
     <div class="chip-row">
       ${[['active', 'Активные'], ['done', 'Выполнены'], ['any', 'Любые']].map(([k, l]) => `<button class="chip ${f.status === k ? 'active' : ''}" data-status="${k}">${l}</button>`).join('')}
     </div>
