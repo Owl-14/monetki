@@ -304,6 +304,9 @@ class LocalStore {
     if (!before) return { ok: false, error: 'Не найдено' };
     if (entity === 'tasks' && u.role !== 'admin' && before.authorId !== u.id) return { ok: false, error: 'Удалять можно только свои задачи' };
     if (entity === 'staffExpenses' && u.role !== 'admin' && (before.employeeId !== u.id || before.status !== 'pending')) return { ok: false, error: 'Нет доступа' };
+    if (entity === 'tasks' && before.assigneeId && before.assigneeId !== u.id && before.status !== 'done') {
+      db.notifications.push({ id: uid(), toId: before.assigneeId, text: `Задача удалена: ${before.title}`, link: '#/tasks', read: false, created: Date.now() });
+    }
     db[entity] = db[entity].filter((x) => x.id !== id);
     this._save(db);
     return { ok: true };
