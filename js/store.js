@@ -40,29 +40,33 @@ export const OWNERS = [
   { id: 'dmitry', name: 'Дмитрий', shares: { dev: 0, padel: 0.33 }, cashbox: false }
 ];
 
-export const isCourtRent = (f) => /padel\s*klub/i.test((f.comment || '') + ' ' + (f.counterparty || ''));
-
-/** Личные счета владельцев, посчитанные из операций (п.15: всегда согласованы, где бы ни меняли). */
+/**
+ * Личные счета владельцев, посчитанные из операций (п.15: всегда согласованы, где бы ни меняли).
+ * Каждое направление: (доходы − расходы) делятся по долям OWNERS.
+ * Расход, записанный на конкретного человека («Чей расход»), вычитается целиком
+ * только у него и не делится на всех. Переводы между своими счетами не считаются.
+ */
 export function ownerBalances(finance) {
   const res = {};
   OWNERS.forEach((o) => { res[o.id] = { dev: 0, padel: 0, personal: 0, total: 0 }; });
   for (const f of finance || []) {
     const amt = Number(f.amount || 0);
     if (!amt) continue;
+    if (f.category === 'Перевод между счетами') continue;
     if (f.type === 'income') {
       OWNERS.forEach((o) => {
         const sh = o.shares[f.unit] || 0;
         if (sh) res[o.id][f.unit] += amt * sh;
       });
-    } else if (f.unit === 'padel' && isCourtRent(f)) {
-      // аренда кортов уменьшает делимую сумму падела по тем же долям
-      OWNERS.forEach((o) => {
-        const sh = o.shares.padel || 0;
-        if (sh) res[o.id].padel -= amt * sh;
-      });
     } else if (f.owner && res[f.owner]) {
-      // расход, записанный на конкретного владельца
+      // личный расход владельца — целиком с его счёта
       res[f.owner].personal += amt;
+    } else {
+      // общий расход направления — уменьшает делимое по тем же долям
+      OWNERS.forEach((o) => {
+        const sh = o.shares[f.unit] || 0;
+        if (sh) res[o.id][f.unit] -= amt * sh;
+      });
     }
   }
   OWNERS.forEach((o) => {
