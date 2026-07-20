@@ -146,7 +146,9 @@ async function applySalaryOffsets(item: Rec): Promise<{ error?: string; sum?: nu
 async function createItem(u: Rec, entity: string, item: Rec) {
   const deny = checkWriteAccess(u, entity, item);
   if (deny) return { ok: false, error: deny };
-  item.id = item.id || newId();
+  // id всегда генерируем на сервере: иначе, прислав чужой id, можно было бы
+  // перезаписать (upsert) существующую запись в своём направлении.
+  item.id = newId();
   item.created = Date.now();
   item.updated = Date.now();
   if (entity === "employees" && !item.code) {
@@ -356,13 +358,20 @@ async function getFile(u: Rec, id: string) {
   return { ok: true, b64: f.b64 };
 }
 
-async function statusInfo() {
-  const [employees, finance, staffExpenses] = await Promise.all([
-    readAll("employees"), readAll("finance"), readAll("staffExpenses"),
+async function statusInfo(u: Rec | null) {
+  const employees = await readAll("employees");
+  // Постороннему (и рядовому сотруднику) — только факт «база пустая»,
+  // нужный для первичной загрузки резервной копии. Никаких счётчиков/сумм.
+  if (!u || !isAdmin(u)) {
+    return { ok: true, backend: "supabase", empty: employees.length === 0 };
+  }
+  const [finance, staffExpenses] = await Promise.all([
+    readAll("finance"), readAll("staffExpenses"),
   ]);
   return {
     ok: true,
     backend: "supabase",
+    empty: employees.length === 0,
     employees: employees.length,
     tochkaTokenSet: !!Deno.env.get("TOCHKA_TOKEN"),
     financeTotal: finance.length,
@@ -520,7 +529,7 @@ Deno.serve(async (req) => {
       if (!u) return json({ ok: false, error: "Неверный код доступа" });
       return json({ ok: true, token: u.code, profile: profileOf(u) });
     }
-    if (action === "status") return json(await statusInfo());
+    if (action === "status") return json(await statusInfo(await findUser(body.token)));
     if (action === "tochka_sync") {
       await remindDeadlines();
       return json(await tochkaSync(body.days || 30));

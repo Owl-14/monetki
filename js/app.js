@@ -245,7 +245,7 @@ function renderLogin(app) {
     </div>`;
   // Пустая база (свежий переезд)? Предлагаем загрузить резервную копию
   S.store.status?.().then((st) => {
-    if (!(st?.ok && st.employees === 0)) return;
+    if (!(st?.ok && st.empty)) return;
     const el = document.createElement('div');
     el.className = 'demo-note';
     el.innerHTML = `База новая и пустая. Переезжаете со старой? Загрузите резервную копию:<br><br>
