@@ -215,7 +215,8 @@ class LocalStore {
     const u = this._user(token); if (!u) return { ok: false, error: 'auth' };
     const db = this._db();
     if (['employees', 'finance', 'cash'].includes(entity) && u.role !== 'admin') return { ok: false, error: 'Только для админа' };
-    item = { ...item, id: item.id || uid(), created: Date.now(), updated: Date.now() };
+    // id всегда серверный — нельзя перезаписать чужую запись, прислав её id
+    item = { ...item, id: uid(), created: Date.now(), updated: Date.now() };
     if (entity === 'employees' && !item.code) item.code = String(Math.floor(100000 + Math.random() * 900000));
     if (entity === 'tasks' && u.role !== 'admin') item.assigneeId = u.id; // п.3: сотрудник ставит задачи только себе
     if (entity === 'staffExpenses') {
@@ -342,7 +343,7 @@ class LocalStore {
 
   async status() {
     const db = this._db();
-    return { ok: true, backend: 'demo', employees: db.employees.length };
+    return { ok: true, backend: 'demo', empty: db.employees.length === 0, employees: db.employees.length };
   }
 
   async migrateImport(token, data) {
