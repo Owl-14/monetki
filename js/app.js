@@ -1,5 +1,5 @@
 // ============ Монетки: приложение ============
-import { makeStore, UNITS, CLIENT_STATUSES, TASK_STATUSES, FIN_METHODS, FIN_CATEGORIES, OWNERS, ownerBalances, canUseExpenses } from './store.js';
+import { makeStore, UNITS, CLIENT_STATUSES, TASK_STATUSES, FIN_METHODS, FIN_CATEGORIES, OWNERS, ownerBalances, canUseExpenses, ownerLabel } from './store.js';
 
 // ---------- Утилиты ----------
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -801,7 +801,7 @@ function finRow(f) {
   return `
     <div class="row-card" data-fin="${f.id}">
       <div class="grow col">
-        <div class="title">${unitTag}${esc(f.counterparty || f.category || 'Операция')}</div>
+        <div class="title">${unitTag}${esc(f.counterparty || f.category || 'Операция')}${f.owner ? ' · 👤 ' + esc(ownerLabel(f.owner)) : ''}</div>
         <div class="sub">${fmtDate(f.date)} · ${esc(f.category || '')}${f.comment ? ' · ' + esc(f.comment) : ''}</div>
       </div>
       <span class="badge ${f.source === 'bank' ? 'blue' : ''}">${f.source === 'bank' ? '🏦 банк' : '✍️ вручную'}${m ? ' · ' + m.name : ''}</span>
@@ -957,7 +957,7 @@ function renderFinAccounts(tabsHtml) {
     <div class="card muted small">
       <b>Как считается.</b> По каждому направлению берётся (все доходы − все расходы) и делится по долям:
       Разработка — Савва 50% / Андрей 50%; Падел — Андрей 34% / Савва 33% / Дмитрий 33%.
-      Исключения: расход, записанный на конкретного человека («Чей расход» в операции), вычитается целиком только у него и не делится на всех;
+      Исключения: расход с указанным «Чей расход» вычитается только у него — «Савва и Андрей» делит его пополам между ними (минуя Дмитрия), конкретный человек — целиком с его счёта;
       «Перевод между счетами» не считается вообще. Наличные кассы живут отдельно (вкладка «Наличные»).
       Всё пересчитывается из операций автоматически, где бы вы их ни меняли.
     </div>`;
@@ -1106,6 +1106,7 @@ function openFinForm(f) {
         <select name="owner">
           <option value="">— общий, ни на кого —</option>
           ${OWNERS.map((o) => `<option value="${o.id}" ${f?.owner === o.id ? 'selected' : ''}>${o.name}</option>`).join('')}
+          <option value="savva_andrey" ${f?.owner === 'savva_andrey' ? 'selected' : ''}>Савва и Андрей (пополам)</option>
         </select>
       </label>
       <label class="field"><span>Сотрудник — если это зарплата или компенсация ему</span>
