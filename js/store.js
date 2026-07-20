@@ -40,6 +40,10 @@ export const OWNERS = [
   { id: 'dmitry', name: 'Дмитрий', shares: { dev: 0, padel: 0.33 }, cashbox: false }
 ];
 
+// Направления, где сотрудникам доступны траты с возмещением (пока только падел).
+export const EXPENSE_UNITS = ['padel'];
+export const canUseExpenses = (unit) => unit === 'all' || EXPENSE_UNITS.includes(unit);
+
 /**
  * Личные счета владельцев, посчитанные из операций (п.15: всегда согласованы, где бы ни меняли).
  * Каждое направление: (доходы − расходы) делятся по долям OWNERS.
@@ -220,6 +224,8 @@ class LocalStore {
     if (entity === 'employees' && !item.code) item.code = String(Math.floor(100000 + Math.random() * 900000));
     if (entity === 'tasks' && u.role !== 'admin') item.assigneeId = u.id; // п.3: сотрудник ставит задачи только себе
     if (entity === 'staffExpenses') {
+      const exUnit = u.role === 'admin' ? (item.unit || 'padel') : u.unit;
+      if (!canUseExpenses(exUnit)) return { ok: false, error: 'Траты для этого направления отключены' };
       if (!item.receiptId) return { ok: false, error: 'Прикрепите фото чека' };
       if (u.role !== 'admin') { item.employeeId = u.id; item.unit = u.unit === 'all' ? (item.unit || 'padel') : u.unit; }
       item.status = item.status || 'pending';
