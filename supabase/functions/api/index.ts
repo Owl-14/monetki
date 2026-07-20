@@ -19,6 +19,8 @@ const ENTITIES = [
   "employees", "clients", "venues", "players",
   "tasks", "finance", "staffExpenses", "cash", "notifications",
 ];
+// Направления, где сотрудникам доступны траты с возмещением (пока только падел)
+const EXPENSE_UNITS = ["padel"];
 // files (фото чеков) намеренно не входят в ENTITIES: их не тянем в bootstrap,
 // отдаём поштучно через get_file.
 
@@ -163,6 +165,10 @@ async function createItem(u: Rec, entity: string, item: Rec) {
     }
   }
   if (entity === "staffExpenses") {
+    const exUnit = isAdmin(u) ? (item.unit || "padel") : u.unit;
+    if (!EXPENSE_UNITS.includes(String(exUnit)) && exUnit !== "all") {
+      return { ok: false, error: "Траты для этого направления отключены" };
+    }
     if (!item.receiptId) return { ok: false, error: "Прикрепите фото чека" };
     if (!isAdmin(u)) {
       item.employeeId = u.id;

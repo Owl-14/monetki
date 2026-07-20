@@ -1,5 +1,5 @@
 // ============ Монетки: приложение ============
-import { makeStore, UNITS, CLIENT_STATUSES, TASK_STATUSES, FIN_METHODS, FIN_CATEGORIES, OWNERS, ownerBalances } from './store.js';
+import { makeStore, UNITS, CLIENT_STATUSES, TASK_STATUSES, FIN_METHODS, FIN_CATEGORIES, OWNERS, ownerBalances, canUseExpenses } from './store.js';
 
 // ---------- Утилиты ----------
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -479,15 +479,25 @@ function openTaskForm(task) {
 // ---------- Клиенты (разработка) ----------
 function viewClients() {
   setTitle('Клиенты');
-  const q = (S.search.clients || '').toLowerCase();
-  let list = (S.data.clients || []).filter((c) => !q || (c.name + ' ' + (c.company || '') + ' ' + (c.phone || '')).toLowerCase().includes(q));
   const statuses = CLIENT_STATUSES.dev;
+  const q = (S.search.clients || '').toLowerCase();
+  const active = S.clientStatus || 'all';
+  let list = (S.data.clients || []).filter((c) => (active === 'all' || c.status === active)
+    && (!q || (c.name + ' ' + (c.company || '') + ' ' + (c.phone || '') + ' ' + empName(c.ownerId)).toLowerCase().includes(q)));
   list.sort((a, b) => statuses.findIndex((s) => s.id === a.status) - statuses.findIndex((s) => s.id === b.status));
+
+  // счётчики по каждому статусу воронки
+  const counts = {};
+  (S.data.clients || []).forEach((c) => { counts[c.status] = (counts[c.status] || 0) + 1; });
 
   $('#view').innerHTML = `
     <div class="searchbar">
-      <input type="search" id="cl-search" placeholder="Поиск по имени, компании, телефону" value="${esc(S.search.clients || '')}">
+      <input type="search" id="cl-search" placeholder="Поиск: имя, компания, телефон, кто ведёт" value="${esc(S.search.clients || '')}">
       <button class="btn primary" id="add-client">+ Клиент</button>
+    </div>
+    <div class="chip-row">
+      <button class="chip ${active === 'all' ? 'active' : ''}" data-cstatus="all">Все · ${(S.data.clients || []).length}</button>
+      ${statuses.map((s) => `<button class="chip ${active === s.id ? 'active' : ''}" data-cstatus="${s.id}">${s.name}${counts[s.id] ? ' · ' + counts[s.id] : ''}</button>`).join('')}
     </div>
     <div class="list">
       ${list.length ? list.map((c) => {
@@ -495,16 +505,17 @@ function viewClients() {
         return `<div class="row-card" data-client="${c.id}">
           <div class="grow col">
             <div class="title">${esc(c.name)}</div>
-            <div class="sub">${esc(c.company || '')}${c.company && c.phone ? ' · ' : ''}${esc(c.phone || '')}</div>
+            <div class="sub">${esc(c.company || '')}${c.company && c.phone ? ' · ' : ''}${esc(c.phone || '')}${c.ownerId ? ' · 👤 ' + esc(empName(c.ownerId)) : ''}</div>
           </div>
           ${c.amount ? `<div class="amount">${money(c.amount)}</div>` : ''}
           <span class="badge ${st.color} dot">${st.name}</span>
         </div>`;
-      }).join('') : `<div class="card empty"><div class="big">🤝</div>Клиентов пока нет</div>`}
+      }).join('') : `<div class="card empty"><div class="big">🤝</div>${active === 'all' ? 'Клиентов пока нет' : 'В этом статусе клиентов нет'}</div>`}
     </div>`;
 
   $('#add-client').addEventListener('click', () => openClientForm());
   $('#cl-search').addEventListener('input', (e) => { S.search.clients = e.target.value; viewClients(); });
+  $('#view').querySelectorAll('[data-cstatus]').forEach((b) => b.addEventListener('click', () => { S.clientStatus = b.dataset.cstatus; viewClients(); }));
   $('#view').querySelectorAll('[data-client]').forEach((el) => el.addEventListener('click', () => openClientForm((S.data.clients || []).find((c) => c.id === el.dataset.client))));
 }
 
@@ -522,9 +533,17 @@ function openClientForm(c) {
         <label class="field"><span>Telegram</span><input type="text" name="tg" value="${esc(c?.tg || '')}"></label>
         <label class="field"><span>Сумма сделки, ₽</span><input type="number" name="amount" value="${esc(c?.amount || '')}"></label>
       </div>
-      <label class="field"><span>Статус</span>
-        <select name="status">${CLIENT_STATUSES.dev.map((s) => `<option value="${s.id}" ${(c?.status || 'lead') === s.id ? 'selected' : ''}>${s.name}</option>`).join('')}</select>
-      </label>
+      <div class="form-row">
+        <label class="field"><span>Статус</span>
+          <select name="status">${CLIENT_STATUSES.dev.map((s) => `<option value="${s.id}" ${(c?.status || 'lead') === s.id ? 'selected' : ''}>${s.name}</option>`).join('')}</select>
+        </label>
+        <label class="field"><span>Кто ведёт</span>
+          <select name="ownerId">
+            <option value="">— не назначен —</option>
+            ${(S.data.employees || []).filter((e) => e.active !== false && (e.unit === 'dev' || e.unit === 'all' || e.role === 'admin')).map((e) => `<option value="${e.id}" ${c?.ownerId === e.id ? 'selected' : ''}>${esc(e.name)}</option>`).join('')}
+          </select>
+        </label>
+      </div>
       <label class="field"><span>Заметки</span><textarea name="notes">${esc(c?.notes || '')}</textarea></label>
       <div class="actions">
         ${!isNew ? `<button type="button" class="btn danger ghost left" id="ent-del">Удалить</button>` : ''}
@@ -1178,13 +1197,15 @@ function viewMoney() {
   const paidTotal = paid.reduce((s, f) => s + Number(f.amount || 0), 0);
   const ex = (S.data.staffExpenses || []).sort((a, b) => (b.created || 0) - (a.created || 0));
   const pendingSum = ex.filter((e) => e.status === 'pending').reduce((s, e) => s + Number(e.amount || 0), 0);
+  const expensesOn = canUseExpenses(S.profile.unit);
 
   $('#view').innerHTML = `
     <div class="cards-row">
       <div class="card stat"><div class="label">Выплачено за месяц</div><div class="value green">${money(paidMonth)}</div></div>
       <div class="card stat"><div class="label">Выплачено всего</div><div class="value">${money(paidTotal)}</div></div>
-      <div class="card stat"><div class="label">Жду возврата</div><div class="value ${pendingSum ? 'red' : ''}">${money(pendingSum)}</div></div>
+      ${expensesOn ? `<div class="card stat"><div class="label">Жду возврата</div><div class="value ${pendingSum ? 'red' : ''}">${money(pendingSum)}</div></div>` : ''}
     </div>
+    ${expensesOn ? `
     <div class="section-title">Мои траты <button class="btn small primary" id="add-expense" style="margin-left:auto">+ Трата</button></div>
     <div class="list">
       ${ex.length ? ex.map((e) => {
@@ -1195,7 +1216,7 @@ function viewMoney() {
           <span class="badge ${st.color} dot">${st.name}</span>
         </div>`;
       }).join('') : `<div class="card empty"><div class="big">🧾</div>Купили что-то для работы за свои — добавьте трату, и вам вернут деньги</div>`}
-    </div>
+    </div>` : ''}
     <div class="section-title">Выплаты мне</div>
     <div class="list">
       ${paid.length ? paid.map((f) => `
@@ -1206,7 +1227,7 @@ function viewMoney() {
         </div>`).join('') : `<div class="card empty"><div class="big">💰</div>Выплат пока не было</div>`}
     </div>`;
 
-  $('#add-expense').addEventListener('click', () => openStaffExpenseForm());
+  $('#add-expense')?.addEventListener('click', () => openStaffExpenseForm());
   $('#view').querySelectorAll('[data-ex]').forEach((el) => el.addEventListener('click', () => {
     const e = ex.find((x) => x.id === el.dataset.ex);
     if (!e) return;
