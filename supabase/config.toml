@@ -1,3 +1,7 @@
 # Конфигурация Supabase CLI для деплоя функций
 [functions.api]
 verify_jwt = false
+
+# Хранилище согласования карты CRM (страница owl-14.github.io/crm-map)
+[functions.map]
+verify_jwt = false
