@@ -3,6 +3,18 @@
 // Данные — в таблице records (entity + data jsonb), доступ — только через эту функцию.
 
 import { createClient } from "jsr:@supabase/supabase-js@2";
+import {
+  ENTITIES,
+  EXPENSE_UNITS,
+  acceptBankTransaction,
+  canSeeUnit,
+  checkWriteAccess,
+  classifyMethod,
+  isAdmin,
+  profileOf,
+  sumBankBalances,
+  visibleBootstrapData,
+} from "./rules.js";
 
 const db = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -15,12 +27,6 @@ const CORS = {
   "Content-Type": "application/json",
 };
 
-const ENTITIES = [
-  "employees", "clients", "venues", "players",
-  "tasks", "finance", "staffExpenses", "cash", "notifications",
-];
-// Направления, где сотрудникам доступны траты с возмещением (пока только падел)
-const EXPENSE_UNITS = ["padel"];
 // files (фото чеков) намеренно не входят в ENTITIES: их не тянем в bootstrap,
 // отдаём поштучно через get_file.
 
@@ -64,13 +70,6 @@ async function findUser(token: unknown): Promise<Rec | null> {
   return users.find((u) => String(u.code) === String(token) && u.active) ?? null;
 }
 
-const isAdmin = (u: Rec) => u.role === "admin";
-const canSeeUnit = (u: Rec, unit: unknown) =>
-  isAdmin(u) || u.unit === "all" || u.unit === unit;
-const profileOf = (u: Rec) => ({
-  id: u.id, name: u.name, role: u.role, unit: u.unit, phone: u.phone, tg: u.tg,
-});
-
 async function notify(toId: unknown, text: string, link = "#/tasks") {
   if (!toId) return;
   await writeRow("notifications", {
@@ -91,39 +90,15 @@ async function bootstrap(u: Rec) {
   const admin = isAdmin(u);
   const [employees, clients, venues, players, tasks, finance, staffExpenses, cash, notifications] =
     await Promise.all(ENTITIES.map(readAll));
-  const unitF = (list: Rec[]) => list.filter((x) => canSeeUnit(u, x.unit));
   return {
     ok: true,
     profile: profileOf(u),
-    data: {
-      // сотрудник видит только людей своего направления (и админов)
-      employees: admin
-        ? employees
-        : employees
-          .filter((e) => e.unit === u.unit || e.unit === "all" || e.role === "admin")
-          .map((e) => ({ id: e.id, name: e.name, role: e.role, unit: e.unit, active: e.active })),
-      clients: unitF(clients),
-      venues: unitF(venues),
-      players: unitF(players),
-      // сотрудник получает только свои задачи (не все задачи направления)
-      tasks: admin ? tasks : unitF(tasks).filter((t) => t.assigneeId === u.id),
-      finance: admin ? finance : finance.filter((f) => f.employeeId === u.id),
-      staffExpenses: admin ? staffExpenses : staffExpenses.filter((e) => e.employeeId === u.id),
-      cash: admin ? cash : cash.filter((c) => c.employeeId === u.id),
-      bankBalance: admin ? await kvGet("BANK_BALANCE") : null,
-      notifications: notifications.filter((n) => n.toId === u.id),
-    },
+    data: visibleBootstrapData(
+      u,
+      { employees, clients, venues, players, tasks, finance, staffExpenses, cash, notifications },
+      admin ? await kvGet("BANK_BALANCE") : null,
+    ),
   };
-}
-
-function checkWriteAccess(u: Rec, entity: string, item: Rec | null): string | null {
-  if (!ENTITIES.includes(entity)) return "Неизвестная сущность";
-  if ((entity === "employees" || entity === "finance" || entity === "cash") && !isAdmin(u)) return "Только для админа";
-  if (entity === "notifications") return "Нельзя";
-  if (item && item.unit && item.unit !== "all" && !canSeeUnit(u, item.unit)) {
-    return "Нет доступа к этому направлению";
-  }
-  return null;
 }
 
 // Зарплата с зачётом трат сотрудника: уменьшаем сумму, помечаем траты погашенными
@@ -426,21 +401,6 @@ async function tochkaFetch(path: string, init?: RequestInit) {
   return JSON.parse(body);
 }
 
-function classifyMethod(t: Rec): string {
-  const ttc = String(t.transactionTypeCode || "");
-  if (/Банковские карты/i.test(ttc)) return "card";
-  if (/Денежный чек|взнос наличными/i.test(ttc)) return "cash";
-  const side = (t.creditDebitIndicator === "Credit" ? t.DebtorAccount : t.CreditorAccount) as Rec | undefined;
-  const scheme = side?.schemeName || "";
-  if (scheme === "RU.CBR.PAN") return "card";
-  if (scheme === "RU.CBR.CellphoneNumber") return "sbp";
-  const p = String(t.description || "").toLowerCase();
-  if (/сбп|c2b|нспк|быстрых платежей|qr/.test(p)) return "sbp";
-  if (/карт|терминал|pos/.test(p)) return "card";
-  if (/наличн|банкомат|atm/.test(p)) return "cash";
-  return "account";
-}
-
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 async function tochkaSync(days = 30) {
@@ -481,12 +441,9 @@ async function tochkaSync(days = 30) {
     if (!st || st.status === "Error") continue;
 
     for (const t of (st.Transaction as Rec[]) || []) {
-      if (t.status === "Pending") continue;
-      const amount = Number((t.Amount as Rec)?.amount) || 0;
-      const bankId = String(t.transactionId || t.paymentId ||
-        `${t.documentNumber || ""}|${amount}|${t.documentProcessDate}`);
-      if (known.has(bankId)) continue;
-      known.add(bankId);
+      const accepted = acceptBankTransaction(t, known);
+      if (!accepted) continue;
+      const { amount, bankId } = accepted;
       const isIncome = t.creditDebitIndicator === "Credit";
       const cp = isIncome
         ? ((t.DebtorParty as Rec)?.name || "")
@@ -511,14 +468,7 @@ async function tochkaSync(days = 30) {
   try {
     const balRes = await tochkaFetch("/open-banking/v1.0/balances");
     const bals: Rec[] = balRes?.Data?.Balance || [];
-    const byAcc = new Map<string, Rec>();
-    const rank = (t: unknown) => (t === "ClosingAvailable" ? 3 : t === "Expected" ? 2 : 1);
-    for (const b of bals) {
-      const key = String(b.accountId || "?");
-      if (!byAcc.has(key) || rank(b.type) > rank(byAcc.get(key)!.type)) byAcc.set(key, b);
-    }
-    let total = 0;
-    for (const b of byAcc.values()) total += Number((b.Amount as Rec)?.amount) || 0;
+    const total = sumBankBalances(bals);
     await kvSet("BANK_BALANCE", { amount: total, updated: new Date().toISOString() });
   } catch (_e) { /* остаток не критичен */ }
 
