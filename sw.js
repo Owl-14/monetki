@@ -1,5 +1,5 @@
 // Service worker «Монеток»: кэшируем оболочку приложения, чтобы PWA открывалась мгновенно и офлайн.
-const CACHE = 'monetki-v16';
+const CACHE = 'monetki-v17';
 const SHELL = [
   './',
   './index.html',
@@ -26,7 +26,7 @@ self.addEventListener('activate', (e) => {
 
 self.addEventListener('fetch', (e) => {
   const url = new URL(e.request.url);
-  // Запросы к бэкенду (Apps Script) всегда идут в сеть.
+  // Запросы к бэкенду всегда идут в сеть.
   if (url.origin !== location.origin || e.request.method !== 'GET') return;
   // Сеть в приоритете, кэш — запасной вариант (чтобы обновления кода доезжали сразу).
   e.respondWith(

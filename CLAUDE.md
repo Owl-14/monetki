@@ -1,6 +1,6 @@
 # Монетки — руководство для разработчика/агента
 
-Внутренний офис двух бизнесов владельцев (Савва, Андрей, Дмитрий): CRM, задачи, финансы, команда.
+Внутренний офис бизнесов владельцев (Савва, Андрей, Дмитрий): CRM, задачи, финансы, команда.
 Пользователь — не программист: объяснения давать простым языком, инструкции — «дословно куда нажать».
 Язык всего проекта (UI, коммиты, комментарии) — русский.
 
@@ -21,7 +21,7 @@
 
 - `index.html` — оболочка; инлайн-скрипт темы до CSS (не мигает).
 - `config.js` — `backendUrl` (адрес функции), версия.
-- `js/store.js` — слой данных: `LocalStore` (демо, localStorage) и `RemoteStore` (fetch к функции). Оба реализуют одинаковые методы. Здесь же справочники: `UNITS`, `TASK_STATUSES`, `FIN_*`, `OWNERS` (доли владельцев) и `ownerBalances()` (расчёт личных счетов).
+- `js/store.js` — слой данных: `LocalStore` (демо, localStorage) и `RemoteStore` (fetch к функции). Оба реализуют одинаковые методы и симметричные права. Здесь же справочники: `UNITS` (legacy), `DEFAULT_BUSINESSES`, `BUSINESS_MODULES`, `TASK_STATUSES`, `FIN_*`, `OWNERS` (fallback долей) и `ownerBalances()` (расчёт личных счетов из `businessOwners`).
 - `js/app.js` — весь UI: роутер по hash (`#/dashboard` и т.д.), функции `view*` рендерят разделы в `#view`, `open*Form` — модалки. Быстрые сохранения: `doCreate/doUpdate/doDelete` меняют `S.data` локально и шлют запрос, без перечитывания базы.
 - `css/style.css` — стили; переменные тем в `:root` (светлая) + два блока тёмной (`prefers-color-scheme` и `[data-theme="dark"]`).
 - `sw.js` — service worker. **При любом изменении фронтенда поднимать версию `CACHE` ('monetki-vN')**.
@@ -38,7 +38,10 @@ POST на `backendUrl`, `Content-Type: text/plain` (чтобы без preflight)
 
 ## Модель данных (entity → поля в data)
 
-- `employees`: id, name, code (=токен входа), role `admin|staff`, unit `padel|dev|all`, phone, tg, active
+- `businesses`: id (`padel|dev` для двух текущих), name, emoji, modules[], active
+- `memberships`: employeeId, businessId, unit (=businessId для совместимости), role `owner|staff`, active
+- `businessOwners`: businessId, unit (=businessId), ownerId (`savva|andrey|dmitry`), name, share (0…1), active
+- `employees`: id, name, code (=токен входа), role `admin|staff`, unit `padel|dev|all` (legacy/bootstrap), phone, tg, active
 - `clients` (только dev): воронка status `lead|talks|work|support|refused`, amount, notes
 - `venues` (padel): + `slots` — календарь кортов, объект `{"YYYY-MM-DD_HH": {tag, price}}`, tag: `booked|free|busy|want`
 - `players` (padel): name, phone, level, notes; импорт вставкой из Excel
@@ -49,16 +52,19 @@ POST на `backendUrl`, `Content-Type: text/plain` (чтобы без preflight)
 - `files`: {id, b64, byId} — фото чеков; НЕ отдаются в bootstrap, только через get_file
 - `notifications`: toId, text, link, read
 
+Все бизнес-записи читают область через `businessId || unit`. Новые/изменённые строки записывают оба поля одинаковыми. При bootstrap CORE идемпотентно создаёт `padel`/`dev`, memberships из `employees.unit`, прежние доли и дополняет старые строки `businessId`, не перезаписывая существующие настройки.
+
 ## Права (дублируются в LocalStore и в функции — менять оба!)
 
-- Сотрудник видит только своё направление: люди, клиенты/площадки/игроки, задачи. Финансы/Команда — только админ.
+- Доступ к бизнесу задаётся активным `memberships`. Сотрудник видит только доступные бизнесы, общих с ним людей и только свои задачи. Финансы/Команда — только legacy-админ; модули дополнительно должны быть включены в карточке бизнеса.
+- `create` проверяет целевой бизнес, `delete` — исходный, `update` — оба до слияния. Нельзя обойти изоляцию несовпадающими `businessId`/`unit` или переносом доступной записи в недоступный бизнес.
 - Задачи: сотрудник ставит только себе; чужие (от админа) не редактирует — сервер режет апдейт до `{status}`; удаляет только свои.
 - Финансы/наличные/сотрудники: только админ. Сотруднику в bootstrap приходят только его выплаты (finance/cash с его employeeId) и его траты.
 - Трата без receiptId не создаётся.
 
 ## Бизнес-логика финансов
 
-- Личные счета («Счета»): `ownerBalances()` в store.js — по каждому направлению (доходы − расходы) × доли:
+- Личные счета («Счета»): `ownerBalances()` в store.js — по каждому бизнесу (доходы − расходы) × доли из `businessOwners`, с fallback на прежний `OWNERS`, если CORE-данных ещё нет:
   Разработка 50/50 Савва/Андрей; Падел 34% Андрей / 33% Савва / 33% Дмитрий.
   Расход с `owner` вычитается целиком у него (не делится); категория «Перевод между счетами» игнорируется; cash не участвует.
 - Зарплата: в форме операции категория «Зарплата» + сотрудник → выбор источника (счёт / наличные Саввы / наличные Андрея) и зачёт pending-трат (`offsetIds`): сервер уменьшает сумму, создаёт строку «Компенсация сотруднику», траты → `returned_salary`.
