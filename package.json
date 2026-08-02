@@ -1,0 +1,8 @@
+{
+  "name": "monetki-current-behavior-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test"
+  }
+}
