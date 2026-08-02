@@ -95,6 +95,29 @@ export function acceptBankTransaction(transaction, knownBankIds) {
   return { bankId, amount: Number(transaction.Amount?.amount) || 0 };
 }
 
+export function bankSyncResult(diagnostics, added) {
+  const processed = diagnostics.accounts.processed;
+  const errors = diagnostics.errors;
+  let outcome = "completed";
+
+  if (processed === 0 && errors > 0) outcome = "failed";
+  else if (errors > 0) outcome = "partial";
+  else if (diagnostics.transactions.seen === 0) outcome = "zero_transactions";
+  else if (
+    added === 0 &&
+    diagnostics.transactions.pending === 0 &&
+    diagnostics.transactions.duplicates === diagnostics.transactions.seen
+  ) outcome = "all_duplicates";
+  else if (added === 0) outcome = "no_new_transactions";
+
+  return {
+    ok: processed > 0 || errors === 0,
+    added,
+    outcome,
+    diagnostics,
+  };
+}
+
 export function sumBankBalances(balances) {
   const bestByAccount = new Map();
   const rank = (type) => (type === "ClosingAvailable" ? 3 : type === "Expected" ? 2 : 1);

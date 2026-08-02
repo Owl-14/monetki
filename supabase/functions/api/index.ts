@@ -7,6 +7,8 @@ import {
   ENTITIES,
   EXPENSE_UNITS,
   acceptBankTransaction,
+  bankSyncResult,
+  bankTransactionId,
   canSeeUnit,
   checkWriteAccess,
   classifyMethod,
@@ -409,6 +411,13 @@ async function tochkaSync(days = 30) {
   const accounts: Rec[] = accountsRes?.Data?.Account || [];
   if (!accounts.length) return { ok: false, error: "Счета не найдены" };
 
+  const diagnostics = {
+    accounts: { total: accounts.length, processed: 0, failed: 0 },
+    statements: { requested: 0, ready: 0, empty: 0, notReady: 0, failed: 0 },
+    transactions: { seen: 0, duplicates: 0, pending: 0 },
+    errors: 0,
+  };
+
   const end = new Date();
   const start = new Date(end.getTime() - days * 864e5);
   const fmt = (d: Date) => d.toISOString().slice(0, 10);
@@ -418,29 +427,68 @@ async function tochkaSync(days = 30) {
   let added = 0;
 
   for (const acc of accounts) {
-    const accountId = String(acc.accountId);
-    const init = await tochkaFetch("/open-banking/v1.0/statements", {
-      method: "POST",
-      body: JSON.stringify({
-        Data: { Statement: { accountId, startDateTime: fmt(start), endDateTime: fmt(end) } },
-      }),
-    });
-    const stId = init?.Data?.Statement?.statementId;
-    if (!stId) continue;
-
     let st: Rec | null = null;
-    for (let i = 0; i < 20; i++) {
-      await sleep(3000);
-      const got = await tochkaFetch(
-        `/open-banking/v1.0/accounts/${encodeURIComponent(accountId)}/statements/${encodeURIComponent(stId)}`,
-      );
-      const d = got?.Data?.Statement;
-      st = Array.isArray(d) ? d[0] : d;
-      if (st && (st.status === "Ready" || st.status === "Error" || st.Transaction)) break;
-    }
-    if (!st || st.status === "Error") continue;
+    try {
+      const accountId = String(acc.accountId);
+      diagnostics.statements.requested++;
+      const init = await tochkaFetch("/open-banking/v1.0/statements", {
+        method: "POST",
+        body: JSON.stringify({
+          Data: { Statement: { accountId, startDateTime: fmt(start), endDateTime: fmt(end) } },
+        }),
+      });
+      const stId = init?.Data?.Statement?.statementId;
+      if (!stId) {
+        diagnostics.accounts.failed++;
+        diagnostics.statements.failed++;
+        diagnostics.errors++;
+        continue;
+      }
 
-    for (const t of (st.Transaction as Rec[]) || []) {
+      for (let i = 0; i < 20; i++) {
+        await sleep(3000);
+        const got = await tochkaFetch(
+          `/open-banking/v1.0/accounts/${encodeURIComponent(accountId)}/statements/${encodeURIComponent(stId)}`,
+        );
+        const raw = got?.Data?.Statement;
+        const statements: Rec[] = Array.isArray(raw) ? raw : raw ? [raw] : [];
+        st = statements.find((item) => String(item.statementId) === String(stId)) || statements[0] || null;
+        if (st && (st.status === "Ready" || st.status === "Error")) break;
+      }
+      if (!st || (st.status !== "Ready" && st.status !== "Error")) {
+        diagnostics.accounts.failed++;
+        diagnostics.statements.notReady++;
+        diagnostics.errors++;
+        continue;
+      }
+      if (st.status === "Error") {
+        diagnostics.accounts.failed++;
+        diagnostics.statements.failed++;
+        diagnostics.errors++;
+        continue;
+      }
+    } catch (_error) {
+      diagnostics.accounts.failed++;
+      diagnostics.statements.failed++;
+      diagnostics.errors++;
+      continue;
+    }
+
+    diagnostics.accounts.processed++;
+    diagnostics.statements.ready++;
+    const transactions = (st?.Transaction as Rec[]) || [];
+    diagnostics.transactions.seen += transactions.length;
+    if (!transactions.length) diagnostics.statements.empty++;
+
+    for (const t of transactions) {
+      if (t.status === "Pending") {
+        diagnostics.transactions.pending++;
+        continue;
+      }
+      if (known.has(bankTransactionId(t))) {
+        diagnostics.transactions.duplicates++;
+        continue;
+      }
       const accepted = acceptBankTransaction(t, known);
       if (!accepted) continue;
       const { amount, bankId } = accepted;
@@ -472,8 +520,14 @@ async function tochkaSync(days = 30) {
     await kvSet("BANK_BALANCE", { amount: total, updated: new Date().toISOString() });
   } catch (_e) { /* остаток не критичен */ }
 
-  await kvSet("LAST_SYNC", `${new Date().toISOString()} | добавлено операций: ${added}`);
-  return { ok: true, added };
+  const result = bankSyncResult(diagnostics, added);
+  if (result.ok) {
+    await kvSet(
+      "LAST_SYNC",
+      `${new Date().toISOString()} | добавлено: ${added} | результат: ${result.outcome} | обработано счетов: ${diagnostics.accounts.processed}/${diagnostics.accounts.total}`,
+    );
+  }
+  return result;
 }
 
 async function runTochkaSync(days = 30) {

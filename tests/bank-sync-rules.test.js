@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   acceptBankTransaction,
+  bankSyncResult,
   bankTransactionId,
   classifyMethod,
   sumBankBalances,
@@ -55,4 +56,40 @@ test("баланс выбирает лучший тип по каждому сч
   ]);
 
   assert.equal(total, -15);
+});
+
+function diagnostics({ processed = 1, failed = 0, ready = processed, empty = 0, notReady = 0, seen = 0, duplicates = 0, pending = 0, errors = 0 } = {}) {
+  return {
+    accounts: { total: processed + failed, processed, failed },
+    statements: { requested: processed + failed, ready, empty, notReady, failed },
+    transactions: { seen, duplicates, pending },
+    errors,
+  };
+}
+
+test("диагностика отличает готовую пустую выписку", () => {
+  const result = bankSyncResult(diagnostics({ empty: 1 }), 0);
+  assert.equal(result.ok, true);
+  assert.equal(result.outcome, "zero_transactions");
+  assert.equal(result.diagnostics.statements.empty, 1);
+});
+
+test("диагностика отличает случай, когда все операции уже загружены", () => {
+  const result = bankSyncResult(diagnostics({ seen: 3, duplicates: 3 }), 0);
+  assert.equal(result.ok, true);
+  assert.equal(result.outcome, "all_duplicates");
+});
+
+test("ошибка одного счёта даёт частичный успех, если другой обработан", () => {
+  const result = bankSyncResult(diagnostics({ processed: 1, failed: 1, errors: 1 }), 0);
+  assert.equal(result.ok, true);
+  assert.equal(result.outcome, "partial");
+  assert.equal(result.diagnostics.accounts.failed, 1);
+});
+
+test("синхронизация неуспешна, если из-за ошибок не обработан ни один счёт", () => {
+  const result = bankSyncResult(diagnostics({ processed: 0, failed: 2, ready: 0, notReady: 2, errors: 2 }), 0);
+  assert.equal(result.ok, false);
+  assert.equal(result.outcome, "failed");
+  assert.equal(result.diagnostics.statements.notReady, 2);
 });
