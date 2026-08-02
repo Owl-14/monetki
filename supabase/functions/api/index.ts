@@ -372,8 +372,12 @@ async function statusInfo(u: Rec | null) {
   if (!u || !isAdmin(u)) {
     return { ok: true, backend: "supabase", empty: employees.length === 0 };
   }
-  const [finance, staffExpenses] = await Promise.all([
-    readAll("finance"), readAll("staffExpenses"),
+  const [finance, staffExpenses, lastSyncAttempt, lastSync, lastSyncError] = await Promise.all([
+    readAll("finance"),
+    readAll("staffExpenses"),
+    kvGet("LAST_SYNC_ATTEMPT"),
+    kvGet("LAST_SYNC"),
+    kvGet("LAST_SYNC_ERROR"),
   ]);
   return {
     ok: true,
@@ -384,7 +388,9 @@ async function statusInfo(u: Rec | null) {
     financeTotal: finance.length,
     financeFromBank: finance.filter((f) => f.source === "bank").length,
     staffExpensesPending: staffExpenses.filter((e) => e.status === "pending").length,
-    lastSync: await kvGet("LAST_SYNC"),
+    lastSyncAttempt,
+    lastSync,
+    lastSyncError,
   };
 }
 
@@ -520,6 +526,24 @@ async function tochkaSync(days = 30) {
   return { ok: true, added };
 }
 
+async function runTochkaSync(days = 30) {
+  const attemptedAt = new Date().toISOString();
+  await kvSet("LAST_SYNC_ATTEMPT", attemptedAt);
+  try {
+    await remindDeadlines();
+    const result = await tochkaSync(days);
+    await kvSet(
+      "LAST_SYNC_ERROR",
+      result.ok ? null : `${attemptedAt} | Синхронизация с Точка Банком не выполнена`,
+    );
+    return result;
+  } catch (error) {
+    // Не сохраняем исходный текст ошибки: ответ банка может содержать чувствительные данные.
+    await kvSet("LAST_SYNC_ERROR", `${attemptedAt} | Синхронизация с Точка Банком не выполнена`);
+    throw error;
+  }
+}
+
 // ---------- HTTP ----------
 
 Deno.serve(async (req) => {
@@ -538,8 +562,7 @@ Deno.serve(async (req) => {
     }
     if (action === "status") return json(await statusInfo(await findUser(body.token)));
     if (action === "tochka_sync") {
-      await remindDeadlines();
-      return json(await tochkaSync(body.days || 30));
+      return json(await runTochkaSync(body.days || 30));
     }
     if (action === "migrate_import") {
       return json(await migrateImport(await findUser(body.token), body.data));
