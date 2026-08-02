@@ -1,5 +1,5 @@
 // ============ Монетки: приложение ============
-import { makeStore, UNITS, CLIENT_STATUSES, TASK_STATUSES, FIN_METHODS, FIN_CATEGORIES, OWNERS, ownerBalances, canUseExpenses, ownerLabel } from './store.js';
+import { makeStore, UNITS, BUSINESS_MODULES, CLIENT_STATUSES, TASK_STATUSES, FIN_METHODS, FIN_CATEGORIES, OWNERS, ownerBalances, canUseExpenses, ownerLabel, businessIdOf } from './store.js';
 
 // ---------- Утилиты ----------
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -32,17 +32,36 @@ const S = {
 };
 
 function isAdmin() { return S.profile && S.profile.role === 'admin'; }
+function businesses() { return (S.data?.businesses || []).filter((b) => b.active !== false); }
+function business(id) { return businesses().find((b) => b.id === id) || UNITS[id] || { id, name: id, emoji: '🏢', modules: [] }; }
+function businessName(id) { return business(id).name || id; }
+function businessEmoji(id) { return business(id).emoji || '🏢'; }
 function myUnits() {
   if (!S.profile) return [];
+  const ids = businesses().map((b) => b.id);
+  if (ids.length) return ids;
+  if (S.profile.businessIds?.length) return S.profile.businessIds;
   return (isAdmin() || S.profile.unit === 'all') ? ['padel', 'dev'] : [S.profile.unit];
 }
 function activeUnits() {
   if (S.unit === 'all') return myUnits();
   return myUnits().includes(S.unit) ? [S.unit] : myUnits();
 }
+function hasModule(moduleId) {
+  return activeUnits().some((id) => {
+    const modules = business(id).modules;
+    return !Array.isArray(modules) || modules.includes(moduleId);
+  });
+}
 function empName(id) {
   const e = (S.data?.employees || []).find((x) => x.id === id);
   return e ? e.name : '—';
+}
+function employeeBusinessIds(employee) {
+  const memberships = (S.data?.memberships || []).filter((m) => m.employeeId === employee.id && m.active !== false).map(businessIdOf);
+  if (memberships.length) return memberships;
+  if (employee.role === 'admin' || employee.unit === 'all') return myUnits();
+  return employee.unit ? [employee.unit] : [];
 }
 
 // ---------- Модалки ----------
@@ -87,6 +106,12 @@ function maybeSystemNotify(prevUnreadIds) {
 
 // Быстрые изменения: применяем к данным на экране сразу, не дожидаясь полной
 // перезагрузки базы (сверка с сервером происходит фоновым refresh'ем).
+const SCOPED_ENTITIES = ['clients', 'venues', 'players', 'tasks', 'finance', 'staffExpenses', 'memberships', 'businessOwners'];
+function normalizeItemScope(entity, item) {
+  if (!SCOPED_ENTITIES.includes(entity)) return item;
+  const businessId = item.businessId || item.unit;
+  return businessId ? { ...item, businessId, unit: businessId } : item;
+}
 function applyLocal(entity, op, itemOrId) {
   if (!S.data) return;
   const arr = S.data[entity] || (S.data[entity] = []);
@@ -96,6 +121,7 @@ function applyLocal(entity, op, itemOrId) {
 }
 
 async function doCreate(entity, item, okText) {
+  item = normalizeItemScope(entity, item);
   const res = await S.store.create(S.token, entity, item);
   if (!res.ok) { toast(res.error || 'Ошибка', true); return null; }
   applyLocal(entity, 'create', res.item || item);
@@ -105,6 +131,7 @@ async function doCreate(entity, item, okText) {
 }
 
 async function doUpdate(entity, item, okText) {
+  item = normalizeItemScope(entity, item);
   applyLocal(entity, 'update', item);
   render();
   if (okText) toast(okText);
@@ -140,19 +167,22 @@ window.addEventListener('hashchange', render);
 // ---------- Навигация ----------
 function navItems() {
   const units = activeUnits();
-  const items = [
-    { r: 'dashboard', ico: '🏠', label: 'Дашборд' },
-    { r: 'tasks', ico: '✅', label: 'Задачи', badge: (S.data?.tasks || []).filter((t) => t.assigneeId === S.profile.id && t.status !== 'done').length || '' }
-  ];
-  if (!isAdmin()) items.push({ r: 'money', ico: '💰', label: 'Деньги' });
-  if (units.includes('dev')) items.push({ r: 'clients', ico: '🤝', label: 'Клиенты' });
-  if (units.includes('padel')) {
+  const items = [];
+  if (hasModule('dashboard')) items.push({ r: 'dashboard', ico: '🏠', label: 'Дашборд' });
+  if (hasModule('tasks')) items.push({ r: 'tasks', ico: '✅', label: 'Задачи', badge: (S.data?.tasks || []).filter((t) => t.assigneeId === S.profile.id && t.status !== 'done').length || '' });
+  if (!isAdmin() && hasModule('money')) items.push({ r: 'money', ico: '💰', label: 'Деньги' });
+  if (units.includes('dev') && hasModule('clients')) items.push({ r: 'clients', ico: '🤝', label: 'Клиенты' });
+  if (units.includes('padel') && (hasModule('venues') || hasModule('players'))) {
+    if (hasModule('venues')) {
     items.push({ r: 'venues', ico: '🏟️', label: 'Площадки' });
+    }
+    if (hasModule('players')) {
     items.push({ r: 'players', ico: '🎾', label: 'Игроки' });
+    }
   }
   if (isAdmin()) {
-    items.push({ r: 'finance', ico: '💰', label: 'Финансы' });
-    items.push({ r: 'team', ico: '👥', label: 'Команда' });
+    if (hasModule('finance')) items.push({ r: 'finance', ico: '💰', label: 'Финансы' });
+    if (hasModule('team')) items.push({ r: 'team', ico: '👥', label: 'Команда' });
   }
   items.push({ r: 'settings', ico: '⚙️', label: 'Ещё' });
   return items;
@@ -164,9 +194,9 @@ function unreadCount() { return (S.data?.notifications || []).filter((n) => !n.r
 function render() {
   const app = $('#app');
   if (!S.token || !S.profile) { renderLogin(app); return; }
-  const route = currentRoute() === 'login' ? 'dashboard' : currentRoute();
-
   const items = navItems();
+  const requestedRoute = currentRoute() === 'login' ? 'dashboard' : currentRoute();
+  const route = items.some((i) => i.r === requestedRoute) ? requestedRoute : (items[0]?.r || 'settings');
   const nav = items.map((i) => `
     <button class="nav-item ${route === i.r ? 'active' : ''}" data-nav="${i.r}">
       <span class="ico">${i.ico}</span>${i.label}
@@ -183,7 +213,7 @@ function render() {
   const showUnitSwitch = myUnits().length > 1;
   const unitSwitch = showUnitSwitch ? `
     <div class="unit-switch">
-      ${myUnits().map((u) => `<button class="${S.unit === u ? 'active' : ''}" data-unit="${u}">${UNITS[u].emoji} ${UNITS[u].name}</button>`).join('')}
+      ${myUnits().map((u) => `<button class="${S.unit === u ? 'active' : ''}" data-unit="${u}">${esc(businessEmoji(u))} ${esc(businessName(u))}</button>`).join('')}
       <button class="${S.unit === 'all' ? 'active' : ''}" data-unit="all">Все</button>
     </div>` : '';
 
@@ -194,7 +224,7 @@ function render() {
         <div class="brand"><div class="logo">М</div><div><div class="name">Монетки</div><div class="sub">${S.store.demo ? 'демо-режим' : 'общая база'}</div></div></div>
         ${nav}
         <div class="spacer"></div>
-        <div class="whoami"><b>${esc(S.profile.name)}</b>${isAdmin() ? 'администратор' : esc(UNITS[S.profile.unit]?.name || '')}</div>
+        <div class="whoami"><b>${esc(S.profile.name)}</b>${isAdmin() ? 'администратор' : esc(myUnits().map(businessName).join(', '))}</div>
       </aside>
       <main class="main">
         <div class="topbar">
@@ -293,11 +323,11 @@ function askNotifPermission() {
 function viewDashboard() {
   setTitle('Дашборд');
   const units = activeUnits();
-  const tasks = (S.data.tasks || []).filter((t) => units.includes(t.unit));
+  const tasks = (S.data.tasks || []).filter((t) => units.includes(businessIdOf(t)));
   const mine = tasks.filter((t) => t.assigneeId === S.profile.id && t.status !== 'done');
   const overdue = mine.filter((t) => t.due && t.due < today());
   const month = today().slice(0, 7);
-  const fin = (S.data.finance || []).filter((f) => units.includes(f.unit) && (f.date || '').startsWith(month));
+  const fin = (S.data.finance || []).filter((f) => units.includes(businessIdOf(f)) && (f.date || '').startsWith(month));
   const income = fin.filter((f) => f.type === 'income').reduce((s, f) => s + Number(f.amount || 0), 0);
   const expense = fin.filter((f) => f.type === 'expense').reduce((s, f) => s + Number(f.amount || 0), 0);
 
@@ -321,7 +351,7 @@ function viewDashboard() {
     <div class="card stat"><div class="label">Итог</div><div class="value ${income - expense >= 0 ? 'green' : 'red'}">${money(income - expense)}</div></div>` : '';
 
   const upcoming = mine.sort((a, b) => (a.due || '9999').localeCompare(b.due || '9999')).slice(0, 6);
-  const lastOps = isAdmin() ? (S.data.finance || []).filter((f) => units.includes(f.unit)).sort((a, b) => (b.date || '').localeCompare(a.date || '')).slice(0, 5) : [];
+  const lastOps = isAdmin() ? (S.data.finance || []).filter((f) => units.includes(businessIdOf(f))).sort((a, b) => (b.date || '').localeCompare(a.date || '')).slice(0, 5) : [];
 
   $('#view').innerHTML = `
     <div class="cards-row">
@@ -342,7 +372,8 @@ function viewDashboard() {
 function taskRow(t) {
   const st = TASK_STATUSES.find((s) => s.id === t.status) || TASK_STATUSES[0];
   const over = t.due && t.due < today() && t.status !== 'done';
-  const unitTag = activeUnits().length > 1 ? `<span class="badge">${UNITS[t.unit]?.emoji || ''}</span>` : '';
+  const taskBusinessId = businessIdOf(t);
+  const unitTag = activeUnits().length > 1 ? `<span class="badge">${esc(businessEmoji(taskBusinessId))}</span>` : '';
   return `
     <div class="row-card ${t.status === 'done' ? 'done' : ''} ${over || t.status === 'new' ? 'overdue' : ''}" data-task="${t.id}">
       <div class="grow col">
@@ -363,7 +394,7 @@ function viewTasks() {
   const f = S.taskFilter;
   // Переключатель «Мои / От меня / Все» — только у админов; сотрудник видит лишь свои задачи
   const who = isAdmin() ? f.who : 'mine';
-  let tasks = (S.data.tasks || []).filter((t) => units.includes(t.unit));
+  let tasks = (S.data.tasks || []).filter((t) => units.includes(businessIdOf(t)));
   if (who === 'mine') tasks = tasks.filter((t) => t.assigneeId === S.profile.id);
   if (who === 'from-me') tasks = tasks.filter((t) => t.authorId === S.profile.id && t.assigneeId !== S.profile.id);
   if (f.status === 'active') tasks = tasks.filter((t) => t.status !== 'done');
@@ -391,7 +422,7 @@ function viewTasks() {
 function openTaskForm(task) {
   const isNew = !task;
   const units = activeUnits();
-  const unit = task?.unit || (units.length === 1 ? units[0] : (S.unit !== 'all' ? S.unit : units[0]));
+  const unit = businessIdOf(task) || (units.length === 1 ? units[0] : (S.unit !== 'all' ? S.unit : units[0]));
   const people = (S.data.employees || []).filter((e) => e.active !== false);
   // Права: содержимое меняет админ или автор задачи; сотрудник в чужой задаче меняет только статус
   const canEditContent = isNew || isAdmin() || task.authorId === S.profile.id;
@@ -431,7 +462,7 @@ function openTaskForm(task) {
         </label>
       </div>
       ${canEditContent && units.length > 1 ? `<label class="field"><span>Направление</span>
-        <select name="unit">${units.map((u) => `<option value="${u}" ${unit === u ? 'selected' : ''}>${UNITS[u].name}</option>`).join('')}</select></label>` : `<input type="hidden" name="unit" value="${unit}">`}
+        <select name="unit">${units.map((u) => `<option value="${u}" ${unit === u ? 'selected' : ''}>${esc(businessName(u))}</option>`).join('')}</select></label>` : `<input type="hidden" name="unit" value="${unit}">`}
       ${!isNew ? `
         <div class="section-title" style="margin-top:8px">Обсуждение</div>
         <div class="chat">${(task.comments || []).map((c) => `<div class="msg ${c.authorId === S.profile.id ? 'mine' : ''}"><span class="who">${esc(empName(c.authorId))}</span><span class="when">${fmtDT(c.ts)}</span><div>${esc(c.text)}</div></div>`).join('') || '<div class="muted small">Пока пусто — напишите первым.</div>'}</div>
@@ -450,6 +481,7 @@ function openTaskForm(task) {
       if (!canEditContent) return;
       const fd = new FormData(e.target);
       const item = Object.fromEntries(fd.entries());
+      item.businessId = item.unit;
       if (!isAdmin()) item.assigneeId = S.profile.id;
       closeModal();
       if (isNew) await doCreate('tasks', { ...item, authorId: S.profile.id, comments: [] }, 'Задача создана');
@@ -542,7 +574,7 @@ function openClientForm(c) {
         <label class="field"><span>Кто ведёт</span>
           <select name="ownerId">
             <option value="">— не назначен —</option>
-            ${(S.data.employees || []).filter((e) => e.active !== false && (e.unit === 'dev' || e.unit === 'all' || e.role === 'admin')).map((e) => `<option value="${e.id}" ${c?.ownerId === e.id ? 'selected' : ''}>${esc(e.name)}</option>`).join('')}
+            ${(S.data.employees || []).filter((e) => e.active !== false && employeeBusinessIds(e).includes('dev')).map((e) => `<option value="${e.id}" ${c?.ownerId === e.id ? 'selected' : ''}>${esc(e.name)}</option>`).join('')}
           </select>
         </label>
       </div>
@@ -796,8 +828,9 @@ function openImportPlayers() {
 // ---------- Финансы ----------
 function finRow(f) {
   const m = FIN_METHODS.find((x) => x.id === f.method);
-  const unitTag = activeUnits().length > 1 ? `${UNITS[f.unit]?.emoji || ''} ` : '';
-  const other = f.unit === 'padel' ? 'dev' : 'padel';
+  const financeBusinessId = businessIdOf(f);
+  const unitTag = activeUnits().length > 1 ? `${esc(businessEmoji(financeBusinessId))} ` : '';
+  const other = financeBusinessId === 'padel' ? 'dev' : 'padel';
   return `
     <div class="row-card" data-fin="${f.id}">
       <div class="grow col">
@@ -806,7 +839,7 @@ function finRow(f) {
       </div>
       <span class="badge ${f.source === 'bank' ? 'blue' : ''}">${f.source === 'bank' ? '🏦 банк' : '✍️ вручную'}${m ? ' · ' + m.name : ''}</span>
       <div class="amount ${f.type === 'income' ? 'green' : 'red'}">${f.type === 'income' ? '+' : '−'}${money(f.amount)}</div>
-      <button class="btn small" data-flip="${f.id}" title="Перекинуть в «${UNITS[other].name}»">${UNITS[other].emoji}</button>
+      <button class="btn small" data-flip="${f.id}" title="Перекинуть в «${esc(businessName(other))}»">${esc(businessEmoji(other))}</button>
     </div>`;
 }
 
@@ -816,8 +849,8 @@ function bindFinRows(root) {
     e.stopPropagation();
     const f = (S.data.finance || []).find((x) => x.id === el.dataset.flip);
     if (!f) return;
-    const other = f.unit === 'padel' ? 'dev' : 'padel';
-    await doUpdate('finance', { ...f, unit: other }, `Перенесено в «${UNITS[other].name}»`);
+    const other = businessIdOf(f) === 'padel' ? 'dev' : 'padel';
+    await doUpdate('finance', { ...f, businessId: other, unit: other }, `Перенесено в «${businessName(other)}»`);
   }));
 }
 
@@ -838,7 +871,7 @@ function renderFinOps(tabsHtml) {
   const m = S.finMonth;
   const period = S.finPeriod || 'month';
   const inPeriod = (f) => period === 'all' || (f.date || '').startsWith(m);
-  const list = (S.data.finance || []).filter((f) => units.includes(f.unit) && inPeriod(f)).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+  const list = (S.data.finance || []).filter((f) => units.includes(businessIdOf(f)) && inPeriod(f)).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
   const income = list.filter((f) => f.type === 'income').reduce((s, f) => s + Number(f.amount || 0), 0);
   const expense = list.filter((f) => f.type === 'expense').reduce((s, f) => s + Number(f.amount || 0), 0);
   const monthName = new Date(m + '-01').toLocaleDateString('ru-RU', { month: 'long', year: 'numeric' });
@@ -940,7 +973,12 @@ function openExpenseDetails(id) {
 }
 
 function renderFinAccounts(tabsHtml) {
-  const bal = ownerBalances(S.data.finance || []);
+  const businessOwners = S.data.businessOwners || [];
+  const bal = ownerBalances(S.data.finance || [], businessOwners);
+  const sharesText = businesses().map((b) => {
+    const owners = businessOwners.filter((o) => businessIdOf(o) === b.id && o.active !== false);
+    return `${businessName(b.id)} — ${owners.map((o) => `${o.name || ownerLabel(o.ownerId) || o.ownerId} ${Number(o.share || 0) * 100}%`).join(' / ')}`;
+  }).filter((text) => !text.endsWith('— ')).join('; ');
   $('#view').innerHTML = `
     ${tabsHtml}
     <div class="cards-row">
@@ -956,7 +994,7 @@ function renderFinAccounts(tabsHtml) {
     </div>
     <div class="card muted small">
       <b>Как считается.</b> По каждому направлению берётся (все доходы − все расходы) и делится по долям:
-      Разработка — Савва 50% / Андрей 50%; Падел — Андрей 34% / Савва 33% / Дмитрий 33%.
+      ${esc(sharesText || 'Разработка — Савва 50% / Андрей 50%; Падел — Андрей 34% / Савва 33% / Дмитрий 33%.')}
       Исключения: расход с указанным «Чей расход» вычитается только у него — «Савва и Андрей» делит его пополам между ними (минуя Дмитрия), конкретный человек — целиком с его счёта;
       «Перевод между счетами» не считается вообще. Наличные кассы живут отдельно (вкладка «Наличные»).
       Всё пересчитывается из операций автоматически, где бы вы их ни меняли.
@@ -1056,6 +1094,7 @@ function openCashForm(c) {
     $('#ent-form', root).addEventListener('submit', async (e) => {
       e.preventDefault();
       const item = Object.fromEntries(new FormData(e.target).entries());
+      item.businessId = item.unit;
       const offsetIds = [...root.querySelectorAll('[name=offset]:checked')].map((cb) => cb.value);
       delete item.offset;
       closeModal();
@@ -1095,7 +1134,7 @@ function openFinForm(f) {
       </div>
       <div class="form-row">
         <label class="field"><span>Направление</span>
-          <select name="unit">${units.map((u) => `<option value="${u}" ${(f?.unit || (S.unit !== 'all' ? S.unit : units[0])) === u ? 'selected' : ''}>${UNITS[u].name}</option>`).join('')}</select>
+          <select name="unit">${units.map((u) => `<option value="${u}" ${(businessIdOf(f) || (S.unit !== 'all' ? S.unit : units[0])) === u ? 'selected' : ''}>${esc(businessName(u))}</option>`).join('')}</select>
         </label>
         <label class="field"><span>Категория</span>
           <select name="category">${FIN_CATEGORIES.map((c) => `<option ${f?.category === c ? 'selected' : ''}>${c}</option>`).join('')}</select>
@@ -1163,6 +1202,7 @@ function openFinForm(f) {
     $('#ent-form', root).addEventListener('submit', async (e) => {
       e.preventDefault();
       const item = Object.fromEntries(new FormData(e.target).entries());
+      item.businessId = item.unit;
       const offsetIds = [...root.querySelectorAll('[name=offset]:checked')].map((c) => c.value);
       const paySource = item.paySource || 'account';
       delete item.paySource;
@@ -1200,7 +1240,7 @@ function viewMoney() {
   const paidTotal = paid.reduce((s, f) => s + Number(f.amount || 0), 0);
   const ex = (S.data.staffExpenses || []).sort((a, b) => (b.created || 0) - (a.created || 0));
   const pendingSum = ex.filter((e) => e.status === 'pending').reduce((s, e) => s + Number(e.amount || 0), 0);
-  const expensesOn = canUseExpenses(S.profile.unit);
+  const expensesOn = activeUnits().some(canUseExpenses);
 
   $('#view').innerHTML = `
     <div class="cards-row">
@@ -1324,7 +1364,8 @@ function openStaffExpenseForm(ex) {
         receiptId = up.id;
       }
       closeModal();
-      if (isNew) await doCreate('staffExpenses', { title: item.title, amount: item.amount, date: item.date, receiptId }, 'Трата отправлена — админу пришло уведомление');
+      const businessId = S.unit !== 'all' ? S.unit : activeUnits()[0];
+      if (isNew) await doCreate('staffExpenses', { title: item.title, amount: item.amount, date: item.date, receiptId, businessId, unit: businessId }, 'Трата отправлена — админу пришло уведомление');
       else await doUpdate('staffExpenses', { ...ex, title: item.title, amount: item.amount, date: item.date, receiptId }, 'Сохранено');
     });
     $('#ent-del', root)?.addEventListener('click', async () => {
@@ -1347,7 +1388,7 @@ function viewTeam() {
         <div class="row-card" data-emp="${e.id}" style="${e.active === false ? 'opacity:.5' : ''}">
           <div class="grow col">
             <div class="title">${esc(e.name)}</div>
-            <div class="sub">${e.role === 'admin' ? 'администратор' : 'сотрудник'} · ${e.unit === 'all' ? 'все направления' : esc(UNITS[e.unit]?.name || '')}${e.active === false ? ' · отключён' : ''}</div>
+            <div class="sub">${e.role === 'admin' ? 'администратор' : 'сотрудник'} · ${esc(employeeBusinessIds(e).map(businessName).join(', ') || 'без доступа')}${e.active === false ? ' · отключён' : ''}</div>
           </div>
           ${e.code ? `<button class="btn small" data-code="${esc(e.code)}" title="Скопировать код входа">🔑 ${esc(e.code)}</button>` : ''}
         </div>`).join('')}
@@ -1376,8 +1417,7 @@ function openEmpForm(emp) {
         </label>
         <label class="field"><span>Направление</span>
           <select name="unit">
-            <option value="padel" ${emp?.unit === 'padel' ? 'selected' : ''}>Падел</option>
-            <option value="dev" ${emp?.unit === 'dev' ? 'selected' : ''}>Разработка</option>
+            ${businesses().map((b) => `<option value="${esc(b.id)}" ${emp?.unit === b.id ? 'selected' : ''}>${esc(b.name)}</option>`).join('')}
             <option value="all" ${emp?.unit === 'all' ? 'selected' : ''}>Все направления</option>
           </select>
         </label>
@@ -1407,7 +1447,87 @@ function openEmpForm(emp) {
   });
 }
 
-// ---------- Настройки ----------
+// ---------- Бизнесы и настройки ----------
+function businessAdminHtml() {
+  const memberships = S.data.memberships || [];
+  const owners = S.data.businessOwners || [];
+  const employees = S.data.employees || [];
+  return `
+    <div class="card business-admin" style="margin-bottom:12px">
+      <div class="section-title" style="margin-top:0">🏢 Бизнесы, роли и доступы</div>
+      <p class="small muted">Здесь настраиваются карточки двух текущих бизнесов, видимые разделы, доли участников и доступ сотрудников. ID <b>padel</b> и <b>dev</b> не меняются.</p>
+      <div class="business-grid">
+        ${businesses().map((b) => {
+          const businessOwners = owners.filter((o) => businessIdOf(o) === b.id && o.active !== false);
+          const totalShare = businessOwners.reduce((sum, o) => sum + Number(o.share || 0), 0) * 100;
+          return `<form class="business-card" data-business-form="${esc(b.id)}">
+            <div class="business-card-title"><span>${esc(b.emoji || '🏢')}</span><b>${esc(b.name)}</b><code>${esc(b.id)}</code></div>
+            <div class="form-row">
+              <label class="field"><span>Название</span><input name="name" required value="${esc(b.name)}"></label>
+              <label class="field compact-field"><span>Значок</span><input name="emoji" maxlength="8" value="${esc(b.emoji || '🏢')}"></label>
+            </div>
+            <div class="field"><span>Модули</span><div class="check-grid">
+              ${Object.entries(BUSINESS_MODULES).map(([id, name]) => `<label class="checkline"><input type="checkbox" name="module" value="${id}" ${(b.modules || []).includes(id) ? 'checked' : ''}><span>${esc(name)}</span></label>`).join('')}
+            </div></div>
+            <div class="section-title">Участники и доли <span class="muted small">сумма: ${totalShare.toLocaleString('ru-RU')}%</span></div>
+            <div class="owner-grid">
+              ${businessOwners.map((o) => `<label class="field owner-share"><span>${esc(o.name || ownerLabel(o.ownerId) || o.ownerId)}</span><div class="suffix-input"><input type="number" min="0" max="100" step="0.01" data-owner-share="${esc(o.id)}" value="${Number(o.share || 0) * 100}"><span>%</span></div></label>`).join('')}
+            </div>
+            <div class="section-title">Доступ сотрудников</div>
+            <div class="access-list">
+              ${employees.map((employee) => {
+                const membership = memberships.find((m) => m.employeeId === employee.id && businessIdOf(m) === b.id);
+                const self = employee.id === S.profile.id;
+                return `<div class="access-row" data-access-row="${esc(employee.id)}" data-membership-id="${esc(membership?.id || '')}">
+                  <label class="checkline grow"><input type="checkbox" data-access ${membership?.active !== false && !!membership ? 'checked' : ''} ${self ? 'disabled' : ''}><span>${esc(employee.name)}</span></label>
+                  <select data-access-role ${self ? 'disabled' : ''}><option value="staff" ${!['owner', 'manager'].includes(membership?.role) ? 'selected' : ''}>сотрудник</option><option value="manager" ${membership?.role === 'manager' ? 'selected' : ''}>менеджер</option><option value="owner" ${membership?.role === 'owner' ? 'selected' : ''}>владелец</option></select>
+                </div>`;
+              }).join('')}
+            </div>
+            <div class="actions"><button class="btn primary" type="submit">Сохранить бизнес</button></div>
+          </form>`;
+        }).join('')}
+      </div>
+    </div>`;
+}
+
+function bindBusinessAdmin() {
+  $('#view').querySelectorAll('[data-business-form]').forEach((form) => form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const businessId = form.dataset.businessForm;
+    const current = (S.data.businesses || []).find((b) => b.id === businessId);
+    if (!current) return;
+    const ownerInputs = [...form.querySelectorAll('[data-owner-share]')];
+    const totalShare = ownerInputs.reduce((sum, input) => sum + Number(input.value || 0), 0);
+    if (Math.abs(totalShare - 100) > 0.01) { toast('Доли участников должны в сумме давать 100%', true); return; }
+    const submit = form.querySelector('[type=submit]');
+    submit.disabled = true;
+    const modules = [...form.querySelectorAll('[name=module]:checked')].map((input) => input.value);
+    const updatedBusiness = { ...current, name: form.elements.name.value.trim(), emoji: form.elements.emoji.value.trim() || '🏢', modules };
+    const results = [await S.store.update(S.token, 'businesses', updatedBusiness)];
+    for (const input of ownerInputs) {
+      const owner = (S.data.businessOwners || []).find((o) => o.id === input.dataset.ownerShare);
+      if (owner) results.push(await S.store.update(S.token, 'businessOwners', { ...owner, share: Number(input.value) / 100 }));
+    }
+    for (const row of form.querySelectorAll('[data-access-row]')) {
+      if (row.dataset.accessRow === S.profile.id) continue;
+      const membership = (S.data.memberships || []).find((m) => m.id === row.dataset.membershipId);
+      const data = {
+        businessId, unit: businessId, employeeId: row.dataset.accessRow,
+        role: row.querySelector('[data-access-role]').value,
+        active: row.querySelector('[data-access]').checked
+      };
+      results.push(membership
+        ? await S.store.update(S.token, 'memberships', { ...membership, ...data })
+        : await S.store.create(S.token, 'memberships', data));
+    }
+    const failed = results.find((result) => !result.ok);
+    if (failed) toast(failed.error || 'Не удалось сохранить бизнес', true);
+    else toast('Настройки бизнеса сохранены');
+    await refresh(true);
+  }));
+}
+
 function viewSettings() {
   setTitle('Ещё');
   const backend = localStorage.getItem('monetki_backend') || (window.MONETKI_CONFIG?.backendUrl || '');
@@ -1436,11 +1556,12 @@ function viewSettings() {
       <div class="section-title" style="margin-top:0">📱 Установить на телефон</div>
       <p class="small muted">iPhone: Safari → «Поделиться» → «На экран “Домой”».<br>Android: Chrome → меню ⋮ → «Установить приложение».</p>
     </div>
+    ${isAdmin() ? businessAdminHtml() : ''}
     ${isAdmin() ? `
     <div class="card" style="margin-bottom:12px">
-      <div class="section-title" style="margin-top:0">🗄️ Общая база (Google Таблицы)</div>
-      <p class="small muted">${backend ? 'База подключена.' : 'База не подключена — работаем в демо-режиме. Инструкция в файле SETUP.md в репозитории.'}</p>
-      <label class="field"><span>Ссылка на базу (из Google-скрипта, SETUP.md шаг 2)</span><input type="url" id="backend-url" placeholder="https://script.google.com/macros/s/…/exec" value="${esc(backend)}"></label>
+      <div class="section-title" style="margin-top:0">🗄️ Общая база Supabase</div>
+      <p class="small muted">${backend ? 'База подключена.' : 'База не подключена — работаем в демо-режиме. Инструкция в файле SETUP-SUPABASE.md в репозитории.'}</p>
+      <label class="field"><span>Адрес серверной функции</span><input type="url" id="backend-url" placeholder="https://….supabase.co/functions/v1/api" value="${esc(backend)}"></label>
       <button class="btn primary" id="backend-save">Сохранить и перезагрузить</button>
     </div>` : ''}
     ${isAdmin() ? `
@@ -1464,6 +1585,7 @@ function viewSettings() {
     syncThemeColor();
     render();
   }));
+  if (isAdmin()) bindBusinessAdmin();
   $('#view').querySelectorAll('[data-nav2]').forEach((b) => b.addEventListener('click', () => { location.hash = '#/' + b.dataset.nav2; }));
   $('#notif-on')?.addEventListener('click', () => Notification.requestPermission().then(() => render()));
   $('#backend-save')?.addEventListener('click', () => {
@@ -1530,6 +1652,7 @@ function bindEntityForm(root, entity, existing, extra = {}) {
   $('#ent-form', root).addEventListener('submit', async (e) => {
     e.preventDefault();
     const item = Object.fromEntries(new FormData(e.target).entries());
+    if (item.unit) item.businessId = item.unit;
     closeModal();
     if (existing) await doUpdate(entity, { ...existing, ...item }, 'Сохранено');
     else await doCreate(entity, { ...item, ...extra }, 'Добавлено');

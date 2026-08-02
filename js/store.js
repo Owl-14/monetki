@@ -9,6 +9,16 @@ export const UNITS = {
   dev: { id: 'dev', name: 'Разработка', emoji: '💻' }
 };
 
+export const BUSINESS_MODULES = {
+  dashboard: 'Дашборд', tasks: 'Задачи', clients: 'Клиенты', venues: 'Площадки',
+  players: 'Игроки', finance: 'Финансы', money: 'Деньги сотрудника', team: 'Команда'
+};
+
+export const DEFAULT_BUSINESSES = [
+  { id: 'padel', name: 'Падел', emoji: '🎾', modules: ['dashboard', 'tasks', 'venues', 'players', 'finance', 'money', 'team'], active: true },
+  { id: 'dev', name: 'Разработка', emoji: '💻', modules: ['dashboard', 'tasks', 'clients', 'finance', 'money', 'team'], active: true }
+];
+
 export const CLIENT_STATUSES = {
   dev: [
     { id: 'lead', name: 'Лид', color: 'blue' },
@@ -40,6 +50,76 @@ export const OWNERS = [
   { id: 'dmitry', name: 'Дмитрий', shares: { dev: 0, padel: 0.33 }, cashbox: false }
 ];
 
+export const DEFAULT_BUSINESS_OWNERS = [
+  { id: 'owner-dev-savva', businessId: 'dev', unit: 'dev', ownerId: 'savva', name: 'Савва', share: 0.5 },
+  { id: 'owner-dev-andrey', businessId: 'dev', unit: 'dev', ownerId: 'andrey', name: 'Андрей', share: 0.5 },
+  { id: 'owner-padel-andrey', businessId: 'padel', unit: 'padel', ownerId: 'andrey', name: 'Андрей', share: 0.34 },
+  { id: 'owner-padel-savva', businessId: 'padel', unit: 'padel', ownerId: 'savva', name: 'Савва', share: 0.33 },
+  { id: 'owner-padel-dmitry', businessId: 'padel', unit: 'padel', ownerId: 'dmitry', name: 'Дмитрий', share: 0.33 }
+];
+
+export const businessIdOf = (item) => item?.businessId || item?.unit || '';
+
+function scopedItem(item, fallback = '') {
+  const businessId = item.businessId || item.unit || fallback;
+  if (!businessId || businessId === 'all') return item;
+  if (item.businessId && item.unit && item.businessId !== item.unit) return null;
+  item.businessId = businessId;
+  item.unit = businessId;
+  return item;
+}
+
+function legacyBusinessIds(employee) {
+  if (employee.role === 'admin' || employee.unit === 'all') return DEFAULT_BUSINESSES.map((b) => b.id);
+  return employee.unit ? [employee.unit] : [];
+}
+
+function ensureCoreData(db) {
+  let changed = false;
+  ['businesses', 'memberships', 'businessOwners', 'staffExpenses', 'cash', 'files'].forEach((key) => {
+    if (!Array.isArray(db[key])) { db[key] = []; changed = true; }
+  });
+  DEFAULT_BUSINESSES.forEach((business) => {
+    if (!db.businesses.some((x) => x.id === business.id)) {
+      db.businesses.push({ ...business, modules: [...business.modules], created: Date.now(), updated: Date.now() });
+      changed = true;
+    }
+  });
+  DEFAULT_BUSINESS_OWNERS.forEach((owner) => {
+    if (!db.businessOwners.some((x) => businessIdOf(x) === owner.businessId && x.ownerId === owner.ownerId)) {
+      db.businessOwners.push({ ...owner, created: Date.now(), updated: Date.now() });
+      changed = true;
+    }
+  });
+  const activeBusinessIds = db.businesses.filter((business) => business.active !== false).map((business) => business.id);
+  (db.employees || []).forEach((employee) => {
+    const globalAdmin = employee.active !== false && employee.role === 'admin';
+    const businessIds = globalAdmin ? activeBusinessIds : legacyBusinessIds(employee);
+    businessIds.forEach((businessId) => {
+      const existing = db.memberships.find((membership) => membership.employeeId === employee.id && businessIdOf(membership) === businessId);
+      if (!existing) {
+        db.memberships.push({
+          id: `membership-${businessId}-${employee.id}`, businessId, unit: businessId,
+          employeeId: employee.id, role: globalAdmin ? 'owner' : 'staff', active: employee.active !== false,
+          created: Date.now(), updated: Date.now()
+        });
+        changed = true;
+      } else if (globalAdmin && (existing.active === false || existing.role !== 'owner')) {
+        Object.assign(existing, { businessId, unit: businessId, role: 'owner', active: true, updated: Date.now() });
+        changed = true;
+      }
+    });
+  });
+  ['clients', 'venues', 'players', 'tasks', 'finance', 'staffExpenses'].forEach((entity) => {
+    (db[entity] || []).forEach((item) => {
+      const beforeBusinessId = item.businessId;
+      const beforeUnit = item.unit;
+      if (scopedItem(item) && (beforeBusinessId !== item.businessId || beforeUnit !== item.unit)) changed = true;
+    });
+  });
+  return changed;
+}
+
 // Направления, где сотрудникам доступны траты с возмещением (пока только падел).
 export const EXPENSE_UNITS = ['padel'];
 export const canUseExpenses = (unit) => unit === 'all' || EXPENSE_UNITS.includes(unit);
@@ -61,36 +141,54 @@ export const ownerLabel = (owner) => OWNER_GROUPS[owner]?.name || OWNERS.find((o
  * Расход, записанный на конкретного человека («Чей расход»), вычитается целиком
  * только у него и не делится на всех. Переводы между своими счетами не считаются.
  */
-export function ownerBalances(finance) {
-  const res = {};
-  OWNERS.forEach((o) => { res[o.id] = { dev: 0, padel: 0, personal: 0, total: 0 }; });
+export function ownerBalances(finance, businessOwners = []) {
+  const emptyBalance = () => new Map([['dev', 0], ['padel', 0], ['personal', 0], ['total', 0]]);
+  const res = new Map();
+  OWNERS.forEach((o) => { res.set(o.id, emptyBalance()); });
+  const configured = new Map();
+  (businessOwners || []).filter((x) => x.active !== false).forEach((x) => {
+    const businessId = businessIdOf(x);
+    if (!businessId || !x.ownerId) return;
+    if (!configured.has(businessId)) configured.set(businessId, []);
+    configured.get(businessId).push([x.ownerId, Number(x.share || 0)]);
+    if (!res.has(x.ownerId)) res.set(x.ownerId, emptyBalance());
+    const balance = res.get(x.ownerId);
+    if (!balance.has(businessId)) balance.set(businessId, 0);
+  });
+  const shares = (businessId) => configured.get(businessId)?.length
+    ? configured.get(businessId)
+    : OWNERS.map((o) => [o.id, Number(Object.hasOwn(o.shares, businessId) ? o.shares[businessId] : 0)]).filter(([, share]) => share);
   for (const f of finance || []) {
     const amt = Number(f.amount || 0);
+    const businessId = businessIdOf(f);
     if (!amt) continue;
     if (f.category === 'Перевод между счетами') continue;
     if (f.type === 'income') {
-      OWNERS.forEach((o) => {
-        const sh = o.shares[f.unit] || 0;
-        if (sh) res[o.id][f.unit] += amt * sh;
+      shares(businessId).forEach(([ownerId, share]) => {
+        const balance = res.get(ownerId);
+        if (balance && share) balance.set(businessId, Number(balance.get(businessId) || 0) + amt * share);
       });
     } else if (ownerParts(f.owner)) {
       // расход на конкретного владельца или на пару (Савва и Андрей — пополам)
       for (const [oid, sh] of ownerParts(f.owner)) {
-        if (res[oid]) res[oid].personal += amt * sh;
+        const balance = res.get(oid);
+        if (balance) balance.set('personal', Number(balance.get('personal') || 0) + amt * sh);
       }
     } else {
       // общий расход направления — уменьшает делимое по тем же долям
-      OWNERS.forEach((o) => {
-        const sh = o.shares[f.unit] || 0;
-        if (sh) res[o.id][f.unit] -= amt * sh;
+      shares(businessId).forEach(([ownerId, share]) => {
+        const balance = res.get(ownerId);
+        if (balance && share) balance.set(businessId, Number(balance.get(businessId) || 0) - amt * share);
       });
     }
   }
-  OWNERS.forEach((o) => {
-    const r = res[o.id];
-    r.total = r.dev + r.padel - r.personal;
+  res.forEach((balance) => {
+    const businessTotal = [...balance.entries()]
+      .filter(([key]) => key !== 'personal' && key !== 'total')
+      .reduce((sum, [, amount]) => sum + Number(amount || 0), 0);
+    balance.set('total', businessTotal - Number(balance.get('personal') || 0));
   });
-  return res;
+  return Object.fromEntries([...res.entries()].map(([ownerId, balance]) => [ownerId, Object.fromEntries(balance)]));
 }
 
 export const FIN_METHODS = [
@@ -115,6 +213,14 @@ function seedData() {
   const emp1 = { id: 'u-oleg', name: 'Олег (падел)', code: '222222', role: 'staff', unit: 'padel', phone: '+7 900 000-00-01', tg: '@oleg', active: true, created: now };
   const emp2 = { id: 'u-dasha', name: 'Даша (разработка)', code: '333333', role: 'staff', unit: 'dev', phone: '+7 900 000-00-02', tg: '@dasha', active: true, created: now };
   return {
+    businesses: DEFAULT_BUSINESSES.map((x) => ({ ...x, modules: [...x.modules], created: now, updated: now })),
+    memberships: [
+      { id: 'membership-padel-u-admin', businessId: 'padel', unit: 'padel', employeeId: 'u-admin', role: 'owner', active: true, created: now, updated: now },
+      { id: 'membership-dev-u-admin', businessId: 'dev', unit: 'dev', employeeId: 'u-admin', role: 'owner', active: true, created: now, updated: now },
+      { id: 'membership-padel-u-oleg', businessId: 'padel', unit: 'padel', employeeId: 'u-oleg', role: 'staff', active: true, created: now, updated: now },
+      { id: 'membership-dev-u-dasha', businessId: 'dev', unit: 'dev', employeeId: 'u-dasha', role: 'staff', active: true, created: now, updated: now }
+    ],
+    businessOwners: DEFAULT_BUSINESS_OWNERS.map((x) => ({ ...x, created: now, updated: now })),
     employees: [admin, emp1, emp2],
     clients: [
       { id: uid(), unit: 'dev', name: 'Кофейня «Зерно»', company: 'ИП Иванов', phone: '+7 912 345-67-89', tg: '@zerno', status: 'work', amount: 120000, notes: 'Сайт + онлайн-меню. Предоплата получена.', created: now, updated: now },
@@ -160,15 +266,68 @@ function seedData() {
 
 // ---------- LocalStore (демо) ----------
 const LS_KEY = 'monetki_demo_db';
+const CORE_ENTITIES = ['businesses', 'memberships', 'businessOwners'];
+const BUSINESS_SCOPED_ENTITIES = ['clients', 'venues', 'players', 'tasks', 'finance', 'staffExpenses'];
+const LOCAL_ENTITIES = [
+  ...CORE_ENTITIES, 'employees', ...BUSINESS_SCOPED_ENTITIES, 'cash', 'files', 'notifications'
+];
 
-class LocalStore {
+function membershipsOf(db, employeeId) {
+  return (db.memberships || []).filter((x) => x.employeeId === employeeId && x.active !== false);
+}
+
+function canAccessBusiness(db, user, businessId) {
+  if (!businessId || businessId === 'all') return false;
+  return membershipsOf(db, user.id).some((x) => businessIdOf(x) === businessId);
+}
+
+function sharedBusiness(db, leftId, rightId) {
+  const left = new Set(membershipsOf(db, leftId).map(businessIdOf));
+  return membershipsOf(db, rightId).some((x) => left.has(businessIdOf(x)));
+}
+
+function scopeError(item) {
+  if (item?.businessId && item?.unit && item.businessId !== item.unit) return 'businessId и unit должны совпадать';
+  return null;
+}
+
+function coreValidationError(db, entity, item, ignoreId = '') {
+  if (entity === 'businesses') {
+    const id = String(item?.id || '').trim();
+    if (!id || ['all', 'personal', 'total'].includes(id) || !/^[a-z0-9][a-z0-9-]{0,62}$/.test(id)) return 'ID бизнеса должен быть безопасным slug';
+    if (db.businesses.some((business) => business.id === id && business.id !== ignoreId)) return 'Бизнес с таким ID уже существует';
+  }
+  if (entity === 'memberships') {
+    const businessId = businessIdOf(item);
+    if (!db.businesses.some((business) => business.id === businessId)) return 'Бизнес не найден';
+    if (!db.employees.some((employee) => employee.id === item?.employeeId)) return 'Сотрудник не найден';
+    if (!['owner', 'manager', 'staff'].includes(String(item?.role || ''))) return 'Неизвестная роль доступа';
+    if (db.memberships.some((membership) => membership.id !== ignoreId && membership.employeeId === item.employeeId && businessIdOf(membership) === businessId)) {
+      return 'Доступ сотрудника к этому бизнесу уже существует';
+    }
+  }
+  if (entity === 'businessOwners') {
+    const businessId = businessIdOf(item);
+    const ownerId = String(item?.ownerId || '').trim();
+    const share = Number(item?.share);
+    if (!db.businesses.some((business) => business.id === businessId)) return 'Бизнес не найден';
+    if (!ownerId) return 'Не указан участник бизнеса';
+    if (item?.share === '' || item?.share === null || !Number.isFinite(share) || share < 0 || share > 1) return 'Доля должна быть числом от 0 до 1';
+    if (db.businessOwners.some((owner) => owner.id !== ignoreId && owner.ownerId === ownerId && businessIdOf(owner) === businessId)) {
+      return 'Участник уже добавлен в этот бизнес';
+    }
+  }
+  return null;
+}
+
+export class LocalStore {
   constructor() { this.demo = true; }
   _db() {
     let raw = localStorage.getItem(LS_KEY);
     let db;
     if (!raw) { db = seedData(); localStorage.setItem(LS_KEY, JSON.stringify(db)); return db; }
     try { db = JSON.parse(raw); } catch { db = seedData(); localStorage.setItem(LS_KEY, JSON.stringify(db)); }
-    ['staffExpenses', 'cash', 'files'].forEach((k) => { if (!db[k]) db[k] = []; });
+    if (ensureCoreData(db)) localStorage.setItem(LS_KEY, JSON.stringify(db));
     return db;
   }
   _save(db) { localStorage.setItem(LS_KEY, JSON.stringify(db)); }
@@ -177,9 +336,14 @@ class LocalStore {
     const db = this._db();
     const u = db.employees.find((e) => e.code === String(code).trim() && e.active);
     if (!u) return { ok: false, error: 'Неверный код доступа' };
-    return { ok: true, token: 'demo:' + u.id, profile: this._profile(u) };
+    return { ok: true, token: 'demo:' + u.id, profile: this._profile(db, u) };
   }
-  _profile(u) { return { id: u.id, name: u.name, role: u.role, unit: u.unit, phone: u.phone, tg: u.tg }; }
+  _profile(db, u) {
+    return {
+      id: u.id, name: u.name, role: u.role, unit: u.unit, phone: u.phone, tg: u.tg,
+      businessIds: membershipsOf(db, u.id).map(businessIdOf)
+    };
+  }
   _user(token) {
     const db = this._db();
     const id = String(token || '').replace('demo:', '');
@@ -191,26 +355,45 @@ class LocalStore {
     const u = this._user(token);
     if (!u) return { ok: false, error: 'auth' };
     const isAdmin = u.role === 'admin';
-    const canSee = (unit) => isAdmin || u.unit === 'all' || u.unit === unit;
+    const canSee = (item) => canAccessBusiness(db, u, businessIdOf(item));
     return {
       ok: true,
-      profile: this._profile(u),
+      profile: this._profile(db, u),
       data: {
-        // сотрудник видит только людей своего направления (и админов) — п.7
+        businesses: db.businesses.filter((b) => b.active !== false && canAccessBusiness(db, u, b.id)),
+        memberships: isAdmin ? db.memberships : db.memberships.filter((m) => m.employeeId === u.id),
+        businessOwners: isAdmin ? db.businessOwners : [],
+        // сотрудник видит только людей доступных ему бизнесов (и админов)
         employees: db.employees
-          .filter((e) => isAdmin || e.unit === u.unit || e.unit === 'all' || e.role === 'admin')
+          .filter((e) => isAdmin || e.id === u.id || e.role === 'admin' || sharedBusiness(db, u.id, e.id))
           .map((e) => (isAdmin ? e : { id: e.id, name: e.name, role: e.role, unit: e.unit, active: e.active })),
-        clients: db.clients.filter((c) => canSee(c.unit)),
-        venues: db.venues.filter((v) => canSee(v.unit)),
-        players: db.players.filter((p) => canSee(p.unit)),
-        tasks: db.tasks.filter((t) => canSee(t.unit) && (isAdmin || t.assigneeId === u.id)),
-        finance: isAdmin ? db.finance : db.finance.filter((f) => f.employeeId === u.id),
-        staffExpenses: isAdmin ? db.staffExpenses : db.staffExpenses.filter((e) => e.employeeId === u.id),
+        clients: db.clients.filter(canSee),
+        venues: db.venues.filter(canSee),
+        players: db.players.filter(canSee),
+        tasks: db.tasks.filter((t) => canSee(t) && (isAdmin || t.assigneeId === u.id)),
+        finance: db.finance.filter((f) => canSee(f) && (isAdmin || f.employeeId === u.id)),
+        staffExpenses: db.staffExpenses.filter((e) => canSee(e) && (isAdmin || e.employeeId === u.id)),
         cash: isAdmin ? db.cash : db.cash.filter((c) => c.employeeId === u.id),
         bankBalance: isAdmin ? { amount: 175000, updated: new Date().toISOString() } : null,
         notifications: db.notifications.filter((n) => n.toId === u.id)
       }
     };
+  }
+
+  _baseWriteError(u, entity) {
+    if (!LOCAL_ENTITIES.includes(entity) || entity === 'files') return 'Неизвестная сущность';
+    if (entity === 'notifications') return 'Нельзя';
+    if ([...CORE_ENTITIES, 'employees', 'finance', 'cash'].includes(entity) && u.role !== 'admin') return 'Только для админа';
+    return null;
+  }
+
+  _scopeWriteError(db, u, item) {
+    const mismatch = scopeError(item);
+    if (mismatch) return mismatch;
+    const businessId = businessIdOf(item);
+    if (!businessId) return 'Не указан бизнес';
+    if (!canAccessBusiness(db, u, businessId)) return 'Нет доступа к этому бизнесу';
+    return null;
   }
 
   _salaryOffsets(db, u, item) {
@@ -231,16 +414,33 @@ class LocalStore {
   async create(token, entity, item) {
     const u = this._user(token); if (!u) return { ok: false, error: 'auth' };
     const db = this._db();
-    if (['employees', 'finance', 'cash'].includes(entity) && u.role !== 'admin') return { ok: false, error: 'Только для админа' };
+    const baseError = this._baseWriteError(u, entity);
+    if (baseError) return { ok: false, error: baseError };
+    item = { ...item };
+    if (entity === 'businesses') item.id = String(item.id || '').trim();
+    if (entity === 'businessOwners') item.ownerId = String(item.ownerId || '').trim();
+    const coreError = CORE_ENTITIES.includes(entity) ? coreValidationError(db, entity, item) : null;
+    if (coreError) return { ok: false, error: coreError };
+    if (entity === 'staffExpenses' && u.role !== 'admin' && !businessIdOf(item)) scopedItem(item, u.unit);
+    if (BUSINESS_SCOPED_ENTITIES.includes(entity)) {
+      const accessError = this._scopeWriteError(db, u, item);
+      if (accessError) return { ok: false, error: accessError };
+      scopedItem(item);
+    }
+    if (['memberships', 'businessOwners'].includes(entity)) {
+      const accessError = this._scopeWriteError(db, u, item);
+      if (accessError) return { ok: false, error: accessError };
+      scopedItem(item);
+    }
     // id всегда серверный — нельзя перезаписать чужую запись, прислав её id
-    item = { ...item, id: uid(), created: Date.now(), updated: Date.now() };
+    item = { ...item, id: entity === 'businesses' && item.id ? item.id : uid(), created: Date.now(), updated: Date.now() };
     if (entity === 'employees' && !item.code) item.code = String(Math.floor(100000 + Math.random() * 900000));
     if (entity === 'tasks' && u.role !== 'admin') item.assigneeId = u.id; // п.3: сотрудник ставит задачи только себе
     if (entity === 'staffExpenses') {
-      const exUnit = u.role === 'admin' ? (item.unit || 'padel') : u.unit;
+      const exUnit = businessIdOf(item) || (u.role === 'admin' ? 'padel' : u.unit);
       if (!canUseExpenses(exUnit)) return { ok: false, error: 'Траты для этого направления отключены' };
       if (!item.receiptId) return { ok: false, error: 'Прикрепите фото чека' };
-      if (u.role !== 'admin') { item.employeeId = u.id; item.unit = u.unit === 'all' ? (item.unit || 'padel') : u.unit; }
+      if (u.role !== 'admin') item.employeeId = u.id;
       item.status = item.status || 'pending';
       db.employees.filter((e) => e.role === 'admin' && e.active && e.id !== u.id)
         .forEach((a) => db.notifications.push({ id: uid(), toId: a.id, text: `${u.name}: трата ${item.amount} ₽ — ${item.title}`, link: '#/finance', read: false, created: Date.now() }));
@@ -251,9 +451,16 @@ class LocalStore {
       if (offsets?.error) return { ok: false, error: offsets.error };
     }
     db[entity].push(item);
+    if (entity === 'businesses') {
+      db.memberships.push({
+        id: `membership-${item.id}-${u.id}`, businessId: item.id, unit: item.id,
+        employeeId: u.id, role: 'owner', active: true, created: Date.now(), updated: Date.now()
+      });
+    }
+    if (entity === 'employees' || entity === 'businesses') ensureCoreData(db);
     if (offsets?.sum) {
       db[entity].push({
-        id: uid(), unit: item.unit, owner: item.owner, date: item.date,
+        id: uid(), businessId: item.businessId, unit: item.unit, owner: item.owner, date: item.date,
         type: 'expense', amount: offsets.sum, method: item.method || 'cash', source: 'manual',
         category: 'Компенсация сотруднику', counterparty: '', comment: `Зачтено в зарплате: ${offsets.titles}`,
         employeeId: item.employeeId, created: Date.now(), updated: Date.now()
@@ -272,10 +479,24 @@ class LocalStore {
   async update(token, entity, item) {
     const u = this._user(token); if (!u) return { ok: false, error: 'auth' };
     const db = this._db();
-    if (['employees', 'finance', 'cash'].includes(entity) && u.role !== 'admin') return { ok: false, error: 'Только для админа' };
+    const baseError = this._baseWriteError(u, entity);
+    if (baseError) return { ok: false, error: baseError };
     const i = db[entity].findIndex((x) => x.id === item.id);
     if (i < 0) return { ok: false, error: 'Не найдено' };
     const before = db[entity][i];
+    if (entity === 'businesses' && !canAccessBusiness(db, u, before.id)) return { ok: false, error: 'Нет доступа к этому бизнесу' };
+    if (BUSINESS_SCOPED_ENTITIES.includes(entity) || ['memberships', 'businessOwners'].includes(entity)) {
+      const sourceError = this._scopeWriteError(db, u, before);
+      if (sourceError) return { ok: false, error: sourceError };
+      const mismatch = scopeError(item);
+      if (mismatch) return { ok: false, error: mismatch };
+      const targetBusinessId = item.businessId || item.unit || businessIdOf(before);
+      const targetError = this._scopeWriteError(db, u, { businessId: targetBusinessId, unit: targetBusinessId });
+      if (targetError) return { ok: false, error: targetError };
+      item = { ...item, businessId: targetBusinessId, unit: targetBusinessId };
+    }
+    const coreError = CORE_ENTITIES.includes(entity) ? coreValidationError(db, entity, { ...before, ...item }, before.id) : null;
+    if (coreError) return { ok: false, error: coreError };
     // п.1–2: сотрудник меняет содержимое только своих задач; в чужих (от админа) — только статус
     if (entity === 'tasks' && u.role !== 'admin' && before.authorId !== u.id) {
       if (before.assigneeId !== u.id) return { ok: false, error: 'Нет доступа' };
@@ -319,9 +540,15 @@ class LocalStore {
   async remove(token, entity, id) {
     const u = this._user(token); if (!u) return { ok: false, error: 'auth' };
     const db = this._db();
-    if (['employees', 'finance', 'cash'].includes(entity) && u.role !== 'admin') return { ok: false, error: 'Только для админа' };
+    const baseError = this._baseWriteError(u, entity);
+    if (baseError) return { ok: false, error: baseError };
     const before = db[entity].find((x) => x.id === id);
     if (!before) return { ok: false, error: 'Не найдено' };
+    if (entity === 'businesses' && !canAccessBusiness(db, u, before.id)) return { ok: false, error: 'Нет доступа к этому бизнесу' };
+    if (BUSINESS_SCOPED_ENTITIES.includes(entity) || ['memberships', 'businessOwners'].includes(entity)) {
+      const sourceError = this._scopeWriteError(db, u, before);
+      if (sourceError) return { ok: false, error: sourceError };
+    }
     if (entity === 'tasks' && u.role !== 'admin' && before.authorId !== u.id) return { ok: false, error: 'Удалять можно только свои задачи' };
     if (entity === 'staffExpenses' && u.role !== 'admin' && (before.employeeId !== u.id || before.status !== 'pending')) return { ok: false, error: 'Нет доступа' };
     if (entity === 'tasks' && before.assigneeId && before.assigneeId !== u.id && before.status !== 'done') {
@@ -337,6 +564,8 @@ class LocalStore {
     const db = this._db();
     const t = db.tasks.find((x) => x.id === taskId);
     if (!t) return { ok: false, error: 'Задача не найдена' };
+    if (!canAccessBusiness(db, u, businessIdOf(t))) return { ok: false, error: 'Нет доступа' };
+    if (u.role !== 'admin' && t.assigneeId !== u.id) return { ok: false, error: 'Нет доступа' };
     t.comments = t.comments || [];
     t.comments.push({ authorId: u.id, text, ts: Date.now() });
     const others = [t.authorId, t.assigneeId].filter((id) => id && id !== u.id);
@@ -348,12 +577,13 @@ class LocalStore {
   async importPlayers(token, rows) {
     const u = this._user(token); if (!u) return { ok: false, error: 'auth' };
     const db = this._db();
+    if (!canAccessBusiness(db, u, 'padel')) return { ok: false, error: 'Нет доступа' };
     let added = 0;
     for (const r of rows) {
       if (!r.name) continue;
       const dup = db.players.find((p) => p.name.toLowerCase() === r.name.toLowerCase() && (p.phone || '') === (r.phone || ''));
       if (dup) continue;
-      db.players.push({ id: uid(), unit: 'padel', name: r.name, phone: r.phone || '', level: r.level || '', city: r.city || '', notes: r.notes || '', created: Date.now() });
+      db.players.push({ id: uid(), businessId: 'padel', unit: 'padel', name: r.name, phone: r.phone || '', level: r.level || '', city: r.city || '', notes: r.notes || '', created: Date.now() });
       added++;
     }
     this._save(db);
@@ -370,7 +600,7 @@ class LocalStore {
     const db = this._db();
     if (db.employees.length && (!u || u.role !== 'admin')) return { ok: false, error: 'Только для админа' };
     let imported = 0;
-    ['employees', 'clients', 'venues', 'players', 'tasks', 'finance', 'staffExpenses', 'cash', 'files', 'notifications'].forEach((entity) => {
+    LOCAL_ENTITIES.forEach((entity) => {
       (data?.[entity] || []).forEach((item) => {
         if (!item?.id) return;
         db[entity] = db[entity] || [];
@@ -379,6 +609,7 @@ class LocalStore {
         imported++;
       });
     });
+    ensureCoreData(db);
     this._save(db);
     return { ok: true, imported };
   }
@@ -388,6 +619,7 @@ class LocalStore {
     const db = this._db();
     const ex = db.staffExpenses.find((x) => x.id === id);
     if (!ex) return { ok: false, error: 'Не найдено' };
+    if (!canAccessBusiness(db, u, businessIdOf(ex))) return { ok: false, error: 'Нет доступа' };
     if (ex.status !== 'pending') return { ok: false, error: 'Уже возвращено' };
     const emp = db.employees.find((e) => e.id === ex.employeeId);
     const cashOwner = String(how).startsWith('cash:') ? String(how).slice(5) : null;
@@ -405,7 +637,7 @@ class LocalStore {
   async markRead(token, ids) {
     const u = this._user(token); if (!u) return { ok: false, error: 'auth' };
     const db = this._db();
-    db.notifications.forEach((n) => { if (ids.includes(n.id)) n.read = true; });
+    db.notifications.forEach((n) => { if (ids.includes(n.id) && n.toId === u.id) n.read = true; });
     this._save(db);
     return { ok: true };
   }

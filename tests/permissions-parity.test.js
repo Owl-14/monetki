@@ -1,9 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 
-import { makeStore } from "../js/store.js";
+import { DEFAULT_BUSINESSES, DEFAULT_BUSINESS_OWNERS, makeStore } from "../js/store.js";
 import {
+  accessSet,
+  businessIdOf,
+  bootstrapBusinessIds,
   checkWriteAccess,
+  scopeWriteError,
+  validateCoreEntity,
   visibleBootstrapData,
 } from "../supabase/functions/api/rules.js";
 
@@ -22,6 +28,7 @@ globalThis.localStorage = new MemoryStorage();
 const DB_KEY = "monetki_demo_db";
 const users = {
   admin: { id: "admin", name: "Админ", code: "111111", role: "admin", unit: "all", phone: "1", tg: "@admin", active: true },
+  adminOther: { id: "admin-other", name: "Второй админ", code: "111112", role: "admin", unit: "all", phone: "5", tg: "@admin-other", active: true },
   padel: { id: "padel-a", name: "Падел А", code: "222222", role: "staff", unit: "padel", phone: "2", tg: "@padel", active: true },
   padelOther: { id: "padel-b", name: "Падел Б", code: "222223", role: "staff", unit: "padel", phone: "3", tg: "@padel-b", active: true },
   dev: { id: "dev-a", name: "Dev А", code: "333333", role: "staff", unit: "dev", phone: "4", tg: "@dev", active: true },
@@ -29,26 +36,37 @@ const users = {
 
 function fixture() {
   return {
+    businesses: DEFAULT_BUSINESSES.map((business) => ({ ...business, modules: [...business.modules] })),
+    memberships: [
+      { id: "m-admin-padel", employeeId: "admin", businessId: "padel", unit: "padel", role: "owner", active: true },
+      { id: "m-admin-dev", employeeId: "admin", businessId: "dev", unit: "dev", role: "owner", active: true },
+      { id: "m-admin-other-padel", employeeId: "admin-other", businessId: "padel", unit: "padel", role: "owner", active: true },
+      { id: "m-admin-other-dev", employeeId: "admin-other", businessId: "dev", unit: "dev", role: "owner", active: true },
+      { id: "m-padel-a", employeeId: "padel-a", businessId: "padel", unit: "padel", role: "staff", active: true },
+      { id: "m-padel-b", employeeId: "padel-b", businessId: "padel", unit: "padel", role: "staff", active: true },
+      { id: "m-dev-a", employeeId: "dev-a", businessId: "dev", unit: "dev", role: "staff", active: true },
+    ],
+    businessOwners: DEFAULT_BUSINESS_OWNERS.map((owner) => ({ ...owner })),
     employees: Object.values(users),
     clients: [
-      { id: "client-padel", unit: "padel" },
-      { id: "client-dev", unit: "dev" },
+      { id: "client-padel", businessId: "padel", unit: "padel" },
+      { id: "client-dev", businessId: "dev", unit: "dev" },
     ],
-    venues: [{ id: "venue-padel", unit: "padel" }],
-    players: [{ id: "player-padel", unit: "padel" }],
+    venues: [{ id: "venue-padel", businessId: "padel", unit: "padel" }],
+    players: [{ id: "player-padel", businessId: "padel", unit: "padel" }],
     tasks: [
-      { id: "task-padel-a", unit: "padel", assigneeId: "padel-a", authorId: "admin", title: "От админа", status: "new" },
-      { id: "task-padel-b", unit: "padel", assigneeId: "padel-b", authorId: "padel-b", title: "Чужая", status: "new" },
-      { id: "task-dev-a", unit: "dev", assigneeId: "dev-a", authorId: "dev-a", title: "Dev", status: "new" },
+      { id: "task-padel-a", businessId: "padel", unit: "padel", assigneeId: "padel-a", authorId: "admin", title: "От админа", status: "new" },
+      { id: "task-padel-b", businessId: "padel", unit: "padel", assigneeId: "padel-b", authorId: "padel-b", title: "Чужая", status: "new" },
+      { id: "task-dev-a", businessId: "dev", unit: "dev", assigneeId: "dev-a", authorId: "dev-a", title: "Dev", status: "new" },
     ],
     finance: [
-      { id: "finance-padel-a", unit: "padel", employeeId: "padel-a" },
-      { id: "finance-dev-a", unit: "dev", employeeId: "dev-a" },
-      { id: "finance-general", unit: "padel" },
+      { id: "finance-padel-a", businessId: "padel", unit: "padel", employeeId: "padel-a" },
+      { id: "finance-dev-a", businessId: "dev", unit: "dev", employeeId: "dev-a" },
+      { id: "finance-general", businessId: "padel", unit: "padel" },
     ],
     staffExpenses: [
-      { id: "expense-padel-a", unit: "padel", employeeId: "padel-a", status: "pending" },
-      { id: "expense-dev-a", unit: "dev", employeeId: "dev-a", status: "pending" },
+      { id: "expense-padel-a", businessId: "padel", unit: "padel", employeeId: "padel-a", status: "pending" },
+      { id: "expense-dev-a", businessId: "dev", unit: "dev", employeeId: "dev-a", status: "pending" },
     ],
     cash: [
       { id: "cash-padel-a", employeeId: "padel-a" },
@@ -67,6 +85,22 @@ function localStoreWith(data) {
   localStorage.setItem(DB_KEY, JSON.stringify(data));
   return makeStore();
 }
+
+test("демо-коды 111111, 222222 и 333333 входят с ожидаемой изоляцией", async () => {
+  localStorage.clear();
+  const store = makeStore();
+  for (const [code, expectedBusinesses, expectedTasks] of [
+    ["111111", ["padel", "dev"], 4],
+    ["222222", ["padel"], 2],
+    ["333333", ["dev"], 1],
+  ]) {
+    const login = await store.login(code);
+    assert.equal(login.ok, true);
+    const bootstrap = await store.bootstrap(login.token);
+    assert.deepEqual(bootstrap.data.businesses.map((business) => business.id), expectedBusinesses);
+    assert.equal(bootstrap.data.tasks.length, expectedTasks);
+  }
+});
 
 for (const user of [users.admin, users.padel, users.dev]) {
   test(`bootstrap LocalStore и API совпадает для ${user.role}/${user.unit}`, async () => {
@@ -108,8 +142,126 @@ test("запись финансов закрыта сотруднику и на 
 
   assert.equal(local.ok, false);
   assert.equal(checkWriteAccess(users.padel, "finance", { unit: "padel" }), "Только для админа");
-  assert.equal(checkWriteAccess(users.padel, "tasks", { unit: "dev" }), "Нет доступа к этому направлению");
+  assert.equal(checkWriteAccess(users.padel, "tasks", { unit: "dev" }), "Нет доступа к этому бизнесу");
   assert.equal(checkWriteAccess(users.admin, "finance", { unit: "dev" }), null);
+});
+
+test("трата сотрудника использует активный membership, а не legacy unit", async () => {
+  const data = fixture();
+  data.memberships.push({
+    id: "m-dev-a-padel", employeeId: "dev-a", businessId: "padel", unit: "padel", role: "staff", active: true,
+  });
+  const item = { businessId: "padel", amount: 100, title: "Падел-трата", receiptId: "receipt-dev-padel" };
+
+  assert.equal(checkWriteAccess(users.dev, "staffExpenses", item, data.memberships), null);
+  const local = await localStoreWith(data).create("demo:dev-a", "staffExpenses", item);
+
+  assert.equal(local.ok, true);
+  assert.equal(local.item.businessId, "padel");
+  assert.equal(local.item.unit, "padel");
+  assert.equal(local.item.employeeId, "dev-a");
+});
+
+test("businessId имеет приоритет чтения, но несовпадающая пара отклоняется", () => {
+  assert.equal(businessIdOf({ businessId: "dev", unit: "padel" }), "dev");
+  const access = accessSet(fixture().memberships, users.admin.id);
+  assert.equal(scopeWriteError(access, { businessId: "dev", unit: "padel" }), "businessId и unit должны совпадать");
+});
+
+test("update проверяет исходный и целевой бизнес до изменения задачи", async () => {
+  const store = localStoreWith(fixture());
+  const moved = await store.update("demo:padel-a", "tasks", {
+    id: "task-padel-a", businessId: "dev", unit: "dev", status: "done",
+  });
+  assert.equal(moved.ok, false);
+  assert.equal(moved.error, "Нет доступа к этому бизнесу");
+
+  const unchanged = await store.bootstrap("demo:padel-a");
+  assert.equal(unchanged.data.tasks[0].status, "new");
+  assert.equal(unchanged.data.tasks[0].businessId, "padel");
+});
+
+test("отключённый membership закрывает bootstrap и новые записи бизнеса", async () => {
+  const store = localStoreWith(fixture());
+  const disabled = await store.update("demo:admin", "memberships", {
+    ...fixture().memberships.find((membership) => membership.id === "m-padel-a"),
+    active: false,
+  });
+  assert.equal(disabled.ok, true);
+
+  const bootstrap = await store.bootstrap("demo:padel-a");
+  assert.deepEqual(bootstrap.data.businesses, []);
+  assert.deepEqual(bootstrap.data.tasks, []);
+
+  const created = await store.create("demo:padel-a", "tasks", { businessId: "padel", unit: "padel", title: "Нет доступа" });
+  assert.equal(created.ok, false);
+  assert.equal(created.error, "Нет доступа к этому бизнесу");
+});
+
+test("новый активный бизнес автоматически доступен всем активным админам как owner", async () => {
+  assert.deepEqual(
+    bootstrapBusinessIds(users.adminOther, [...fixture().businesses, { id: "events", active: true }]),
+    ["padel", "dev", "events"],
+  );
+  const store = localStoreWith(fixture());
+  const created = await store.create("demo:admin", "businesses", {
+    id: "events", name: "События", emoji: "📅", modules: ["dashboard"], active: true,
+  });
+  assert.equal(created.ok, true);
+
+  const secondAdmin = await store.bootstrap("demo:admin-other");
+  assert.equal(secondAdmin.data.businesses.some((business) => business.id === "events"), true);
+  const membership = secondAdmin.data.memberships.find((item) => item.employeeId === "admin-other" && businessIdOf(item) === "events");
+  assert.equal(membership.role, "owner");
+  assert.equal(membership.active, true);
+});
+
+test("валидация CORE симметрично отклоняет небезопасные и ссылочно неверные записи", async () => {
+  const cases = [
+    ["businesses", { id: "all", name: "Нельзя" }, "ID бизнеса должен быть безопасным slug"],
+    ["businesses", { id: "personal", name: "Нельзя" }, "ID бизнеса должен быть безопасным slug"],
+    ["businesses", { id: "total", name: "Нельзя" }, "ID бизнеса должен быть безопасным slug"],
+    ["businesses", { id: "dev", name: "Дубль" }, "Бизнес с таким ID уже существует"],
+    ["memberships", { businessId: "missing", unit: "missing", employeeId: "padel-a", role: "staff" }, "Бизнес не найден"],
+    ["memberships", { businessId: "dev", unit: "dev", employeeId: "missing", role: "staff" }, "Сотрудник не найден"],
+    ["memberships", { businessId: "dev", unit: "dev", employeeId: "padel-a", role: "admin" }, "Неизвестная роль доступа"],
+    ["memberships", { businessId: "padel", unit: "padel", employeeId: "padel-a", role: "staff" }, "Доступ сотрудника к этому бизнесу уже существует"],
+    ["businessOwners", { businessId: "dev", unit: "dev", ownerId: "new-owner", share: 2 }, "Доля должна быть числом от 0 до 1"],
+  ];
+
+  for (const [entity, item, expected] of cases) {
+    const data = fixture();
+    assert.equal(validateCoreEntity(entity, item, data), expected);
+    const store = localStoreWith(data);
+    const local = await store.create("demo:admin", entity, item);
+    assert.equal(local.error, expected);
+  }
+
+  const validStore = localStoreWith(fixture());
+  const manager = await validStore.create("demo:admin", "memberships", {
+    businessId: "dev", unit: "dev", employeeId: "padel-a", role: "manager", active: true,
+  });
+  assert.equal(manager.ok, true);
+});
+
+test("админская форма сохраняет роль manager отдельным вариантом", async () => {
+  const appSource = await readFile(new URL("../js/app.js", import.meta.url), "utf8");
+  assert.match(appSource, /option value="manager"[^>]*membership\?\.role === 'manager'/);
+  assert.match(appSource, /!\['owner', 'manager'\]\.includes\(membership\?\.role\)/);
+});
+
+test("неверный серверный login отклоняется до CORE bootstrap", async () => {
+  const apiSource = await readFile(new URL("../supabase/functions/api/index.ts", import.meta.url), "utf8");
+  const loginStart = apiSource.indexOf('if (action === "login")');
+  const loginEnd = apiSource.indexOf('if (action === "status")', loginStart);
+  const loginBlock = apiSource.slice(loginStart, loginEnd);
+  const findUserAt = loginBlock.indexOf("findUser(body.code)");
+  const rejectAt = loginBlock.indexOf("if (!u)");
+  const ensureAt = loginBlock.indexOf("await ensureCoreData()");
+
+  assert.ok(loginStart >= 0 && loginEnd > loginStart);
+  assert.ok(findUserAt >= 0 && findUserAt < rejectAt);
+  assert.ok(rejectAt >= 0 && rejectAt < ensureAt);
 });
 
 test("сотрудник создаёт задачу только себе, а в задаче админа меняет только статус", async () => {

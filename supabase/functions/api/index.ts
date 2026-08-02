@@ -4,17 +4,29 @@
 
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import {
+  BUSINESS_SCOPED_ENTITIES,
+  CORE_ENTITIES,
+  DEFAULT_BUSINESSES,
+  DEFAULT_BUSINESS_OWNERS,
   ENTITIES,
   EXPENSE_UNITS,
   acceptBankTransaction,
   bankSyncResult,
   bankTransactionId,
-  canSeeUnit,
-  checkWriteAccess,
+  accessSet,
+  baseWriteError,
+  bootstrapBusinessIds,
+  businessIdOf,
+  canSeeItem,
   classifyMethod,
+  hasBusinessAccess,
   isAdmin,
+  normalizeScope,
   profileOf,
+  scopeMismatch,
+  scopeWriteError,
   sumBankBalances,
+  validateCoreEntity,
   visibleBootstrapData,
 } from "./rules.js";
 
@@ -66,6 +78,52 @@ async function kvSet(key: string, value: unknown) {
 
 // ---------- Доступы ----------
 
+async function ensureCoreData() {
+  const [employees, businesses, memberships, businessOwners] = await Promise.all([
+    readAll("employees"), readAll("businesses"), readAll("memberships"), readAll("businessOwners"),
+  ]);
+  for (const business of DEFAULT_BUSINESSES) {
+    if (!businesses.some((x) => x.id === business.id)) {
+      await writeRow("businesses", { ...business, created: Date.now(), updated: Date.now() });
+    }
+  }
+  for (const owner of DEFAULT_BUSINESS_OWNERS) {
+    if (!businessOwners.some((x) => businessIdOf(x) === owner.businessId && x.ownerId === owner.ownerId)) {
+      await writeRow("businessOwners", { ...owner, created: Date.now(), updated: Date.now() });
+    }
+  }
+  const allBusinesses = [...businesses];
+  for (const fallback of DEFAULT_BUSINESSES) {
+    if (!allBusinesses.some((business) => business.id === fallback.id)) allBusinesses.push(fallback as Rec);
+  }
+  for (const employee of employees) {
+    const globalAdmin = employee.active !== false && employee.role === "admin";
+    const businessIds = bootstrapBusinessIds(employee, allBusinesses);
+    for (const businessId of businessIds) {
+      const existing = memberships.find((membership) => membership.employeeId === employee.id && businessIdOf(membership) === businessId);
+      if (!existing) {
+        await writeRow("memberships", {
+          id: `membership-${businessId}-${employee.id}`, businessId, unit: businessId,
+          employeeId: employee.id, role: globalAdmin ? "owner" : "staff",
+          active: employee.active !== false, created: Date.now(), updated: Date.now(),
+        });
+      } else if (globalAdmin && (existing.active === false || existing.role !== "owner")) {
+        await writeRow("memberships", { ...existing, businessId, unit: businessId, role: "owner", active: true, updated: Date.now() });
+      }
+    }
+  }
+  for (const entity of BUSINESS_SCOPED_ENTITIES) {
+    const records = await readAll(entity);
+    for (const record of records) {
+      const normalized = normalizeScope(record);
+      if ((!record.businessId || !record.unit) && normalized) {
+        normalized.updated = normalized.updated || Date.now();
+        await writeRow(entity, normalized as Rec);
+      }
+    }
+  }
+}
+
 async function findUser(token: unknown): Promise<Rec | null> {
   if (!token) return null;
   const users = await readAll("employees");
@@ -90,19 +148,26 @@ async function notifyAdmins(exceptId: string, text: string, link: string) {
 
 async function bootstrap(u: Rec) {
   const admin = isAdmin(u);
-  const [employees, clients, venues, players, tasks, finance, staffExpenses, cash, notifications] =
+  const [businesses, memberships, businessOwners, employees, clients, venues, players, tasks, finance, staffExpenses, cash, notifications] =
     await Promise.all(ENTITIES.map(readAll));
   return {
     ok: true,
-    profile: profileOf(u),
+    profile: profileOf(u, memberships),
     data: visibleBootstrapData(
       u,
-      { employees, clients, venues, players, tasks, finance, staffExpenses, cash, notifications },
+      { businesses, memberships, businessOwners, employees, clients, venues, players, tasks, finance, staffExpenses, cash, notifications },
       admin ? await kvGet("BANK_BALANCE") : null,
     ),
   };
 }
 
+async function coreValidationError(entity: string, item: Rec, ignoreId = "") {
+  if (!CORE_ENTITIES.includes(entity)) return null;
+  const [businesses, employees, memberships, businessOwners] = await Promise.all([
+    readAll("businesses"), readAll("employees"), readAll("memberships"), readAll("businessOwners"),
+  ]);
+  return validateCoreEntity(entity, item, { businesses, employees, memberships, businessOwners }, ignoreId);
+}
 // Зарплата с зачётом трат сотрудника: уменьшаем сумму, помечаем траты погашенными
 async function applySalaryOffsets(item: Rec): Promise<{ error?: string; sum?: number; titles?: string }> {
   const ids = (item.offsetIds as string[]) || [];
@@ -124,11 +189,26 @@ async function applySalaryOffsets(item: Rec): Promise<{ error?: string; sum?: nu
 }
 
 async function createItem(u: Rec, entity: string, item: Rec) {
-  const deny = checkWriteAccess(u, entity, item);
+  const deny = baseWriteError(u, entity);
   if (deny) return { ok: false, error: deny };
+  item = { ...item };
+  if (entity === "businesses") item.id = String(item.id || "").trim();
+  if (entity === "businessOwners") item.ownerId = String(item.ownerId || "").trim();
+  const coreDeny = await coreValidationError(entity, item);
+  if (coreDeny) return { ok: false, error: coreDeny };
+  const memberships = await readAll("memberships");
+  const access = accessSet(memberships, u.id);
+  if (entity === "staffExpenses" && !isAdmin(u) && !businessIdOf(item)) {
+    item = normalizeScope(item, String(u.unit || "")) as Rec;
+  }
+  if (BUSINESS_SCOPED_ENTITIES.includes(entity) || entity === "memberships" || entity === "businessOwners") {
+    const scopeDeny = scopeWriteError(access, item);
+    if (scopeDeny) return { ok: false, error: scopeDeny };
+    item = normalizeScope(item) as Rec;
+  }
   // id всегда генерируем на сервере: иначе, прислав чужой id, можно было бы
   // перезаписать (upsert) существующую запись в своём направлении.
-  item.id = newId();
+  item.id = entity === "businesses" && item.id ? item.id : newId();
   item.created = Date.now();
   item.updated = Date.now();
   if (entity === "employees" && !item.code) {
@@ -143,14 +223,14 @@ async function createItem(u: Rec, entity: string, item: Rec) {
     }
   }
   if (entity === "staffExpenses") {
-    const exUnit = isAdmin(u) ? (item.unit || "padel") : u.unit;
+    const exUnit = businessIdOf(item) || (isAdmin(u) ? "padel" : String(u.unit || ""));
     if (!EXPENSE_UNITS.includes(String(exUnit)) && exUnit !== "all") {
       return { ok: false, error: "Траты для этого направления отключены" };
     }
     if (!item.receiptId) return { ok: false, error: "Прикрепите фото чека" };
     if (!isAdmin(u)) {
       item.employeeId = u.id;
-      item.unit = u.unit === "all" ? (item.unit || "padel") : u.unit;
+      item = normalizeScope(item, String(u.unit === "all" ? (item.businessId || item.unit || "padel") : u.unit)) as Rec;
     }
     item.status = item.status || "pending";
     await notifyAdmins(u.id as string, `${u.name}: трата ${item.amount} ₽ — ${item.title}`, "#/finance");
@@ -161,9 +241,16 @@ async function createItem(u: Rec, entity: string, item: Rec) {
     if (offsets.error) return { ok: false, error: offsets.error };
   }
   await writeRow(entity, item);
+  if (entity === "businesses") {
+    await writeRow("memberships", {
+      id: `membership-${item.id}-${u.id}`, businessId: item.id, unit: item.id,
+      employeeId: u.id, role: "owner", active: true, created: Date.now(), updated: Date.now(),
+    });
+  }
+  if (entity === "employees" || entity === "businesses") await ensureCoreData();
   if (offsets.sum) {
     await writeRow(entity, {
-      id: newId(), unit: item.unit, owner: item.owner, date: item.date,
+      id: newId(), businessId: item.businessId, unit: item.unit, owner: item.owner, date: item.date,
       type: "expense", amount: offsets.sum, method: item.method || "cash", source: "manual",
       category: "Компенсация сотруднику", counterparty: "", comment: `Зачтено в зарплате: ${offsets.titles}`,
       employeeId: item.employeeId, created: Date.now(), updated: Date.now(),
@@ -180,11 +267,24 @@ async function createItem(u: Rec, entity: string, item: Rec) {
 }
 
 async function updateItem(u: Rec, entity: string, item: Rec) {
-  const deny = checkWriteAccess(u, entity, item);
+  const deny = baseWriteError(u, entity);
   if (deny) return { ok: false, error: deny };
   const before = (await readAll(entity)).find((x) => x.id === item.id);
   if (!before) return { ok: false, error: "Не найдено" };
-  if (!canSeeUnit(u, before.unit ?? item.unit)) return { ok: false, error: "Нет доступа" };
+  const memberships = await readAll("memberships");
+  const access = accessSet(memberships, u.id);
+  if (BUSINESS_SCOPED_ENTITIES.includes(entity) || entity === "memberships" || entity === "businessOwners") {
+    const sourceDeny = scopeWriteError(access, before);
+    if (sourceDeny) return { ok: false, error: sourceDeny };
+    if (scopeMismatch(item)) return { ok: false, error: "businessId и unit должны совпадать" };
+    const targetBusinessId = String(item.businessId || item.unit || businessIdOf(before));
+    const targetDeny = scopeWriteError(access, { id: "target", businessId: targetBusinessId, unit: targetBusinessId });
+    if (targetDeny) return { ok: false, error: targetDeny };
+    item = { ...item, businessId: targetBusinessId, unit: targetBusinessId };
+  }
+  if (entity === "businesses" && !hasBusinessAccess(access, before.id)) return { ok: false, error: "Нет доступа к этому бизнесу" };
+  const coreDeny = await coreValidationError(entity, { ...before, ...item } as Rec, before.id);
+  if (coreDeny) return { ok: false, error: coreDeny };
   if (entity === "staffExpenses" && !isAdmin(u)) {
     if (before.employeeId !== u.id) return { ok: false, error: "Нет доступа" };
     if (before.status !== "pending") return { ok: false, error: "Эта трата уже возвращена" };
@@ -211,10 +311,17 @@ async function updateItem(u: Rec, entity: string, item: Rec) {
 }
 
 async function deleteItem(u: Rec, entity: string, id: string) {
+  const baseDeny = baseWriteError(u, entity);
+  if (baseDeny) return { ok: false, error: baseDeny };
   const before = (await readAll(entity)).find((x) => x.id === id);
   if (!before) return { ok: false, error: "Не найдено" };
-  const deny = checkWriteAccess(u, entity, before);
-  if (deny) return { ok: false, error: deny };
+  const memberships = await readAll("memberships");
+  const access = accessSet(memberships, u.id);
+  if (BUSINESS_SCOPED_ENTITIES.includes(entity) || entity === "memberships" || entity === "businessOwners") {
+    const sourceDeny = scopeWriteError(access, before);
+    if (sourceDeny) return { ok: false, error: sourceDeny };
+  }
+  if (entity === "businesses" && !hasBusinessAccess(access, before.id)) return { ok: false, error: "Нет доступа к этому бизнесу" };
   if (entity === "staffExpenses" && !isAdmin(u) && (before.employeeId !== u.id || before.status !== "pending")) {
     return { ok: false, error: "Нет доступа" };
   }
@@ -254,7 +361,8 @@ async function remindDeadlines() {
 async function addComment(u: Rec, taskId: string, text: string) {
   const task = (await readAll("tasks")).find((t) => t.id === taskId);
   if (!task) return { ok: false, error: "Задача не найдена" };
-  if (!canSeeUnit(u, task.unit)) return { ok: false, error: "Нет доступа" };
+  const access = accessSet(await readAll("memberships"), u.id);
+  if (!canSeeItem(access, task) || (!isAdmin(u) && task.assigneeId !== u.id)) return { ok: false, error: "Нет доступа" };
   const comments = (task.comments as Rec[]) || [];
   comments.push({ authorId: u.id, text: String(text).slice(0, 2000), ts: Date.now() } as Rec);
   task.comments = comments;
@@ -267,7 +375,8 @@ async function addComment(u: Rec, taskId: string, text: string) {
 }
 
 async function importPlayers(u: Rec, rows: Rec[]) {
-  if (!canSeeUnit(u, "padel")) return { ok: false, error: "Нет доступа" };
+  const access = accessSet(await readAll("memberships"), u.id);
+  if (!hasBusinessAccess(access, "padel")) return { ok: false, error: "Нет доступа" };
   const existing = await readAll("players");
   let added = 0;
   for (const r of rows || []) {
@@ -278,7 +387,7 @@ async function importPlayers(u: Rec, rows: Rec[]) {
     );
     if (dup) continue;
     await writeRow("players", {
-      id: newId(), unit: "padel", name: r.name, phone: r.phone || "",
+      id: newId(), businessId: "padel", unit: "padel", name: r.name, phone: r.phone || "",
       level: r.level || "", city: r.city || "", notes: r.notes || "",
       created: Date.now(), updated: Date.now(),
     });
@@ -302,6 +411,9 @@ async function resolveExpense(u: Rec, id: string, how: string) {
   if (!isAdmin(u)) return { ok: false, error: "Только для админа" };
   const ex = (await readAll("staffExpenses")).find((x) => x.id === id);
   if (!ex) return { ok: false, error: "Не найдено" };
+  const access = accessSet(await readAll("memberships"), u.id);
+  const scopeDeny = scopeWriteError(access, ex);
+  if (scopeDeny) return { ok: false, error: scopeDeny };
   if (ex.status !== "pending") return { ok: false, error: "Уже возвращено" };
   const cashOwner = String(how).startsWith("cash:") ? String(how).slice(5) : null;
   ex.status = cashOwner ? "returned_cash" : "returned_bank";
@@ -497,7 +609,7 @@ async function tochkaSync(days = 30) {
         ? ((t.DebtorParty as Rec)?.name || "")
         : ((t.CreditorParty as Rec)?.name || "");
       await writeRow("finance", {
-        id: newId(), unit,
+        id: newId(), businessId: unit, unit,
         date: String(t.documentProcessDate || fmt(new Date())).slice(0, 10),
         type: isIncome ? "income" : "expense",
         amount,
@@ -562,7 +674,9 @@ Deno.serve(async (req) => {
     if (action === "login") {
       const u = await findUser(body.code);
       if (!u) return json({ ok: false, error: "Неверный код доступа" });
-      return json({ ok: true, token: u.code, profile: profileOf(u) });
+      await ensureCoreData();
+      const memberships = await readAll("memberships");
+      return json({ ok: true, token: u.code, profile: profileOf(u, memberships) });
     }
     if (action === "status") return json(await statusInfo(await findUser(body.token)));
     if (action === "tochka_sync") {
@@ -576,7 +690,9 @@ Deno.serve(async (req) => {
     if (!user) return json({ ok: false, error: "auth" });
 
     switch (action) {
-      case "bootstrap": return json(await bootstrap(user));
+      case "bootstrap":
+        await ensureCoreData();
+        return json(await bootstrap(user));
       case "create": return json(await createItem(user, body.entity, body.item));
       case "update": return json(await updateItem(user, body.entity, body.item));
       case "delete": return json(await deleteItem(user, body.entity, body.id));
