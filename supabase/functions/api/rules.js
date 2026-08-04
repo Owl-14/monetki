@@ -141,6 +141,7 @@ export function baseWriteError(user, entity) {
   return null;
 }
 
+/** @param {Array<{ id?: unknown, active?: unknown }> | null} businesses */
 export function scopeWriteError(access, item, businesses = null) {
   if (scopeMismatch(item)) return "businessId и unit должны совпадать";
   const businessId = businessIdOf(item);
@@ -152,6 +153,7 @@ export function scopeWriteError(access, item, businesses = null) {
   return null;
 }
 
+/** @param {Array<{ id?: unknown, active?: unknown }> | null} businesses */
 export function checkWriteAccess(user, entity, item, memberships = [], businesses = null) {
   const baseError = baseWriteError(user, entity);
   if (baseError) return baseError;

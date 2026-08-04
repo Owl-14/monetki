@@ -273,7 +273,7 @@ test("специальные действия не записывают данн
     "Бизнес в архиве",
   );
 
-  const apiSource = await readFile(new URL("../supabase/functions/api/index.ts", import.meta.url), "utf8");
+  const apiSource = await readFile(new URL("../supabase/functions/api/actions.ts", import.meta.url), "utf8");
   const commentBlock = apiSource.slice(apiSource.indexOf("async function addComment"), apiSource.indexOf("async function importPlayers"));
   const importBlock = apiSource.slice(apiSource.indexOf("async function importPlayers"), apiSource.indexOf("async function markRead"));
   assert.match(commentBlock, /scopeWriteError\(access, task, businesses\)/);
@@ -350,7 +350,7 @@ test("админская форма сохраняет роль manager отде
 });
 
 test("неверный серверный login отклоняется до CORE bootstrap", async () => {
-  const apiSource = await readFile(new URL("../supabase/functions/api/index.ts", import.meta.url), "utf8");
+  const apiSource = await readFile(new URL("../supabase/functions/api/http.ts", import.meta.url), "utf8");
   const loginStart = apiSource.indexOf('if (action === "login")');
   const loginEnd = apiSource.indexOf('if (action === "status")', loginStart);
   const loginBlock = apiSource.slice(loginStart, loginEnd);

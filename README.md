@@ -65,7 +65,12 @@ css/style.css         — стили и темы
 js/app.js             — интерфейс (роутер, разделы, формы)
 js/store.js           — слой данных (демо/сервер), справочники, расчёт счетов
 sw.js                 — service worker (кэш, офлайн, уведомления)
-supabase/functions/api/index.ts — серверная логика (права, банк, файлы)
+supabase/functions/api/index.ts — точка запуска серверной функции
+supabase/functions/api/http.ts — HTTP-протокол и маршрутизация действий
+supabase/functions/api/actions.ts — серверные действия, файлы и уведомления
+supabase/functions/api/auth/access.ts — вход и подготовка доступов
+supabase/functions/api/db/repositories.ts — работа с Supabase
+supabase/functions/api/bank.ts — синхронизация с Точка Банком
 supabase/migrations/  — SQL схемы базы
 .github/workflows/    — автодеплой бэкенда
 google-apps-script/   — архив старого бэкенда
