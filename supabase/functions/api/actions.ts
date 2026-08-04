@@ -1,19 +1,23 @@
 import {
   BUSINESS_SCOPED_ENTITIES,
   CORE_ENTITIES,
+  CRM_ENTITIES,
   ENTITIES,
   EXPENSE_UNITS,
   accessSet,
   baseWriteError,
   businessIdOf,
   canSeeItem,
+  crmDeleteError,
   hasBusinessAccess,
   isAdmin,
+  normalizeCrmRecord,
   normalizeScope,
   profileOf,
   scopeMismatch,
   scopeWriteError,
   validateCoreEntity,
+  validateCrmEntity,
   visibleBootstrapData,
 } from "./rules.js";
 import { ensureCoreData } from "./auth/access.ts";
@@ -39,14 +43,17 @@ async function notifyAdmins(exceptId: string, text: string, link: string) {
 
 export async function bootstrap(u: Rec) {
   const admin = isAdmin(u);
-  const [businesses, memberships, businessOwners, employees, clients, venues, players, tasks, finance, staffExpenses, cash, notifications] =
+  const [businesses, memberships, businessOwners, employees, clients, companies, contacts, leads, deals, pipelines, stages, dealItems, venues, players, tasks, finance, staffExpenses, cash, notifications] =
     await Promise.all(ENTITIES.map(readAll));
   return {
     ok: true,
     profile: profileOf(u, memberships),
     data: visibleBootstrapData(
       u,
-      { businesses, memberships, businessOwners, employees, clients, venues, players, tasks, finance, staffExpenses, cash, notifications },
+      {
+        businesses, memberships, businessOwners, employees, clients, companies, contacts, leads,
+        deals, pipelines, stages, dealItems, venues, players, tasks, finance, staffExpenses, cash, notifications,
+      },
       admin ? await kvGet("BANK_BALANCE") : null,
     ),
   };
@@ -58,6 +65,35 @@ async function coreValidationError(entity: string, item: Rec, ignoreId = "") {
     readAll("businesses"), readAll("employees"), readAll("memberships"), readAll("businessOwners"),
   ]);
   return validateCoreEntity(entity, item, { businesses, employees, memberships, businessOwners }, ignoreId);
+}
+
+async function crmValidationError(entity: string, item: Rec) {
+  if (!CRM_ENTITIES.includes(entity)) return null;
+  const entities = ["employees", "memberships", "clients", ...CRM_ENTITIES];
+  const records = await Promise.all(entities.map(readAll));
+  const data = Object.fromEntries(entities.map((name, index) => [name, records[index]]));
+  return validateCrmEntity(entity, item, data);
+}
+
+async function crmDeleteValidationError(entity: string, item: Rec) {
+  if (!CRM_ENTITIES.includes(entity)) return null;
+  const records = await Promise.all(CRM_ENTITIES.map(readAll));
+  const data = Object.fromEntries(CRM_ENTITIES.map((name, index) => [name, records[index]]));
+  return crmDeleteError(entity, item, data);
+}
+
+async function crmUpdateValidationError(entity: string, before: Rec, after: Rec) {
+  if (!CRM_ENTITIES.includes(entity)) return null;
+  if (businessIdOf(before) !== businessIdOf(after)) return "Нельзя переносить CRM-запись в другой бизнес";
+  if (entity !== "contacts" && entity !== "stages") return null;
+  const deals = await readAll("deals");
+  if (entity === "contacts" && before.companyId !== after.companyId && deals.some((deal) => deal.contactId === before.id)) {
+    return "Контакт используется в сделках";
+  }
+  if (entity === "stages" && before.pipelineId !== after.pipelineId && deals.some((deal) => deal.stageId === before.id)) {
+    return "Стадия используется в сделках";
+  }
+  return null;
 }
 // Зарплата с зачётом трат сотрудника: уменьшаем сумму, помечаем траты погашенными
 async function applySalaryOffsets(item: Rec): Promise<{ error?: string; sum?: number; titles?: string }> {
@@ -97,6 +133,9 @@ export async function createItem(u: Rec, entity: string, item: Rec) {
     if (scopeDeny) return { ok: false, error: scopeDeny };
     item = normalizeScope(item) as Rec;
   }
+  if (CRM_ENTITIES.includes(entity)) item = normalizeCrmRecord(entity, item) as Rec;
+  const crmDeny = await crmValidationError(entity, item);
+  if (crmDeny) return { ok: false, error: crmDeny };
   // id всегда генерируем на сервере: иначе, прислав чужой id, можно было бы
   // перезаписать (upsert) существующую запись в своём направлении.
   item.id = entity === "businesses" && item.id ? item.id : newId();
@@ -167,6 +206,9 @@ export async function createItem(u: Rec, entity: string, item: Rec) {
 export async function updateItem(u: Rec, entity: string, item: Rec) {
   const deny = baseWriteError(u, entity);
   if (deny) return { ok: false, error: deny };
+  if (entity === "companies" && String(item?.id || "").startsWith("legacy-client:")) {
+    return { ok: false, error: "Переходная запись клиента доступна только для чтения" };
+  }
   const before = (await readAll(entity)).find((x) => x.id === item.id);
   if (!before) return { ok: false, error: "Не найдено" };
   const [memberships, businesses] = await Promise.all([readAll("memberships"), readAll("businesses")]);
@@ -194,7 +236,11 @@ export async function updateItem(u: Rec, entity: string, item: Rec) {
     if (before.assigneeId !== u.id) return { ok: false, error: "Нет доступа" };
     item = { id: before.id, status: item.status } as Rec;
   }
-  const merged = { ...before, ...item, updated: Date.now() } as Rec;
+  const merged = normalizeCrmRecord(entity, { ...before, ...item, updated: Date.now() }) as Rec;
+  const crmUpdateDeny = await crmUpdateValidationError(entity, before, merged);
+  if (crmUpdateDeny) return { ok: false, error: crmUpdateDeny };
+  const crmDeny = await crmValidationError(entity, merged);
+  if (crmDeny) return { ok: false, error: crmDeny };
   if (entity === "tasks") {
     if (before.status !== merged.status && merged.authorId && merged.authorId !== u.id) {
       const names: Record<string, string> = { new: "Не видел", progress: "В работе", question: "Есть вопросы", done: "Выполнена" };
@@ -211,6 +257,9 @@ export async function updateItem(u: Rec, entity: string, item: Rec) {
 export async function deleteItem(u: Rec, entity: string, id: string) {
   const baseDeny = baseWriteError(u, entity);
   if (baseDeny) return { ok: false, error: baseDeny };
+  if (entity === "companies" && String(id || "").startsWith("legacy-client:")) {
+    return { ok: false, error: "Переходная запись клиента доступна только для чтения" };
+  }
   const before = (await readAll(entity)).find((x) => x.id === id);
   if (!before) return { ok: false, error: "Не найдено" };
   const [memberships, businesses] = await Promise.all([readAll("memberships"), readAll("businesses")]);
@@ -226,6 +275,8 @@ export async function deleteItem(u: Rec, entity: string, id: string) {
   if (entity === "tasks" && !isAdmin(u) && before.authorId !== u.id) {
     return { ok: false, error: "Удалять можно только свои задачи" };
   }
+  const crmDeny = await crmDeleteValidationError(entity, before);
+  if (crmDeny) return { ok: false, error: crmDeny };
   if (entity === "tasks" && before.assigneeId && before.assigneeId !== u.id && before.status !== "done") {
     await notify(before.assigneeId, `Задача удалена: ${before.title}`);
   }

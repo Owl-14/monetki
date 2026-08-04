@@ -4,14 +4,16 @@ import {
   DEFAULT_BUSINESS_OWNERS,
   bootstrapBusinessIds,
   businessIdOf,
+  missingCrmDefaults,
   normalizeScope,
 } from "../rules.js";
 import { readAll, writeRow } from "../db/repositories.ts";
 import type { Rec } from "../types.ts";
 
 export async function ensureCoreData() {
-  const [employees, businesses, memberships, businessOwners] = await Promise.all([
+  const [employees, businesses, memberships, businessOwners, pipelines, stages] = await Promise.all([
     readAll("employees"), readAll("businesses"), readAll("memberships"), readAll("businessOwners"),
+    readAll("pipelines"), readAll("stages"),
   ]);
   for (const business of DEFAULT_BUSINESSES) {
     if (!businesses.some((x) => x.id === business.id)) {
@@ -26,6 +28,13 @@ export async function ensureCoreData() {
   const allBusinesses = [...businesses];
   for (const fallback of DEFAULT_BUSINESSES) {
     if (!allBusinesses.some((business) => business.id === fallback.id)) allBusinesses.push(fallback as Rec);
+  }
+  const crmDefaults = missingCrmDefaults(allBusinesses, pipelines, stages);
+  for (const pipeline of crmDefaults.pipelines) {
+    await writeRow("pipelines", { ...pipeline, created: Date.now(), updated: Date.now() });
+  }
+  for (const stage of crmDefaults.stages) {
+    await writeRow("stages", { ...stage, created: Date.now(), updated: Date.now() });
   }
   for (const employee of employees) {
     const globalAdmin = employee.active !== false && employee.role === "admin";

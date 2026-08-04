@@ -239,7 +239,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   .finance-context .btn { width: 100%; justify-content: center; }
 }
 
-input[type="text"], input[type="search"], input[type="number"], input[type="date"], input[type="password"], input[type="tel"], input[type="url"], select, textarea {
+input:not([type]), input[type="text"], input[type="search"], input[type="number"], input[type="date"], input[type="password"], input[type="tel"], input[type="email"], input[type="url"], select, textarea {
   width: 100%; min-height: 40px; padding: 9px 12px; border: 1px solid var(--line); border-radius: 10px;
   background: var(--surface); outline: none; transition: border-color .15s, box-shadow .15s;
 }
@@ -347,6 +347,79 @@ tbody tr:last-child td { border-bottom: 0; }
 .chip-row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
 .chip { border: 1px solid var(--line); background: var(--surface); border-radius: 999px; padding: 5px 13px; font-size: 13px; font-weight: 600; color: var(--muted); }
 .chip.active { background: var(--text); color: var(--bg); border-color: var(--text); }
+
+/* CRM продаж */
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+.crm-tabs { display: flex; gap: 5px; margin-bottom: 18px; padding: 5px; overflow-x: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); scrollbar-width: none; }
+.crm-tabs::-webkit-scrollbar { display: none; }
+.crm-tab { flex: 0 0 auto; min-height: 38px; padding: 7px 16px; border: 0; border-radius: 10px; background: transparent; color: var(--muted); font-size: 14px; font-weight: 700; }
+.crm-tab:hover { color: var(--text); background: var(--surface2); }
+.crm-tab.active { color: var(--accent-strong); background: var(--accent-soft); }
+.crm-toolbar { display: flex; align-items: flex-end; gap: 9px; margin-bottom: 16px; flex-wrap: wrap; }
+.crm-toolbar .chip-row { margin: 0; align-self: center; }
+.crm-pipeline-pick { display: flex; flex-direction: column; gap: 4px; min-width: min(280px, 100%); }
+.crm-pipeline-pick > span { color: var(--muted); font-size: 11px; font-weight: 750; letter-spacing: .07em; text-transform: uppercase; }
+.crm-empty { gap: 5px; }
+.crm-empty strong { color: var(--text); font-size: 16px; }
+.crm-empty .btn { margin-top: 12px; }
+.crm-kanban { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(260px, 1fr); gap: 12px; padding-bottom: 12px; overflow-x: auto; overscroll-behavior-inline: contain; scroll-snap-type: x proximity; }
+.crm-column { min-height: 360px; padding: 12px; border: 1px solid var(--line); border-radius: 15px; background: var(--surface2); scroll-snap-align: start; transition: border-color .15s, background .15s; }
+.crm-column.stage-won { background: color-mix(in srgb, var(--green-soft) 55%, var(--surface2)); }
+.crm-column.stage-lost { background: color-mix(in srgb, var(--red-soft) 48%, var(--surface2)); }
+.crm-column.drag-over { border-color: var(--accent); background: var(--accent-soft); }
+.crm-column > header { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 750; }
+.crm-column > header span { flex: 1; }
+.crm-column > header b { display: grid; place-items: center; min-width: 24px; height: 24px; border-radius: 999px; background: var(--surface); color: var(--muted); font-size: 12px; }
+.crm-column-total { margin: 3px 0 11px; color: var(--muted); font-size: 12px; }
+.crm-deal-list { display: flex; flex-direction: column; gap: 8px; }
+.crm-deal-card { display: flex; flex-direction: column; gap: 5px; padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow); cursor: pointer; }
+.crm-deal-card:hover, .crm-deal-card:focus-visible { border-color: var(--accent); outline: none; }
+.crm-deal-card > strong { overflow-wrap: anywhere; }
+.crm-deal-card > span, .crm-deal-card > small { color: var(--muted); font-size: 12px; }
+.crm-deal-card > b { margin: 2px 0; font-size: 15px; }
+.crm-deal-card select { min-height: 34px; padding-block: 5px; font-size: 12px; }
+.crm-column-empty { padding: 24px 8px; border: 1px dashed var(--line); border-radius: 11px; color: var(--muted); text-align: center; font-size: 12px; }
+.crm-legacy { margin-top: 25px; padding-top: 18px; border-top: 1px dashed var(--line); }
+.crm-legacy h3 { margin-bottom: 3px; font-size: 15px; }
+.crm-legacy > p { margin: 0 0 12px; color: var(--muted); font-size: 13px; }
+.legacy-row { border-style: dashed; }
+.crm-fieldset { margin: 0 0 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 11px; }
+.crm-fieldset legend { padding: 0 4px; color: var(--muted); font-size: 13px; font-weight: 600; }
+.crm-details { display: grid; grid-template-columns: minmax(90px, auto) 1fr; gap: 8px 14px; }
+.crm-details dt { color: var(--muted); }
+.crm-details dd { margin: 0; overflow-wrap: anywhere; }
+.crm-modal-heading, .crm-settings-card > header, .crm-items-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.crm-modal-heading { align-items: flex-start; margin-bottom: 14px; }
+.crm-modal-heading h2, .crm-modal-heading p { margin-bottom: 0; }
+.crm-settings-list { display: flex; flex-direction: column; gap: 10px; }
+.crm-settings-card { padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface2); }
+.crm-settings-card > header { margin-bottom: 9px; }
+.crm-settings-card > header .btn { margin-left: auto; }
+.crm-stage-list { display: flex; flex-direction: column; gap: 5px; margin-bottom: 9px; }
+.crm-stage-row { display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); color: var(--text); text-align: left; }
+.crm-stage-row span { flex: 1; }
+.crm-stage-row small { color: var(--muted); }
+.crm-items-heading { margin: 18px 0 8px; }
+#deal-items { display: flex; flex-direction: column; gap: 8px; }
+.crm-deal-item { display: flex; flex-direction: column; gap: 7px; padding: 10px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface2); }
+.crm-deal-item-main { display: grid; grid-template-columns: minmax(0, 1fr) minmax(110px, .4fr) auto; gap: 7px; }
+.crm-item-recurring { display: flex; align-items: center; gap: 10px; }
+.crm-item-recurring .checkline { flex: 1; padding: 0; }
+.crm-item-recurring select { width: auto; min-width: 150px; }
+
+@media (max-width: 620px) {
+  .crm-tabs { margin-inline: -4px; }
+  .crm-tab { padding-inline: 13px; }
+  .crm-toolbar { align-items: stretch; }
+  .crm-toolbar > .btn { flex: 1; justify-content: center; }
+  .crm-pipeline-pick { flex-basis: 100%; }
+  .crm-kanban { grid-auto-columns: minmax(84vw, 310px); margin-inline: -12px; padding-inline: 12px; }
+  .crm-deal-item-main { grid-template-columns: minmax(0, 1fr) 100px auto; }
+  .crm-item-recurring { align-items: stretch; flex-direction: column; }
+  .crm-item-recurring select { width: 100%; }
+  .crm-modal-heading { flex-direction: column; }
+  .crm-modal-heading .btn { width: 100%; justify-content: center; }
+}
 
 /* Календарь кортов */
 .courts-grid { display: grid; grid-template-columns: 46px repeat(5, minmax(52px, 1fr)); gap: 4px; margin: 10px 0; }

@@ -1,11 +1,75 @@
 export const ENTITIES = [
   "businesses", "memberships", "businessOwners",
-  "employees", "clients", "venues", "players",
+  "employees", "clients", "companies", "contacts", "leads", "deals",
+  "pipelines", "stages", "dealItems", "venues", "players",
   "tasks", "finance", "staffExpenses", "cash", "notifications",
 ];
 
 export const CORE_ENTITIES = ["businesses", "memberships", "businessOwners"];
-export const BUSINESS_SCOPED_ENTITIES = ["clients", "venues", "players", "tasks", "finance", "staffExpenses"];
+export const CRM_ENTITIES = ["companies", "contacts", "leads", "deals", "pipelines", "stages", "dealItems"];
+export const BUSINESS_SCOPED_ENTITIES = ["clients", ...CRM_ENTITIES, "venues", "players", "tasks", "finance", "staffExpenses"];
+
+export const DEFAULT_CRM_STAGES = [
+  { suffix: "contact", name: "Первичный контакт", order: 10, type: "open" },
+  { suffix: "talks", name: "Переговоры", order: 20, type: "open" },
+  { suffix: "prepayment", name: "Договор и предоплата", order: 30, type: "open" },
+  { suffix: "work", name: "В работе", order: 40, type: "open" },
+  { suffix: "won", name: "Сдано и оплачено", order: 50, type: "won" },
+  { suffix: "lost", name: "Отказ", order: 60, type: "lost" },
+];
+
+export const defaultCrmPipeline = (businessId) => ({
+  id: `pipeline-${businessId}-default`,
+  businessId,
+  unit: businessId,
+  name: "Новые продажи",
+  isDefault: true,
+  active: true,
+});
+
+export const defaultCrmStages = (businessId) => DEFAULT_CRM_STAGES.map((stage) => ({
+  id: `stage-${businessId}-${stage.suffix}`,
+  businessId,
+  unit: businessId,
+  pipelineId: `pipeline-${businessId}-default`,
+  name: stage.name,
+  order: stage.order,
+  type: stage.type,
+}));
+
+export function missingCrmDefaults(businesses, pipelines, stages) {
+  const missing = { pipelines: [], stages: [] };
+  for (const business of businesses || []) {
+    if (business.active === false || !(business.modules || []).includes("clients")) continue;
+    const pipeline = defaultCrmPipeline(business.id);
+    if (!(pipelines || []).some((record) => record.id === pipeline.id)) missing.pipelines.push(pipeline);
+    for (const stage of defaultCrmStages(business.id)) {
+      if (!(stages || []).some((record) => record.id === stage.id)) missing.stages.push(stage);
+    }
+  }
+  return missing;
+}
+
+export function normalizeCrmRecord(entity, item) {
+  if (!CRM_ENTITIES.includes(entity)) return { ...item };
+  const normalized = { ...item };
+  if (entity === "companies") {
+    if (!Array.isArray(normalized.responsibleIds)) normalized.responsibleIds = [];
+    if (!normalized.status) normalized.status = "lead";
+  }
+  if (entity === "contacts" && typeof normalized.isPrimary !== "boolean") normalized.isPrimary = false;
+  if (entity === "leads" && !normalized.status) normalized.status = "new";
+  if (entity === "pipelines") {
+    if (typeof normalized.isDefault !== "boolean") normalized.isDefault = false;
+    if (typeof normalized.active !== "boolean") normalized.active = true;
+  }
+  if (entity === "deals" && (normalized.amount === "" || normalized.amount == null)) normalized.amount = 0;
+  if (entity === "dealItems") {
+    if (normalized.amount === "" || normalized.amount == null) normalized.amount = 0;
+    if (typeof normalized.recurring !== "boolean") normalized.recurring = false;
+  }
+  return normalized;
+}
 
 export const DEFAULT_BUSINESSES = [
   { id: "padel", name: "Падел", emoji: "🎾", modules: ["dashboard", "tasks", "venues", "players", "finance", "money", "team"], active: true },
@@ -103,6 +167,30 @@ export function visibleBootstrapData(user, data, bankBalance = null) {
     return activeMemberships(memberships, rightId).some((membership) => left.has(businessIdOf(membership)));
   };
 
+  const clients = scopedItems(data.clients);
+  const companies = scopedItems(data.companies);
+  const migratedLegacyIds = new Set(companies.map((company) => company.legacyClientId).filter(Boolean));
+  const legacyCompanies = clients.filter((client) => !migratedLegacyIds.has(client.id)).map((client) => ({
+    id: `legacy-client:${client.id}`,
+    businessId: businessIdOf(client),
+    unit: businessIdOf(client),
+    name: client.name || client.company || "Без названия",
+    legalName: client.company || "",
+    inn: "",
+    address: "",
+    responsibleIds: [],
+    status: client.status || "lead",
+    notes: client.notes || "",
+    legacyPhone: client.phone || "",
+    legacyMessenger: client.tg || "",
+    legacyAmount: Number(client.amount || 0),
+    legacyClientId: client.id,
+    legacy: true,
+    readOnly: true,
+    created: client.created,
+    updated: client.updated,
+  }));
+
   return {
     businesses: (data.businesses || []).filter((business) =>
       access.has(business.id) && (admin || business.active !== false)
@@ -120,7 +208,14 @@ export function visibleBootstrapData(user, data, bankBalance = null) {
           unit: employee.unit,
           active: employee.active,
         })),
-    clients: scopedItems(data.clients),
+    clients,
+    companies: [...companies, ...legacyCompanies],
+    contacts: scopedItems(data.contacts),
+    leads: scopedItems(data.leads),
+    deals: scopedItems(data.deals),
+    pipelines: scopedItems(data.pipelines),
+    stages: scopedItems(data.stages),
+    dealItems: scopedItems(data.dealItems),
     venues: scopedItems(data.venues),
     players: scopedItems(data.players),
     tasks: scopedItems(data.tasks).filter((task) => admin || task.assigneeId === user.id),
@@ -202,6 +297,142 @@ export function validateCoreEntity(entity, item, data, ignoreId = "") {
     )) return "Участник уже добавлен в этот бизнес";
   }
 
+  return null;
+}
+
+function crmRecord(data, entity, id) {
+  const record = (data?.[entity] || []).find((candidate) => candidate.id === id);
+  if (record || entity !== "companies" || !String(id || "").startsWith("legacy-client:")) return record;
+  const legacyId = String(id).slice("legacy-client:".length);
+  const client = (data?.clients || []).find((candidate) => candidate.id === legacyId);
+  return client ? { ...client, id, legacyClientId: legacyId, legacy: true } : undefined;
+}
+
+function crmReferenceError(item, record, label) {
+  if (!record) {
+    const missing = {
+      Компания: "Компания не найдена",
+      Воронка: "Воронка не найдена",
+      Стадия: "Стадия не найдена",
+      Контакт: "Контакт не найден",
+      Сделка: "Сделка не найдена",
+    };
+    return missing[label] || `${label} не найден`;
+  }
+  if (scopeMismatch(record) || businessIdOf(record) !== businessIdOf(item)) {
+    return `${label} относится к другому бизнесу`;
+  }
+  return null;
+}
+
+function crmResponsibleError(data, item, employeeId) {
+  if (!employeeId) return null;
+  if (!(data?.employees || []).some((employee) => employee.id === employeeId)) return "Ответственный не найден";
+  const allowed = (data?.memberships || []).some((membership) =>
+    membership.employeeId === employeeId && membership.active !== false &&
+    businessIdOf(membership) === businessIdOf(item)
+  );
+  return allowed ? null : "У ответственного нет доступа к этому бизнесу";
+}
+
+export function validateCrmEntity(entity, item, data) {
+  if (!CRM_ENTITIES.includes(entity)) return null;
+  if (scopeMismatch(item)) return "businessId и unit должны совпадать";
+  if (!businessIdOf(item)) return "Не указан бизнес";
+
+  const name = String(item?.name || "").trim();
+  if (!name) return "Не указано название";
+
+  if (entity === "companies") {
+    if (item.responsibleIds != null && !Array.isArray(item.responsibleIds)) {
+      return "Ответственные должны быть списком";
+    }
+    for (const responsibleId of item.responsibleIds || []) {
+      const responsibleError = crmResponsibleError(data, item, responsibleId);
+      if (responsibleError) return responsibleError;
+    }
+  }
+
+  if (entity === "contacts" && item.companyId) {
+    const error = crmReferenceError(item, crmRecord(data, "companies", item.companyId), "Компания");
+    if (error) return error;
+  }
+  if (entity === "contacts" && typeof item.isPrimary !== "boolean") {
+    return "Признак основного контакта должен быть логическим";
+  }
+
+  if (entity === "leads" && item.status && !["new", "working", "qualified", "refused"].includes(String(item.status))) {
+    return "Неизвестный статус лида";
+  }
+  if (entity === "leads") {
+    const responsibleError = crmResponsibleError(data, item, item.responsibleId);
+    if (responsibleError) return responsibleError;
+  }
+
+  if (entity === "pipelines" && (typeof item.isDefault !== "boolean" || typeof item.active !== "boolean")) {
+    return "Настройки воронки должны быть логическими";
+  }
+
+  if (entity === "stages") {
+    const pipelineError = crmReferenceError(item, crmRecord(data, "pipelines", item.pipelineId), "Воронка");
+    if (pipelineError) return pipelineError;
+    if (item.order === "" || item.order === null || !Number.isFinite(Number(item.order))) return "Порядок стадии должен быть числом";
+    if (!["open", "won", "lost"].includes(String(item.type || ""))) return "Неизвестный тип стадии";
+  }
+
+  if (entity === "deals") {
+    const pipeline = crmRecord(data, "pipelines", item.pipelineId);
+    const pipelineError = crmReferenceError(item, pipeline, "Воронка");
+    if (pipelineError) return pipelineError;
+    const stage = crmRecord(data, "stages", item.stageId);
+    const stageError = crmReferenceError(item, stage, "Стадия");
+    if (stageError) return stageError;
+    if (stage.pipelineId !== pipeline.id) return "Стадия не относится к выбранной воронке";
+    if (stage.type === "lost" && !String(item.lostReason || "").trim()) {
+      return "Укажите причину отказа";
+    }
+    if (item.companyId) {
+      const companyError = crmReferenceError(item, crmRecord(data, "companies", item.companyId), "Компания");
+      if (companyError) return companyError;
+    }
+    if (item.contactId) {
+      const contact = crmRecord(data, "contacts", item.contactId);
+      const contactError = crmReferenceError(item, contact, "Контакт");
+      if (contactError) return contactError;
+      if (item.companyId && contact.companyId && contact.companyId !== item.companyId) {
+        return "Контакт не относится к выбранной компании";
+      }
+    }
+    if (item.amount === "" || item.amount === null || !Number.isFinite(Number(item.amount)) || Number(item.amount) < 0) {
+      return "Сумма сделки должна быть неотрицательным числом";
+    }
+    const responsibleError = crmResponsibleError(data, item, item.responsibleId);
+    if (responsibleError) return responsibleError;
+  }
+
+  if (entity === "dealItems") {
+    const dealError = crmReferenceError(item, crmRecord(data, "deals", item.dealId), "Сделка");
+    if (dealError) return dealError;
+    if (item.amount === "" || item.amount == null || !Number.isFinite(Number(item.amount)) || Number(item.amount) < 0) {
+      return "Сумма позиции должна быть неотрицательным числом";
+    }
+    if (typeof item.recurring !== "boolean") return "Признак регулярного платежа должен быть логическим";
+    if (item.recurring && !String(item.period || "").trim()) return "Укажите период регулярного платежа";
+  }
+
+  return null;
+}
+
+export function crmDeleteError(entity, item, data) {
+  if (!CRM_ENTITIES.includes(entity)) return null;
+  const linked = (records, field) => (records || []).some((record) => record[field] === item.id);
+  if (entity === "companies" && linked(data.contacts, "companyId")) return "Сначала удалите контакты компании";
+  if (entity === "companies" && linked(data.deals, "companyId")) return "Компания используется в сделках";
+  if (entity === "contacts" && linked(data.deals, "contactId")) return "Контакт используется в сделках";
+  if (entity === "pipelines" && linked(data.stages, "pipelineId")) return "Сначала удалите стадии воронки";
+  if (entity === "pipelines" && linked(data.deals, "pipelineId")) return "Воронка используется в сделках";
+  if (entity === "stages" && linked(data.deals, "stageId")) return "Стадия используется в сделках";
+  if (entity === "deals" && linked(data.dealItems, "dealId")) return "Сначала удалите позиции сделки";
   return null;
 }
 

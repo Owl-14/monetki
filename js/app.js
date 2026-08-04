@@ -2,7 +2,7 @@
 import { makeStore, UNITS, BUSINESS_MODULES, CLIENT_STATUSES, TASK_STATUSES, FIN_METHODS, FIN_CATEGORIES, OWNERS, ownerBalances, canUseExpenses, ownerLabel, businessIdOf } from './store.js';
 import { $, closeModal, esc, fmtDate, fmtDT, money, openModal, telHref, toast, today } from './ui.js';
 import { businessIdFromName, createAppState, createCrudHelpers } from './app-state.js';
-import { groupNavItems, NAV_ICONS, pageMeta, pickBottomNavItems } from './app-shell.js';
+import { CRM_TABS, crmTabFromHash, groupNavItems, NAV_ICONS, pageMeta, pickBottomNavItems } from './app-shell.js';
 
 // ---------- Состояние ----------
 const S = createAppState(makeStore());
@@ -107,7 +107,7 @@ function navItems() {
   if (hasModule('dashboard')) items.push(item('dashboard', 'Дашборд', 'overview'));
   if (hasModule('tasks')) items.push(item('tasks', 'Задачи', 'work', (S.data?.tasks || []).filter((t) => t.assigneeId === S.profile.id && t.status !== 'done').length || ''));
   if (!isAdmin() && hasModule('money')) items.push(item('money', 'Мои деньги', 'management'));
-  if (hasModule('clients')) items.push(item('clients', 'Клиенты', 'work'));
+  if (hasModule('clients')) items.push(item('clients', 'CRM продаж', 'work'));
   if (hasModule('venues') || hasModule('players')) {
     if (hasModule('venues')) {
     items.push(item('venues', 'Площадки', 'operations'));
@@ -475,85 +475,480 @@ function openTaskForm(task) {
   });
 }
 
-// ---------- Клиенты (разработка) ----------
-function viewClients() {
-  setTitle('Клиенты');
-  const statuses = CLIENT_STATUSES.dev;
-  const scopedClients = (S.data.clients || []).filter(inActiveBusiness);
-  const q = (S.search.clients || '').toLowerCase();
-  const active = S.clientStatus || 'all';
-  let list = scopedClients.filter((c) => (active === 'all' || c.status === active)
-    && (!q || (c.name + ' ' + (c.company || '') + ' ' + (c.phone || '') + ' ' + empName(c.ownerId)).toLowerCase().includes(q)));
-  list.sort((a, b) => statuses.findIndex((s) => s.id === a.status) - statuses.findIndex((s) => s.id === b.status));
+// ---------- CRM продаж ----------
+const CRM_COMPANY_STATUSES = [
+  ['lead', 'Лид'], ['talks', 'Переговоры'], ['work', 'В работе'],
+  ['support', 'На обслуживании'], ['refused', 'Отказ'], ['former', 'Бывший'],
+];
+const CRM_LEAD_STATUSES = [
+  ['new', 'Новый'], ['working', 'В работе'], ['qualified', 'Квалифицирован'], ['refused', 'Отказ'],
+];
 
-  // счётчики по каждому статусу воронки
-  const counts = {};
-  scopedClients.forEach((c) => { counts[c.status] = (counts[c.status] || 0) + 1; });
-
-  $('#view').innerHTML = `
-    <div class="searchbar">
-      <input type="search" id="cl-search" placeholder="Поиск: имя, компания, телефон, кто ведёт" value="${esc(S.search.clients || '')}">
-      <button class="btn primary" id="add-client">+ Клиент</button>
-    </div>
-    <div class="chip-row">
-      <button class="chip ${active === 'all' ? 'active' : ''}" data-cstatus="all">Все · ${scopedClients.length}</button>
-      ${statuses.map((s) => `<button class="chip ${active === s.id ? 'active' : ''}" data-cstatus="${s.id}">${s.name}${counts[s.id] ? ' · ' + counts[s.id] : ''}</button>`).join('')}
-    </div>
-    <div class="list">
-      ${list.length ? list.map((c) => {
-        const st = statuses.find((s) => s.id === c.status) || statuses[0];
-        return `<div class="row-card" data-client="${c.id}">
-          <div class="grow col">
-            <div class="title">${esc(c.name)}</div>
-            <div class="sub">${esc(c.company || '')}${c.company && c.phone ? ' · ' : ''}${esc(c.phone || '')}${c.ownerId ? ' · 👤 ' + esc(empName(c.ownerId)) : ''}</div>
-          </div>
-          ${c.amount ? `<div class="amount">${money(c.amount)}</div>` : ''}
-          <span class="badge ${st.color} dot">${st.name}</span>
-        </div>`;
-      }).join('') : `<div class="card empty"><div class="big">🤝</div>${active === 'all' ? 'Клиентов пока нет' : 'В этом статусе клиентов нет'}</div>`}
-    </div>`;
-
-  $('#add-client').addEventListener('click', () => openClientForm());
-  $('#cl-search').addEventListener('input', (e) => { S.search.clients = e.target.value; viewClients(); });
-  $('#view').querySelectorAll('[data-cstatus]').forEach((b) => b.addEventListener('click', () => { S.clientStatus = b.dataset.cstatus; viewClients(); }));
-  $('#view').querySelectorAll('[data-client]').forEach((el) => el.addEventListener('click', () => openClientForm((S.data.clients || []).find((c) => c.id === el.dataset.client))));
+function crmRecords(entity) {
+  return (S.data?.[entity] || []).filter(inActiveBusiness);
 }
 
-function openClientForm(c) {
-  const isNew = !c;
-  const targetBusinessId = moduleBusinessId('clients', c);
-  openModal(`
-    <h2>${isNew ? 'Новый клиент' : esc(c.name)}</h2>
-    <form id="ent-form">
-      <label class="field"><span>Название / имя</span><input type="text" name="name" required value="${esc(c?.name || '')}"></label>
-      <div class="form-row">
-        <label class="field"><span>Компания / ИП</span><input type="text" name="company" value="${esc(c?.company || '')}"></label>
-        <label class="field"><span>Телефон</span><input type="tel" name="phone" value="${esc(c?.phone || '')}"></label>
-      </div>
-      <div class="form-row">
-        <label class="field"><span>Telegram</span><input type="text" name="tg" value="${esc(c?.tg || '')}"></label>
-        <label class="field"><span>Сумма сделки, ₽</span><input type="number" name="amount" value="${esc(c?.amount || '')}"></label>
-      </div>
-      <div class="form-row">
-        <label class="field"><span>Статус</span>
-          <select name="status">${CLIENT_STATUSES.dev.map((s) => `<option value="${s.id}" ${(c?.status || 'lead') === s.id ? 'selected' : ''}>${s.name}</option>`).join('')}</select>
-        </label>
-        <label class="field"><span>Кто ведёт</span>
-          <select name="ownerId">
-            <option value="">— не назначен —</option>
-            ${(S.data.employees || []).filter((e) => e.active !== false && employeeBusinessIds(e).includes(targetBusinessId)).map((e) => `<option value="${e.id}" ${c?.ownerId === e.id ? 'selected' : ''}>${esc(e.name)}</option>`).join('')}
-          </select>
-        </label>
-      </div>
-      <label class="field"><span>Заметки</span><textarea name="notes">${esc(c?.notes || '')}</textarea></label>
-      <div class="actions">
-        ${!isNew ? `<button type="button" class="btn danger ghost left" id="ent-del">Удалить</button>` : ''}
-        ${c?.phone ? `<a class="btn" href="${telHref(c.phone)}">📞 Позвонить</a>` : ''}
-        <button type="button" class="btn" id="modal-cancel">Отмена</button>
-        <button type="submit" class="btn primary">${isNew ? 'Добавить' : 'Сохранить'}</button>
-      </div>
-    </form>
-  `, (root) => bindEntityForm(root, 'clients', c, { unit: targetBusinessId }));
+function crmBusinessId(item) {
+  return moduleBusinessId('clients', item);
+}
+
+function crmScope(item) {
+  const id = crmBusinessId(item);
+  return { businessId: id, unit: id };
+}
+
+function crmEmployees(item) {
+  const id = crmBusinessId(item);
+  return (S.data?.employees || []).filter((employee) => employee.active !== false && employeeBusinessIds(employee).includes(id));
+}
+
+function crmEmployeeOptions(selectedId, item) {
+  return `<option value="">— не назначен —</option>${crmEmployees(item).map((employee) =>
+    `<option value="${employee.id}" ${employee.id === selectedId ? 'selected' : ''}>${esc(employee.name)}</option>`).join('')}`;
+}
+
+function crmEmpty(icon, title, text, action = '') {
+  return `<div class="card empty crm-empty"><div class="big">${icon}</div><strong>${esc(title)}</strong><span>${esc(text)}</span>${action}</div>`;
+}
+
+function crmTabNav(active) {
+  return `<nav class="crm-tabs" aria-label="Разделы CRM">${CRM_TABS.map((tab) =>
+    `<button class="crm-tab ${tab.id === active ? 'active' : ''}" data-crm-tab="${tab.id}" ${tab.id === active ? 'aria-current="page"' : ''}>${tab.label}</button>`).join('')}</nav>`;
+}
+
+function viewClients() {
+  setTitle('CRM продаж');
+  const active = crmTabFromHash(location.hash);
+  const contents = {
+    deals: crmDealsHtml,
+    companies: crmCompaniesHtml,
+    contacts: crmContactsHtml,
+    leads: crmLeadsHtml,
+  };
+  $('#view').innerHTML = `${crmTabNav(active)}<section class="crm-view" data-crm-view="${active}">${contents[active]()}</section>`;
+  $('#view').querySelectorAll('[data-crm-tab]').forEach((button) => button.addEventListener('click', () => {
+    location.hash = `#/clients?tab=${button.dataset.crmTab}`;
+  }));
+  bindCrmView(active);
+}
+
+function bindCrmView(active) {
+  if (active === 'deals') bindCrmDeals();
+  if (active === 'companies') bindCrmCompanies();
+  if (active === 'contacts') bindCrmContacts();
+  if (active === 'leads') bindCrmLeads();
+}
+
+function crmDealsHtml() {
+  const pipelines = crmRecords('pipelines').filter((pipeline) => pipeline.active !== false);
+  if (!pipelines.some((pipeline) => pipeline.id === S.crmPipelineId)) {
+    S.crmPipelineId = pipelines.find((pipeline) => pipeline.isDefault)?.id || pipelines[0]?.id || '';
+  }
+  const pipeline = pipelines.find((item) => item.id === S.crmPipelineId);
+  const stages = crmRecords('stages').filter((stage) => stage.pipelineId === pipeline?.id).sort((a, b) => Number(a.order) - Number(b.order));
+  const deals = crmRecords('deals').filter((deal) => deal.pipelineId === pipeline?.id);
+  const items = crmRecords('dealItems');
+  const dealAmount = (deal) => Number(deal.amount) || items.filter((item) => item.dealId === deal.id).reduce((sum, item) => sum + Number(item.amount || 0), 0);
+  return `
+    <div class="crm-toolbar">
+      <label class="crm-pipeline-pick"><span>Воронка</span><select id="crm-pipeline">${pipelines.map((entry) => `<option value="${entry.id}" ${entry.id === pipeline?.id ? 'selected' : ''}>${esc(entry.name)}</option>`).join('')}</select></label>
+      <button class="btn" id="crm-pipeline-settings">⚙ Настроить</button>
+      <button class="btn primary" id="add-deal" ${stages.length ? '' : 'disabled'}>+ Сделка</button>
+    </div>
+    ${!pipeline ? crmEmpty('🪜', 'Воронок пока нет', 'Создайте первую воронку и её стадии.', '<button class="btn primary" id="crm-create-pipeline">Создать воронку</button>') : !stages.length
+      ? crmEmpty('🧩', 'Добавьте стадии', 'Без стадий сделки некуда помещать.', '<button class="btn primary" id="crm-create-stage">Добавить стадию</button>')
+      : `<div class="crm-kanban" aria-label="Воронка сделок">${stages.map((stage) => {
+          const stageDeals = deals.filter((deal) => deal.stageId === stage.id);
+          return `<section class="crm-column stage-${esc(stage.type || 'open')}" data-drop-stage="${stage.id}">
+            <header><span>${esc(stage.name)}</span><b>${stageDeals.length}</b></header>
+            <div class="crm-column-total">${money(stageDeals.reduce((sum, deal) => sum + dealAmount(deal), 0))}</div>
+            <div class="crm-deal-list">${stageDeals.length ? stageDeals.map((deal) => {
+              const company = crmRecords('companies').find((entry) => entry.id === deal.companyId);
+              return `<article class="crm-deal-card" draggable="true" tabindex="0" data-deal="${deal.id}">
+                <strong>${esc(deal.name)}</strong>
+                <span>${esc(company?.name || 'Без компании')}</span>
+                <b>${money(dealAmount(deal))}</b>
+                ${deal.responsibleId ? `<small>👤 ${esc(empName(deal.responsibleId))}</small>` : ''}
+                <label><span class="sr-only">Стадия сделки</span><select data-deal-stage="${deal.id}">${stages.map((option) => `<option value="${option.id}" ${option.id === deal.stageId ? 'selected' : ''}>${esc(option.name)}</option>`).join('')}</select></label>
+              </article>`;
+            }).join('') : '<div class="crm-column-empty">Перетащите сделку сюда</div>'}</div>
+          </section>`;
+        }).join('')}</div>`}`;
+}
+
+function bindCrmDeals() {
+  $('#crm-pipeline')?.addEventListener('change', (event) => { S.crmPipelineId = event.target.value; viewClients(); });
+  $('#crm-pipeline-settings')?.addEventListener('click', openPipelineManager);
+  $('#crm-create-pipeline')?.addEventListener('click', () => openPipelineForm());
+  $('#crm-create-stage')?.addEventListener('click', () => openStageForm(null, crmRecords('pipelines').find((pipeline) => pipeline.id === S.crmPipelineId)));
+  $('#add-deal')?.addEventListener('click', () => openDealForm());
+  $('#view').querySelectorAll('[data-deal]').forEach((card) => {
+    card.addEventListener('click', (event) => {
+      if (event.target.closest('select')) return;
+      openDealForm(crmRecords('deals').find((deal) => deal.id === card.dataset.deal));
+    });
+    card.addEventListener('dragstart', (event) => event.dataTransfer.setData('text/plain', card.dataset.deal));
+  });
+  $('#view').querySelectorAll('[data-deal-stage]').forEach((select) => select.addEventListener('change', async () => {
+    const deal = crmRecords('deals').find((entry) => entry.id === select.dataset.dealStage);
+    if (deal) {
+      const nextStageId = select.value;
+      select.value = deal.stageId;
+      await moveDealToStage(deal, nextStageId);
+    }
+  }));
+  $('#view').querySelectorAll('[data-drop-stage]').forEach((column) => {
+    column.addEventListener('dragover', (event) => { event.preventDefault(); column.classList.add('drag-over'); });
+    column.addEventListener('dragleave', () => column.classList.remove('drag-over'));
+    column.addEventListener('drop', async (event) => {
+      event.preventDefault();
+      column.classList.remove('drag-over');
+      const deal = crmRecords('deals').find((entry) => entry.id === event.dataTransfer.getData('text/plain'));
+      if (deal && deal.stageId !== column.dataset.dropStage) await moveDealToStage(deal, column.dataset.dropStage);
+    });
+  });
+}
+
+async function moveDealToStage(deal, stageId) {
+  const stage = crmRecords('stages').find((entry) => entry.id === stageId);
+  if (!stage || stageId === deal.stageId) return;
+  if (stage.type === 'lost' && !deal.lostReason) {
+    openLostReasonForm(deal, stage);
+    return;
+  }
+  const closing = stage.type === 'won' || stage.type === 'lost';
+  await doUpdate('deals', { ...deal, stageId, ...(closing && !deal.closedAt ? { closedAt: today() } : {}) }, 'Стадия изменена');
+}
+
+function openLostReasonForm(deal, stage) {
+  openModal(`<h2>Причина отказа</h2><p class="muted small">Чтобы перенести «${esc(deal.name)}» в стадию «${esc(stage.name)}», укажите причину.</p><form id="lost-reason-form"><label class="field"><span>Почему сделка не состоялась</span><textarea name="lostReason" required autofocus>${esc(deal.lostReason || '')}</textarea></label><div class="actions"><button type="button" class="btn" id="modal-cancel">Отмена</button><button class="btn primary">Перенести</button></div></form>`, (root) => {
+    $('#modal-cancel', root).addEventListener('click', () => { closeModal(); viewClients(); });
+    $('#lost-reason-form', root).addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const lostReason = event.target.elements.lostReason.value.trim();
+      if (!lostReason) return;
+      closeModal();
+      await doUpdate('deals', { ...deal, stageId: stage.id, lostReason, closedAt: deal.closedAt || today() }, 'Сделка закрыта с отказом');
+    });
+  });
+}
+
+function crmCompaniesHtml() {
+  const companies = crmRecords('companies');
+  const syntheticIds = new Set(companies.map((company) => company.legacyClientId).filter(Boolean));
+  const oldClients = (S.data?.clients || []).filter(inActiveBusiness).filter((client) => !syntheticIds.has(client.id));
+  const q = String(S.search.companies || '').toLowerCase();
+  const list = companies.filter((company) => !q || `${company.name} ${company.legalName || ''} ${company.inn || ''}`.toLowerCase().includes(q));
+  return `
+    <div class="searchbar"><input type="search" id="company-search" placeholder="Название, юрлицо или ИНН" value="${esc(S.search.companies || '')}"><button class="btn primary" id="add-company">+ Компания</button></div>
+    <div class="list">${list.length ? list.map((company) => `<div class="row-card ${company.legacy ? 'legacy-row' : ''}" data-company="${company.id}">
+      <div class="grow col"><div class="title">${esc(company.name)}</div><div class="sub">${esc(company.legalName || company.inn || 'Реквизиты не заполнены')}</div></div>
+      ${company.legacy ? '<span class="badge">Старая карточка</span>' : `<span class="badge">${esc(CRM_COMPANY_STATUSES.find(([id]) => id === company.status)?.[1] || 'Без статуса')}</span>`}
+    </div>`).join('') : crmEmpty('🏢', 'Компаний пока нет', 'Добавьте первую компанию, чтобы связать её со сделкой.')}</div>
+    ${oldClients.length ? `<section class="crm-legacy"><h3>Переходные клиенты</h3><p>Старые карточки сохранены только для чтения. Их можно перенести в новую CRM позже.</p><div class="list">${oldClients.map((client) => `<div class="row-card legacy-row" data-legacy-client="${client.id}"><div class="grow col"><div class="title">${esc(client.name)}</div><div class="sub">${esc(client.company || client.phone || 'Старая карточка клиента')}</div></div><span class="badge">Старая карточка</span></div>`).join('')}</div></section>` : ''}`;
+}
+
+function bindCrmCompanies() {
+  $('#add-company')?.addEventListener('click', () => openCompanyForm());
+  $('#company-search')?.addEventListener('input', (event) => { S.search.companies = event.target.value; viewClients(); });
+  $('#view').querySelectorAll('[data-company]').forEach((row) => row.addEventListener('click', () => {
+    const company = crmRecords('companies').find((item) => item.id === row.dataset.company);
+    if (company?.legacy) openLegacyClient((S.data?.clients || []).find((client) => client.id === company.legacyClientId) || company);
+    else openCompanyForm(company);
+  }));
+  $('#view').querySelectorAll('[data-legacy-client]').forEach((row) => row.addEventListener('click', () => openLegacyClient((S.data?.clients || []).find((client) => client.id === row.dataset.legacyClient))));
+}
+
+function crmContactsHtml() {
+  const q = String(S.search.contacts || '').toLowerCase();
+  const companies = crmRecords('companies');
+  const contacts = crmRecords('contacts').filter((contact) => !q || `${contact.name} ${contact.phone || ''} ${contact.email || ''}`.toLowerCase().includes(q));
+  return `<div class="searchbar"><input type="search" id="contact-search" placeholder="Имя, телефон или почта" value="${esc(S.search.contacts || '')}"><button class="btn primary" id="add-contact">+ Контакт</button></div>
+    <div class="list">${contacts.length ? contacts.map((contact) => {
+      const company = companies.find((item) => item.id === contact.companyId);
+      return `<div class="row-card" data-contact="${contact.id}"><div class="grow col"><div class="title">${esc(contact.name)}${contact.isPrimary ? ' <span class="badge green">Основной</span>' : ''}</div><div class="sub">${esc([contact.position, company?.name, contact.phone || contact.email].filter(Boolean).join(' · ') || 'Контактные данные не заполнены')}</div></div></div>`;
+    }).join('') : crmEmpty('👤', 'Контактов пока нет', 'Контакт можно связать с компанией и сделкой.')}</div>`;
+}
+
+function bindCrmContacts() {
+  $('#add-contact')?.addEventListener('click', () => openContactForm());
+  $('#contact-search')?.addEventListener('input', (event) => { S.search.contacts = event.target.value; viewClients(); });
+  $('#view').querySelectorAll('[data-contact]').forEach((row) => row.addEventListener('click', () => openContactForm(crmRecords('contacts').find((contact) => contact.id === row.dataset.contact))));
+}
+
+function crmLeadsHtml() {
+  const active = S.leadStatus || 'all';
+  const leads = crmRecords('leads').filter((lead) => active === 'all' || lead.status === active);
+  return `<div class="crm-toolbar"><div class="chip-row grow"><button class="chip ${active === 'all' ? 'active' : ''}" data-lead-status="all">Все · ${crmRecords('leads').length}</button>${CRM_LEAD_STATUSES.map(([id, name]) => `<button class="chip ${active === id ? 'active' : ''}" data-lead-status="${id}">${name}</button>`).join('')}</div><button class="btn primary" id="add-lead">+ Лид</button></div>
+    <div class="list">${leads.length ? leads.map((lead) => `<div class="row-card" data-lead="${lead.id}"><div class="grow col"><div class="title">${esc(lead.name)}</div><div class="sub">${esc([lead.source, lead.phone || lead.email, lead.responsibleId ? empName(lead.responsibleId) : ''].filter(Boolean).join(' · '))}</div></div><span class="badge">${esc(CRM_LEAD_STATUSES.find(([id]) => id === lead.status)?.[1] || 'Новый')}</span></div>`).join('') : crmEmpty('📥', active === 'all' ? 'Лидов пока нет' : 'В этом статусе лидов нет', 'Новая заявка или звонок появятся здесь.')}</div>`;
+}
+
+function bindCrmLeads() {
+  $('#add-lead')?.addEventListener('click', () => openLeadForm());
+  $('#view').querySelectorAll('[data-lead-status]').forEach((button) => button.addEventListener('click', () => { S.leadStatus = button.dataset.leadStatus; viewClients(); }));
+  $('#view').querySelectorAll('[data-lead]').forEach((row) => row.addEventListener('click', () => openLeadForm(crmRecords('leads').find((lead) => lead.id === row.dataset.lead))));
+}
+
+function openCompanyForm(company) {
+  if (company?.legacy) { openLegacyClient(company); return; }
+  const isNew = !company;
+  const selected = new Set(company?.responsibleIds || []);
+  openModal(`<h2>${isNew ? 'Новая компания' : esc(company.name)}</h2><form id="company-form">
+    <label class="field"><span>Название</span><input name="name" required value="${esc(company?.name || '')}"></label>
+    <div class="form-row"><label class="field"><span>Юридическое название</span><input name="legalName" value="${esc(company?.legalName || '')}"></label><label class="field"><span>ИНН</span><input name="inn" inputmode="numeric" value="${esc(company?.inn || '')}"></label></div>
+    <label class="field"><span>Адрес</span><input name="address" value="${esc(company?.address || '')}"></label>
+    <label class="field"><span>Статус клиента</span><select name="status">${CRM_COMPANY_STATUSES.map(([id, name]) => `<option value="${id}" ${(company?.status || 'lead') === id ? 'selected' : ''}>${name}</option>`).join('')}</select></label>
+    <fieldset class="crm-fieldset"><legend>Ответственные</legend>${crmEmployees(company).map((employee) => `<label class="checkline"><input type="checkbox" name="responsibleIds" value="${employee.id}" ${selected.has(employee.id) ? 'checked' : ''}> ${esc(employee.name)}</label>`).join('') || '<span class="muted small">Нет доступных сотрудников</span>'}</fieldset>
+    <label class="field"><span>Заметки</span><textarea name="notes">${esc(company?.notes || '')}</textarea></label>
+    <div class="actions">${!isNew ? '<button type="button" class="btn danger ghost left" id="company-delete">Удалить</button>' : ''}<button type="button" class="btn" id="modal-cancel">Отмена</button><button class="btn primary" type="submit">${isNew ? 'Добавить' : 'Сохранить'}</button></div>
+  </form>`, (root) => {
+    $('#modal-cancel', root).addEventListener('click', closeModal);
+    $('#company-form', root).addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const data = Object.fromEntries(new FormData(event.target).entries());
+      data.responsibleIds = [...event.target.querySelectorAll('[name="responsibleIds"]:checked')].map((input) => input.value);
+      closeModal();
+      if (company) await doUpdate('companies', { ...company, ...data }, 'Компания сохранена');
+      else await doCreate('companies', { ...data, ...crmScope(company) }, 'Компания добавлена');
+    });
+    $('#company-delete', root)?.addEventListener('click', async () => {
+      const linked = crmRecords('deals').some((deal) => deal.companyId === company.id) || crmRecords('contacts').some((contact) => contact.companyId === company.id);
+      if (linked) { toast('Сначала уберите компанию из связанных сделок и контактов', true); return; }
+      if (confirm('Удалить компанию?')) { closeModal(); await doDelete('companies', company.id, 'Компания удалена'); }
+    });
+  });
+}
+
+function openContactForm(contact) {
+  const isNew = !contact;
+  const companies = crmRecords('companies').filter((company) => !company.legacy);
+  openModal(`<h2>${isNew ? 'Новый контакт' : esc(contact.name)}</h2><form id="ent-form">
+    <label class="field"><span>ФИО</span><input name="name" required value="${esc(contact?.name || '')}"></label>
+    <div class="form-row"><label class="field"><span>Компания</span><select name="companyId"><option value="">— без компании —</option>${companies.map((company) => `<option value="${company.id}" ${contact?.companyId === company.id ? 'selected' : ''}>${esc(company.name)}</option>`).join('')}</select></label><label class="field"><span>Должность</span><input name="position" value="${esc(contact?.position || '')}"></label></div>
+    <div class="form-row"><label class="field"><span>Телефон</span><input type="tel" name="phone" value="${esc(contact?.phone || '')}"></label><label class="field"><span>Почта</span><input type="email" name="email" value="${esc(contact?.email || '')}"></label></div>
+    <label class="field"><span>Мессенджер</span><input name="messenger" value="${esc(contact?.messenger || '')}"></label>
+    <label class="checkline"><input type="checkbox" name="isPrimary" value="true" ${contact?.isPrimary ? 'checked' : ''}> Основной контакт</label>
+    <label class="field"><span>Комментарий</span><textarea name="notes">${esc(contact?.notes || '')}</textarea></label>
+    <div class="actions">${!isNew ? '<button type="button" class="btn danger ghost left" id="ent-del">Удалить</button>' : ''}${contact?.phone ? `<a class="btn" href="${telHref(contact.phone)}">Позвонить</a>` : ''}<button type="button" class="btn" id="modal-cancel">Отмена</button><button class="btn primary" type="submit">${isNew ? 'Добавить' : 'Сохранить'}</button></div>
+  </form>`, (root) => {
+    $('#modal-cancel', root).addEventListener('click', closeModal);
+    $('#ent-form', root).addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const data = Object.fromEntries(new FormData(event.target).entries());
+      data.isPrimary = event.target.elements.isPrimary.checked;
+      closeModal();
+      if (contact) await doUpdate('contacts', { ...contact, ...data }, 'Контакт сохранён');
+      else await doCreate('contacts', { ...data, ...crmScope(contact) }, 'Контакт добавлен');
+    });
+    $('#ent-del', root)?.addEventListener('click', async () => { if (confirm('Удалить контакт?')) { closeModal(); await doDelete('contacts', contact.id, 'Контакт удалён'); } });
+  });
+}
+
+function openLeadForm(lead) {
+  const isNew = !lead;
+  openModal(`<h2>${isNew ? 'Новый лид' : esc(lead.name)}</h2><form id="ent-form">
+    <label class="field"><span>Имя или название</span><input name="name" required value="${esc(lead?.name || '')}"></label>
+    <div class="form-row"><label class="field"><span>Телефон</span><input type="tel" name="phone" value="${esc(lead?.phone || '')}"></label><label class="field"><span>Почта</span><input type="email" name="email" value="${esc(lead?.email || '')}"></label></div>
+    <div class="form-row"><label class="field"><span>Мессенджер</span><input name="messenger" value="${esc(lead?.messenger || '')}"></label><label class="field"><span>Источник</span><input name="source" placeholder="Сайт, рекомендация, звонок" value="${esc(lead?.source || '')}"></label></div>
+    <div class="form-row"><label class="field"><span>Статус</span><select name="status">${CRM_LEAD_STATUSES.map(([id, name]) => `<option value="${id}" ${(lead?.status || 'new') === id ? 'selected' : ''}>${name}</option>`).join('')}</select></label><label class="field"><span>Ответственный</span><select name="responsibleId">${crmEmployeeOptions(lead?.responsibleId, lead)}</select></label></div>
+    <label class="field"><span>Комментарий</span><textarea name="notes">${esc(lead?.notes || '')}</textarea></label>
+    <div class="actions">${!isNew ? '<button type="button" class="btn danger ghost left" id="ent-del">Удалить</button><button type="button" class="btn" id="convert-lead">Конвертировать</button>' : ''}<button type="button" class="btn" id="modal-cancel">Отмена</button><button class="btn primary" type="submit">${isNew ? 'Добавить' : 'Сохранить'}</button></div>
+  </form>`, (root) => {
+    bindEntityForm(root, 'leads', lead, crmScope(lead));
+    $('#convert-lead', root)?.addEventListener('click', () => openLeadConversion(lead));
+  });
+}
+
+function openLegacyClient(client) {
+  openModal(`<h2>${esc(client?.name || 'Старая карточка')}</h2><div class="banner warn">Старая карточка — только чтение. Она сохранена без изменений для безопасного перехода.</div>
+    <dl class="crm-details"><dt>Компания</dt><dd>${esc(client?.company || client?.legalName || '—')}</dd><dt>Телефон</dt><dd>${client?.phone || client?.legacyPhone ? `<a href="${telHref(client.phone || client.legacyPhone)}">${esc(client.phone || client.legacyPhone)}</a>` : '—'}</dd><dt>Сумма</dt><dd>${client?.amount || client?.legacyAmount ? money(client.amount || client.legacyAmount) : '—'}</dd><dt>Заметки</dt><dd>${esc(client?.notes || '—')}</dd></dl>
+    <div class="actions"><button class="btn" id="modal-cancel">Закрыть</button></div>`, (root) => $('#modal-cancel', root).addEventListener('click', closeModal));
+}
+
+function openPipelineManager() {
+  const pipelines = crmRecords('pipelines');
+  const stages = crmRecords('stages');
+  openModal(`<div class="crm-modal-heading"><div><h2>Воронки и стадии</h2><p class="muted small">Порядок стадий задаётся числом: от меньшего к большему.</p></div><button class="btn primary small" id="add-pipeline">+ Воронка</button></div>
+    <div class="crm-settings-list">${pipelines.length ? pipelines.map((pipeline) => `<section class="crm-settings-card"><header><strong>${esc(pipeline.name)}</strong>${pipeline.isDefault ? '<span class="badge green">По умолчанию</span>' : ''}<button class="btn ghost small" data-edit-pipeline="${pipeline.id}">Изменить</button></header>
+      <div class="crm-stage-list">${stages.filter((stage) => stage.pipelineId === pipeline.id).sort((a, b) => Number(a.order) - Number(b.order)).map((stage) => `<button class="crm-stage-row" data-edit-stage="${stage.id}"><span>${esc(stage.name)}</span><small>${stage.type === 'won' ? 'Успех' : stage.type === 'lost' ? 'Отказ' : `Порядок ${Number(stage.order)}`}</small></button>`).join('') || '<span class="muted small">Стадий пока нет</span>'}</div>
+      <button class="btn small" data-add-stage="${pipeline.id}">+ Стадия</button></section>`).join('') : crmEmpty('🪜', 'Воронок пока нет', 'Создайте воронку, затем добавьте её стадии.')}</div>
+    <div class="actions"><button class="btn" id="modal-cancel">Закрыть</button></div>`, (root) => {
+    $('#modal-cancel', root).addEventListener('click', closeModal);
+    $('#add-pipeline', root).addEventListener('click', () => openPipelineForm());
+    root.querySelectorAll('[data-edit-pipeline]').forEach((button) => button.addEventListener('click', () => openPipelineForm(pipelines.find((pipeline) => pipeline.id === button.dataset.editPipeline))));
+    root.querySelectorAll('[data-add-stage]').forEach((button) => button.addEventListener('click', () => openStageForm(null, pipelines.find((pipeline) => pipeline.id === button.dataset.addStage))));
+    root.querySelectorAll('[data-edit-stage]').forEach((button) => button.addEventListener('click', () => {
+      const stage = stages.find((item) => item.id === button.dataset.editStage);
+      openStageForm(stage, pipelines.find((pipeline) => pipeline.id === stage?.pipelineId));
+    }));
+  });
+}
+
+function openPipelineForm(pipeline) {
+  const isNew = !pipeline;
+  openModal(`<h2>${isNew ? 'Новая воронка' : 'Настройка воронки'}</h2><form id="pipeline-form">
+    <label class="field"><span>Название</span><input name="name" required value="${esc(pipeline?.name || '')}" placeholder="Например, Новые продажи"></label>
+    <label class="checkline"><input type="checkbox" name="isDefault" ${pipeline?.isDefault ? 'checked' : ''}> Использовать по умолчанию</label>
+    <label class="checkline"><input type="checkbox" name="active" ${pipeline?.active !== false ? 'checked' : ''}> Воронка активна</label>
+    <div class="actions">${!isNew ? '<button type="button" class="btn danger ghost left" id="pipeline-delete">Удалить</button>' : ''}<button type="button" class="btn" id="modal-cancel">Отмена</button><button class="btn primary">Сохранить</button></div>
+  </form>`, (root) => {
+    $('#modal-cancel', root).addEventListener('click', closeModal);
+    $('#pipeline-form', root).addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const form = event.target;
+      const data = { name: form.elements.name.value.trim(), isDefault: form.elements.isDefault.checked, active: form.elements.active.checked };
+      closeModal();
+      if (pipeline) await doUpdate('pipelines', { ...pipeline, ...data }, 'Воронка сохранена');
+      else {
+        const result = await doCreate('pipelines', { ...data, ...crmScope(pipeline) }, 'Воронка создана');
+        if (result?.item?.id) S.crmPipelineId = result.item.id;
+      }
+    });
+    $('#pipeline-delete', root)?.addEventListener('click', async () => {
+      const hasDeals = crmRecords('deals').some((deal) => deal.pipelineId === pipeline.id);
+      if (hasDeals) { toast('Сначала перенесите или удалите сделки этой воронки', true); return; }
+      if (!confirm('Удалить воронку и её пустые стадии?')) return;
+      closeModal();
+      for (const stage of crmRecords('stages').filter((item) => item.pipelineId === pipeline.id)) await doDelete('stages', stage.id);
+      await doDelete('pipelines', pipeline.id, 'Воронка удалена');
+    });
+  });
+}
+
+function openStageForm(stage, pipeline) {
+  if (!pipeline) { toast('Сначала создайте воронку', true); return; }
+  const isNew = !stage;
+  const siblings = crmRecords('stages').filter((item) => item.pipelineId === pipeline.id);
+  openModal(`<h2>${isNew ? 'Новая стадия' : 'Настройка стадии'}</h2><p class="muted small">Воронка: ${esc(pipeline.name)}</p><form id="stage-form">
+    <label class="field"><span>Название</span><input name="name" required value="${esc(stage?.name || '')}"></label>
+    <div class="form-row"><label class="field"><span>Порядок</span><input type="number" min="0" name="order" required value="${esc(stage?.order ?? siblings.length)}"></label><label class="field"><span>Тип</span><select name="type"><option value="open" ${(stage?.type || 'open') === 'open' ? 'selected' : ''}>Открытая</option><option value="won" ${stage?.type === 'won' ? 'selected' : ''}>Успешно</option><option value="lost" ${stage?.type === 'lost' ? 'selected' : ''}>Отказ</option></select></label></div>
+    <div class="actions">${!isNew ? '<button type="button" class="btn danger ghost left" id="stage-delete">Удалить</button>' : ''}<button type="button" class="btn" id="modal-cancel">Отмена</button><button class="btn primary">Сохранить</button></div>
+  </form>`, (root) => {
+    $('#modal-cancel', root).addEventListener('click', closeModal);
+    $('#stage-form', root).addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const data = Object.fromEntries(new FormData(event.target).entries());
+      data.order = Number(data.order);
+      closeModal();
+      if (stage) await doUpdate('stages', { ...stage, ...data }, 'Стадия сохранена');
+      else await doCreate('stages', { ...data, pipelineId: pipeline.id, ...crmScope(pipeline) }, 'Стадия добавлена');
+    });
+    $('#stage-delete', root)?.addEventListener('click', async () => {
+      if (crmRecords('deals').some((deal) => deal.stageId === stage.id)) { toast('На этой стадии есть сделки', true); return; }
+      if (confirm('Удалить пустую стадию?')) { closeModal(); await doDelete('stages', stage.id, 'Стадия удалена'); }
+    });
+  });
+}
+
+function dealItemRow(item = {}) {
+  return `<div class="crm-deal-item" data-deal-item="${esc(item.id || '')}">
+    <div class="crm-deal-item-main"><input name="itemName" aria-label="Наименование позиции" placeholder="Что продаём" value="${esc(item.name || '')}"><input type="number" min="0" step="0.01" name="itemAmount" aria-label="Сумма позиции" placeholder="Сумма, ₽" value="${esc(item.amount || '')}"><button type="button" class="btn danger ghost small" data-remove-item aria-label="Удалить позицию">×</button></div>
+    <input name="itemComment" aria-label="Комментарий к позиции" placeholder="Комментарий" value="${esc(item.comment || '')}">
+    <div class="crm-item-recurring"><label class="checkline"><input type="checkbox" name="itemRecurring" ${item.recurring ? 'checked' : ''}> Регулярный платёж</label><select name="itemPeriod" aria-label="Периодичность"><option value="">— период —</option><option value="month" ${item.period === 'month' ? 'selected' : ''}>Ежемесячно</option><option value="quarter" ${item.period === 'quarter' ? 'selected' : ''}>Ежеквартально</option><option value="year" ${item.period === 'year' ? 'selected' : ''}>Ежегодно</option></select></div>
+  </div>`;
+}
+
+function openDealForm(deal) {
+  const isNew = !deal;
+  const pipelines = crmRecords('pipelines').filter((pipeline) => pipeline.active !== false);
+  const initialPipelineId = deal?.pipelineId || S.crmPipelineId || pipelines[0]?.id;
+  const allStages = crmRecords('stages').sort((a, b) => Number(a.order) - Number(b.order));
+  if (!initialPipelineId || !allStages.some((stage) => stage.pipelineId === initialPipelineId)) { toast('Сначала создайте воронку и стадии', true); return; }
+  const companies = crmRecords('companies').filter((company) => !company.legacy);
+  const contacts = crmRecords('contacts');
+  const existingItems = deal ? crmRecords('dealItems').filter((item) => item.dealId === deal.id) : [];
+  openModal(`<h2>${isNew ? 'Новая сделка' : esc(deal.name)}</h2><form id="deal-form">
+    <label class="field"><span>Название сделки</span><input name="name" required value="${esc(deal?.name || '')}" placeholder="Что продаём"></label>
+    <div class="form-row"><label class="field"><span>Компания</span><select name="companyId"><option value="">— без компании —</option>${companies.map((company) => `<option value="${company.id}" ${deal?.companyId === company.id ? 'selected' : ''}>${esc(company.name)}</option>`).join('')}</select></label><label class="field"><span>Контакт</span><select name="contactId"><option value="">— без контакта —</option>${contacts.map((contact) => `<option value="${contact.id}" ${deal?.contactId === contact.id ? 'selected' : ''}>${esc(contact.name)}</option>`).join('')}</select></label></div>
+    <div class="form-row"><label class="field"><span>Воронка</span><select name="pipelineId">${pipelines.map((pipeline) => `<option value="${pipeline.id}" ${pipeline.id === initialPipelineId ? 'selected' : ''}>${esc(pipeline.name)}</option>`).join('')}</select></label><label class="field"><span>Стадия</span><select name="stageId"></select></label></div>
+    <div class="form-row"><label class="field"><span>Сумма вручную, ₽</span><input type="number" min="0" step="0.01" name="amount" value="${esc(deal?.amount || '')}" placeholder="Если нет позиций"></label><label class="field"><span>Ответственный</span><select name="responsibleId">${crmEmployeeOptions(deal?.responsibleId, deal)}</select></label></div>
+    <div class="form-row"><label class="field"><span>План закрытия</span><input type="date" name="plannedCloseDate" value="${esc(deal?.plannedCloseDate || '')}"></label><label class="field"><span>Фактически закрыта</span><input type="date" name="closedAt" value="${esc(deal?.closedAt || '')}"></label></div>
+    <label class="field"><span>Причина отказа</span><input name="lostReason" value="${esc(deal?.lostReason || '')}" placeholder="Обязательна для стадии «Отказ»"></label>
+    <label class="field"><span>Заметки</span><textarea name="notes">${esc(deal?.notes || '')}</textarea></label>
+    <div class="crm-items-heading"><strong>Позиции сделки</strong><button class="btn small" type="button" id="add-deal-item">+ Позиция</button></div><div id="deal-items">${existingItems.map(dealItemRow).join('')}</div>
+    <div class="actions">${!isNew ? '<button type="button" class="btn danger ghost left" id="deal-delete">Удалить</button>' : ''}<button type="button" class="btn" id="modal-cancel">Отмена</button><button class="btn primary">${isNew ? 'Создать' : 'Сохранить'}</button></div>
+  </form>`, (root) => {
+    const form = $('#deal-form', root);
+    const pipelineSelect = form.elements.pipelineId;
+    const stageSelect = form.elements.stageId;
+    const updateStages = () => {
+      const selected = stageSelect.value || deal?.stageId;
+      const options = allStages.filter((stage) => stage.pipelineId === pipelineSelect.value);
+      stageSelect.innerHTML = options.map((stage) => `<option value="${stage.id}" ${stage.id === selected ? 'selected' : ''}>${esc(stage.name)}</option>`).join('');
+    };
+    updateStages();
+    pipelineSelect.addEventListener('change', updateStages);
+    const bindRemove = () => root.querySelectorAll('[data-remove-item]').forEach((button) => { button.onclick = () => button.closest('[data-deal-item]').remove(); });
+    bindRemove();
+    $('#add-deal-item', root).addEventListener('click', () => { $('#deal-items', root).insertAdjacentHTML('beforeend', dealItemRow()); bindRemove(); });
+    $('#modal-cancel', root).addEventListener('click', closeModal);
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const rows = [...root.querySelectorAll('[data-deal-item]')];
+      const invalidRecurring = rows.find((row) => row.querySelector('[name="itemRecurring"]').checked && !row.querySelector('[name="itemPeriod"]').value);
+      if (invalidRecurring) { toast('Выберите период регулярного платежа', true); invalidRecurring.querySelector('[name="itemPeriod"]').focus(); return; }
+      const data = Object.fromEntries(new FormData(form).entries());
+      for (const key of ['itemName', 'itemAmount', 'itemComment', 'itemRecurring', 'itemPeriod']) delete data[key];
+      data.amount = Number(data.amount || 0);
+      const selectedStage = allStages.find((stage) => stage.id === data.stageId);
+      if (selectedStage?.type === 'lost' && !String(data.lostReason || '').trim()) { toast('Укажите причину отказа', true); form.elements.lostReason.focus(); return; }
+      const result = deal ? await doUpdate('deals', { ...deal, ...data }, 'Сделка сохранена') : await doCreate('deals', { ...data, ...crmScope(deal) }, 'Сделка создана');
+      if (!result) return;
+      const savedDeal = result.item || { ...deal, ...data };
+      const keptIds = new Set(rows.map((row) => row.dataset.dealItem).filter(Boolean));
+      for (const item of existingItems.filter((entry) => !keptIds.has(entry.id))) await doDelete('dealItems', item.id);
+      for (const row of rows) {
+        const itemData = {
+          dealId: savedDeal.id,
+          name: row.querySelector('[name="itemName"]').value.trim(),
+          amount: Number(row.querySelector('[name="itemAmount"]').value || 0),
+          comment: row.querySelector('[name="itemComment"]').value.trim(),
+          recurring: row.querySelector('[name="itemRecurring"]').checked,
+          period: row.querySelector('[name="itemPeriod"]').value,
+        };
+        if (!itemData.name) continue;
+        const old = existingItems.find((entry) => entry.id === row.dataset.dealItem);
+        if (old) await doUpdate('dealItems', { ...old, ...itemData });
+        else await doCreate('dealItems', { ...itemData, ...crmScope(savedDeal) });
+      }
+      closeModal();
+      render();
+    });
+    $('#deal-delete', root)?.addEventListener('click', async () => {
+      if (!confirm('Удалить сделку и её позиции?')) return;
+      closeModal();
+      for (const item of existingItems) await doDelete('dealItems', item.id);
+      await doDelete('deals', deal.id, 'Сделка удалена');
+    });
+  });
+}
+
+function openLeadConversion(lead) {
+  const pipelines = crmRecords('pipelines').filter((pipeline) => pipeline.active !== false);
+  const stages = crmRecords('stages').filter((stage) => stage.type === 'open');
+  if (!pipelines.length || !stages.length) { toast('Сначала настройте воронку продаж', true); return; }
+  const pipeline = pipelines.find((item) => item.isDefault) || pipelines[0];
+  const firstStage = stages.filter((stage) => stage.pipelineId === pipeline.id).sort((a, b) => Number(a.order) - Number(b.order))[0];
+  if (!firstStage) { toast('В воронке нет открытой стадии', true); return; }
+  openModal(`<h2>Конвертировать лид</h2><p class="muted small">Будут созданы компания, контакт и первая сделка. Исходный лид останется в истории со статусом «Квалифицирован».</p><form id="convert-form">
+    <label class="field"><span>Название компании</span><input name="companyName" required value="${esc(lead.name)}"></label><label class="field"><span>Название сделки</span><input name="dealName" required value="${esc(`Первая сделка — ${lead.name}`)}"></label>
+    <div class="actions"><button type="button" class="btn" id="modal-cancel">Отмена</button><button class="btn primary">Конвертировать</button></div>
+  </form>`, (root) => {
+    $('#modal-cancel', root).addEventListener('click', closeModal);
+    $('#convert-form', root).addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const data = Object.fromEntries(new FormData(event.target).entries());
+      const companyResult = await doCreate('companies', { name: data.companyName, status: 'talks', responsibleIds: lead.responsibleId ? [lead.responsibleId] : [], notes: lead.notes || '', ...crmScope(lead) });
+      if (!companyResult?.item?.id) return;
+      const contactResult = await doCreate('contacts', { companyId: companyResult.item.id, name: lead.name, phone: lead.phone || '', email: lead.email || '', messenger: lead.messenger || '', isPrimary: true, notes: '', ...crmScope(lead) });
+      if (!contactResult?.item?.id) return;
+      const dealResult = await doCreate('deals', { name: data.dealName, companyId: companyResult.item.id, contactId: contactResult.item.id, pipelineId: pipeline.id, stageId: firstStage.id, amount: 0, responsibleId: lead.responsibleId || '', notes: lead.notes || '', ...crmScope(lead) });
+      if (!dealResult) return;
+      await doUpdate('leads', { ...lead, status: 'qualified' }, 'Лид конвертирован');
+      closeModal();
+      location.hash = '#/clients?tab=deals';
+    });
+  });
 }
 
 // ---------- Площадки (падел) ----------

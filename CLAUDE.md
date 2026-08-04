@@ -43,7 +43,8 @@ POST на `backendUrl`, `Content-Type: text/plain` (чтобы без preflight)
 - `memberships`: employeeId, businessId, unit (=businessId для совместимости), role `owner|staff`, active
 - `businessOwners`: businessId, unit (=businessId), ownerId (`savva|andrey|dmitry`), name, share (0…1), active
 - `employees`: id, name, code (=токен входа), role `admin|staff`, unit `padel|dev|all` (legacy/bootstrap), phone, tg, active
-- `clients` (только dev): воронка status `lead|talks|work|support|refused`, amount, notes
+- `clients` (legacy, только dev): прежняя карточка клиента с status `lead|talks|work|support|refused`, amount, notes. Новая CRM читает её как помеченную старую карточку, не дублирует и не перезаписывает через новые сущности.
+- CRM продаж: `companies` (реквизиты, ответственные и отдельный статус клиента), `contacts` (люди компании), `leads` (сырой входящий контакт), `deals` (сделка и стадия), `pipelines` + `stages` (настраиваемые воронки), `dealItems` (ручные позиции сделки, в том числе регулярные). Все семь сущностей содержат одинаковые `businessId` и `unit`; bootstrap идемпотентно создаёт для активного бизнеса только стандартную пустую воронку и её стадии, но не создаёт компании, контакты, лиды или сделки.
 - `venues` (padel): + `slots` — календарь кортов, объект `{"YYYY-MM-DD_HH": {tag, price}}`, tag: `booked|free|busy|want`
 - `players` (padel): name, phone, level, notes; импорт вставкой из Excel
 - `tasks`: assigneeId, authorId, status `new`(«Не видел», красный)`|progress|question`(жёлтый)`|done`, priority, due, comments[]
