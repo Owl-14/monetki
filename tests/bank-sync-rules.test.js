@@ -8,6 +8,7 @@ import {
   classifyMethod,
   collectStatementTransactions,
   splitStatementRange,
+  statementRangeDiagnostics,
   statementRequestBudget,
   sumBankBalances,
 } from "../supabase/functions/api/rules.js";
@@ -71,6 +72,49 @@ test("диапазон выписки делится по календарным
     { startDate: "2026-07-20", endDate: "2026-07-20" },
   ]);
   assert.equal(splitStatementRange("2026-07-19", "2026-07-19"), null);
+  assert.equal(splitStatementRange("2026-02-30", "2026-03-02"), null);
+});
+
+test("диагностика диапазона принимает только реальные даты YYYY-MM-DD и не раскрывает операции", () => {
+  const diagnostics = statementRangeDiagnostics("2026-07-20", "2026-07-21", [
+    {
+      documentProcessDate: "2026-07-20",
+      transactionId: "SECRET_TRANSACTION",
+      bankId: "SECRET_BANK_ID",
+      accountId: "SECRET_ACCOUNT",
+      Amount: { amount: "SECRET_AMOUNT" },
+      DebtorParty: { name: "SECRET_COUNTERPARTY" },
+      description: "SECRET_DESCRIPTION",
+    },
+    { documentProcessDate: "2026-07-22" },
+    { documentProcessDate: "2026-02-30" },
+    { documentProcessDate: "2026-07-21T12:00:00Z" },
+    {},
+  ]);
+
+  assert.deepEqual(diagnostics, {
+    requestedStart: "2026-07-20",
+    requestedEnd: "2026-07-21",
+    count: 5,
+    earliestDate: "2026-07-20",
+    latestDate: "2026-07-22",
+    missingDateCount: 3,
+    outsideRange: 1,
+  });
+  assert.deepEqual(Object.keys(diagnostics), [
+    "requestedStart", "requestedEnd", "count", "earliestDate",
+    "latestDate", "missingDateCount", "outsideRange",
+  ]);
+  const serialized = JSON.stringify(diagnostics);
+  for (const secret of [
+    "SECRET_TRANSACTION", "SECRET_BANK_ID", "SECRET_ACCOUNT", "SECRET_AMOUNT",
+    "SECRET_COUNTERPARTY", "SECRET_DESCRIPTION",
+  ]) assert.doesNotMatch(serialized, new RegExp(secret));
+
+  const sanitizedRequest = statementRangeDiagnostics("SECRET_START", "SECRET_END", []);
+  assert.equal(sanitizedRequest.requestedStart, null);
+  assert.equal(sanitizedRequest.requestedEnd, null);
+  assert.doesNotMatch(JSON.stringify(sanitizedRequest), /SECRET_/);
 });
 
 test("бюджет счёта резервирует только один root-запрос каждому следующему счёту", () => {
@@ -83,7 +127,10 @@ test("бюджет счёта резервирует только один root-
 
 test("выписка из 100 операций рекурсивно заменяется результатами двух половин", async () => {
   const calls = [];
-  const root = Array.from({ length: 100 }, (_, index) => ({ transactionId: `root-${index}` }));
+  const root = Array.from({ length: 100 }, (_, index) => ({
+    transactionId: `root-${index}`,
+    documentProcessDate: index < 50 ? "2026-07-01" : "2026-07-02",
+  }));
   const result = await collectStatementTransactions({
     startDate: "2026-07-01",
     endDate: "2026-07-04",
@@ -121,7 +168,10 @@ test("выписка из 100 операций рекурсивно заменя
 });
 
 test("рассогласование половин не теряет операции родительской выписки и даёт partial", async () => {
-  const root = Array.from({ length: 100 }, (_, index) => ({ transactionId: `fallback-${index}` }));
+  const root = Array.from({ length: 100 }, (_, index) => ({
+    transactionId: `fallback-${index}`,
+    documentProcessDate: index < 50 ? "2026-07-01" : "2026-07-02",
+  }));
   const result = await collectStatementTransactions({
     startDate: "2026-07-01",
     endDate: "2026-07-02",
@@ -137,10 +187,56 @@ test("рассогласование половин не теряет опера
   assert.equal(result.diagnostics.usable, 3);
 });
 
+test("одни и те же root 100 в обеих половинах не дают ложное полное покрытие", async () => {
+  const root = Array.from({ length: 100 }, (_, index) => ({
+    transactionId: `same-${index}`,
+    documentProcessDate: `2026-07-0${1 + Math.floor(index / 25)}`,
+  }));
+  const result = await collectStatementTransactions({
+    startDate: "2026-07-01",
+    endDate: "2026-07-04",
+    maxDepth: 1,
+    fetchRange: async () => ({ status: "Ready", Transaction: root }),
+  });
+
+  assert.equal(result.transactions.length, 100);
+  assert.equal(result.diagnostics.requested, 3);
+  assert.equal(result.diagnostics.split, 1);
+  assert.equal(result.diagnostics.overall.rawSeen, 300);
+  assert.equal(result.diagnostics.overall.uniqueSeen, 100);
+  assert.equal(result.diagnostics.overall.earliest, "2026-07-01");
+  assert.equal(result.diagnostics.overall.latest, "2026-07-04");
+  assert.equal(result.diagnostics.outsideRange, 100);
+  assert.deepEqual(Object.keys(result.diagnostics.overall), ["rawSeen", "uniqueSeen", "earliest", "latest"]);
+  assert.equal(result.diagnostics.truncated, 2);
+  assert.deepEqual(result.diagnostics.ranges.map((range) => range.outsideRange), [0, 50, 50]);
+
+  const syncDiagnostics = diagnostics({ seen: 100, duplicates: 100, errors: result.diagnostics.truncated });
+  syncDiagnostics.accounts.partial = 1;
+  syncDiagnostics.statements.truncated = result.diagnostics.truncated;
+  const syncResult = bankSyncResult(syncDiagnostics, 0);
+  assert.equal(syncResult.outcome, "partial");
+});
+
+test("операция без валидной даты сохраняется, но не даёт ложное полное покрытие", async () => {
+  const transaction = { transactionId: "missing-date", documentProcessDate: "2026-02-30" };
+  const result = await collectStatementTransactions({
+    startDate: "2026-07-20",
+    endDate: "2026-07-20",
+    fetchRange: async () => ({ status: "Ready", Transaction: [transaction] }),
+  });
+
+  assert.deepEqual(result.transactions, [transaction]);
+  assert.equal(result.diagnostics.ranges[0].missingDateCount, 1);
+  assert.equal(result.diagnostics.ranges[0].outsideRange, 0);
+  assert.equal(result.diagnostics.truncated, 1);
+});
+
 test("общий BFS-бюджет возвращает неиспользованные запросы насыщенной правой половине", async () => {
   const allTransactions = Array.from({ length: 15 * 99 }, (_, index) => ({
     transactionId: `skew-${index}`,
     day: 16 + Math.floor(index / 99),
+    documentProcessDate: `2026-07-${16 + Math.floor(index / 99)}`,
   }));
   const result = await collectStatementTransactions({
     startDate: "2026-07-01",
@@ -166,6 +262,7 @@ test("два счёта динамически делят 32 запроса не
   const allTransactions = Array.from({ length: 15 * 99 }, (_, index) => ({
     transactionId: `multi-${index}`,
     day: 16 + Math.floor(index / 99),
+    documentProcessDate: `2026-07-${16 + Math.floor(index / 99)}`,
   }));
   const denseFetch = async (startDate, endDate) => {
     if (endDate <= "2026-07-15") return { status: "Ready", Transaction: [] };
