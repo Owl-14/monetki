@@ -1,7 +1,7 @@
 export const ENTITIES = [
   "businesses", "memberships", "businessOwners",
   "employees", "clients", "venues", "players",
-  "tasks", "finance", "staffExpenses", "cash", "notifications",
+  "tasks", "finance", "staffExpenses", "cash", "notifications", "bankTransactions",
 ];
 
 export const CORE_ENTITIES = ["businesses", "memberships", "businessOwners"];
@@ -125,6 +125,7 @@ export function visibleBootstrapData(user, data, bankBalance = null) {
     players: scopedItems(data.players),
     tasks: scopedItems(data.tasks).filter((task) => admin || task.assigneeId === user.id),
     finance: scopedItems(data.finance).filter((item) => admin || item.employeeId === user.id),
+    bankTransactions: admin ? (data.bankTransactions || []) : [],
     staffExpenses: scopedItems(data.staffExpenses).filter((item) => admin || item.employeeId === user.id),
     cash: admin ? data.cash : data.cash.filter((item) => item.employeeId === user.id),
     bankBalance: admin ? bankBalance : null,
@@ -133,6 +134,7 @@ export function visibleBootstrapData(user, data, bankBalance = null) {
 }
 
 export function baseWriteError(user, entity) {
+  if (entity === "bankTransactions") return "Банковскую операцию можно только провести";
   if (!ENTITIES.includes(entity)) return "Неизвестная сущность";
   if ([...CORE_ENTITIES, "employees", "finance", "cash"].includes(entity) && !isAdmin(user)) {
     return "Только для админа";

@@ -31,6 +31,7 @@ jobs:
           migration_files=(
             "supabase/migrations/002_schedule_tochka_sync.sql"
             "supabase/migrations/003_tochka_sync_lease.sql"
+            "supabase/migrations/004_process_bank_transaction.sql"
           )
           api_url="https://api.supabase.com/v1/projects/${SUPABASE_PROJECT_ID}/database/query"
           request_file="${RUNNER_TEMP}/migration-request.json"

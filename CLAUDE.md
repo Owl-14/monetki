@@ -14,7 +14,7 @@
 | Банк | API Точка Банка (enter.tochka.com/uapi) | выписка + баланс, cron каждый час в :05 (pg_cron → функция) |
 
 - RLS включён без политик: с anon-ключом данные недоступны, всё ходит только через функцию `api` (service role).
-- Секреты `TOCHKA_TOKEN`, `TOCHKA_UNIT`, `TOCHKA_SYNC_SECRET` — в Edge Function Secrets (в репо их нет и быть не должно). Копия `TOCHKA_SYNC_SECRET` для pg_cron хранится зашифрованной в Supabase Vault.
+- Секреты `TOCHKA_TOKEN`, `TOCHKA_SYNC_SECRET` — в Edge Function Secrets (в репо их нет и быть не должно). Копия `TOCHKA_SYNC_SECRET` для pg_cron хранится зашифрованной в Supabase Vault. Прежний `TOCHKA_UNIT` больше не используется: бизнес назначается администратором при проведении операции из очереди.
 - Старый бэкенд (Google Apps Script, `google-apps-script/Code.gs`) — выключенный архив, не трогать.
 
 ## Файлы фронтенда
@@ -35,6 +35,7 @@ POST на `backendUrl`, `Content-Type: text/plain` (чтобы без preflight)
 `comment{taskId,text}`, `import_players{rows}`, `mark_read{ids}`, `resolve_expense{id,how}` (how: `bank`|`cash:savva`|`cash:andrey`),
 `upload_file{b64}` / `get_file{id}` (фото чеков), `status` (диагностика без авторизации, без личных данных),
 `tochka_sync{token,days}` (только активный администратор; pg_cron вместо личного токена передаёт отдельный секрет в заголовке),
+`process_bank_transaction{id,businessId,category}` (только администратор; атомарно проводит запись из банковской очереди),
 `migrate_import{data}` (без токена только пока база пустая).
 
 ## Модель данных (entity → поля в data)
@@ -48,6 +49,7 @@ POST на `backendUrl`, `Content-Type: text/plain` (чтобы без preflight)
 - `players` (padel): name, phone, level, notes; импорт вставкой из Excel
 - `tasks`: assigneeId, authorId, status `new`(«Не видел», красный)`|progress|question`(жёлтый)`|done`, priority, due, comments[]
 - `finance`: unit, date, type `income|expense`, amount, method `account|card|sbp|cash|other`, source `bank|manual`, category, counterparty, comment, bankId (дедуп банка), employeeId (зарплата/компенсация), owner (`savva|andrey|dmitry` — чей расход)
+- `bankTransactions`: необработанная очередь банка; id, bankId, date, type, amount, method, source `bank`, counterparty, comment, created, updated. До проведения намеренно нет `businessId`/`unit`/`category`, поэтому запись не участвует в отчётах и личных счетах. В bootstrap очередь получает только администратор; обычный CRUD запрещён.
 - `staffExpenses`: траты сотрудников; receiptId (фото чека, обязателен), status `pending`(красный)`|returned_cash|returned_bank|returned_salary`(зелёные)
 - `cash`: наличные кассы владельцев (owner), в общую статистику НЕ входят; employeeId — если выплата сотруднику
 - `files`: {id, b64, byId} — фото чеков; НЕ отдаются в bootstrap, только через get_file
@@ -69,7 +71,8 @@ POST на `backendUrl`, `Content-Type: text/plain` (чтобы без preflight)
   Разработка 50/50 Савва/Андрей; Падел 34% Андрей / 33% Савва / 33% Дмитрий.
   Расход с `owner` вычитается целиком у него (не делится); категория «Перевод между счетами» игнорируется; cash не участвует.
 - Зарплата: в форме операции категория «Зарплата» + сотрудник → выбор источника (счёт / наличные Саввы / наличные Андрея) и зачёт pending-трат (`offsetIds`): сервер уменьшает сумму, создаёт строку «Компенсация сотруднику», траты → `returned_salary`.
-- Синхронизация Точки: `tochkaSync` в функции — выписка за N дней (по умолчанию 30), дедуп по bankId, классификация способа оплаты (`classifyMethod`: transactionTypeCode «Банковские карты», schemeName RU.CBR.PAN/CellphoneNumber, потом текстовые эвристики), баланс из /balances (суммы как отдаёт банк, знак НЕ переворачивать!).
+- Синхронизация Точки: `tochkaSync` в функции — выписка за N дней (по умолчанию 30), дедуп по bankId одновременно по старым `finance` и новой очереди `bankTransactions`, классификация способа оплаты (`classifyMethod`: transactionTypeCode «Банковские карты», schemeName RU.CBR.PAN/CellphoneNumber, потом текстовые эвристики), баланс из /balances (суммы как отдаёт банк, знак НЕ переворачивать!). Новая завершённая операция попадает только в `bankTransactions`; старые `finance` не мигрируют и считаются уже проведёнными.
+- Проведение необработанной операции: администратор назначает активный доступный бизнес и категорию. SQL-функция из `004_process_bank_transaction.sql` под блокировкой и в одной транзакции сохраняет исходный `bankId`, создаёт `finance` и удаляет очередь. Повторный запрос, двойной клик и уже существующий legacy-`finance.bankId` не создают дубль.
 - Диагностика выписки содержит только безопасные границы и счётчики: по каждому запросу `requestedStart`/`requestedEnd`, `count`, раннюю/позднюю валидную `documentProcessDate`, число отсутствующих или неверных дат и `outsideRange`; по запуску — `rawSeen`/`uniqueSeen` и крайние даты. Ответы банка, суммы, контрагенты, `accountId`, `bankId` в диагностику не добавлять. Операции вне диапазона или без валидной даты не теряются, но синхронизация считается частичной и не обновляет `LAST_SYNC`.
 - Доступ к `tochka_sync`: ручной вызов разрешён только активному администратору с личным `token`; cron использует `X-Tochka-Sync-Secret`, общий только для Edge Function Secret и Vault. Настройка и ротация — только ручным workflow `configure-tochka-sync-secret.yml`; значение не хранится в repo и не выводится.
 

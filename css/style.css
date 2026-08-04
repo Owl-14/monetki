@@ -234,9 +234,19 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .finance-context-copy i { color: var(--muted); font-style: normal; padding-inline: 4px; }
 .finance-context .btn { background: var(--surface); }
 
+.bank-pending-row { border-left: 3px solid color-mix(in srgb, var(--accent) 68%, var(--line)); }
+.bank-pending-row .btn { flex: 0 0 auto; }
+.bank-pending-summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px; }
+.bank-pending-summary > div { display: flex; flex-direction: column; gap: 2px; padding: 11px 12px; border-radius: 11px; background: var(--surface2); }
+.bank-pending-summary span { color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; }
+.bank-pending-summary strong { overflow-wrap: anywhere; }
+.bank-pending-summary strong.green { color: var(--green); }
+.bank-pending-summary strong.red { color: var(--red); }
+
 @media (max-width: 560px) {
   .finance-context { align-items: flex-start; flex-wrap: wrap; }
   .finance-context .btn { width: 100%; justify-content: center; }
+  .bank-pending-row .btn { width: 100%; justify-content: center; }
 }
 
 input[type="text"], input[type="search"], input[type="number"], input[type="date"], input[type="password"], input[type="tel"], input[type="url"], select, textarea {

@@ -6,6 +6,7 @@ on:
     paths:
       - "supabase/functions/**"
       - "supabase/migrations/003_tochka_sync_lease.sql"
+      - "supabase/migrations/004_process_bank_transaction.sql"
       - "supabase/config.toml"
       - ".github/workflows/deploy-backend.yml"
   workflow_dispatch:
@@ -18,16 +19,23 @@ jobs:
       - uses: supabase/setup-cli@v1
         with:
           version: latest
-      - name: Применить аренду синхронизации Точки
+      - name: Применить серверные банковские функции
         shell: bash
         run: |
           set -euo pipefail
-          migration_file="supabase/migrations/003_tochka_sync_lease.sql"
+          migration_files=(
+            "supabase/migrations/003_tochka_sync_lease.sql"
+            "supabase/migrations/004_process_bank_transaction.sql"
+          )
           database_url="https://api.supabase.com/v1/projects/${SUPABASE_PROJECT_ID}/database/query"
           request_file="${RUNNER_TEMP}/tochka-lease-migration-request.json"
           response_file="${RUNNER_TEMP}/tochka-lease-migration-response.json"
-          test -s "${migration_file}"
-          jq -n --rawfile query "${migration_file}" '{query: $query}' > "${request_file}"
+          migration_query=""
+          for migration_file in "${migration_files[@]}"; do
+            test -s "${migration_file}"
+            migration_query+="$(<"${migration_file}")"$'\n'
+          done
+          jq -n --arg query "${migration_query}" '{query: $query}' > "${request_file}"
           status_code="$(curl --silent --show-error \
             --output "${response_file}" \
             --write-out '%{http_code}' \
@@ -37,7 +45,7 @@ jobs:
             --header "Content-Type: application/json" \
             --data-binary "@${request_file}")"
           if [[ "${status_code}" != "201" ]]; then
-            echo "Не удалось применить аренду синхронизации: Management API вернул HTTP ${status_code}." >&2
+            echo "Не удалось применить серверные банковские функции: Management API вернул HTTP ${status_code}." >&2
             exit 1
           fi
         env:

@@ -76,7 +76,7 @@ function legacyBusinessIds(employee) {
 
 function ensureCoreData(db) {
   let changed = false;
-  ['businesses', 'memberships', 'businessOwners', 'staffExpenses', 'cash', 'files'].forEach((key) => {
+  ['businesses', 'memberships', 'businessOwners', 'staffExpenses', 'cash', 'files', 'bankTransactions'].forEach((key) => {
     if (!Array.isArray(db[key])) { db[key] = []; changed = true; }
   });
   DEFAULT_BUSINESSES.forEach((business) => {
@@ -258,6 +258,10 @@ function seedData() {
       { id: uid(), unit: 'padel', date: d(-3), type: 'expense', amount: 14000, method: 'card', source: 'manual', category: 'Аренда', counterparty: 'Padel Arena', comment: 'PADEL KLUB корты на турнир', bankId: '' },
       { id: uid(), unit: 'dev', date: d(-6), type: 'expense', amount: 3500, method: 'card', source: 'manual', category: 'Сервисы', counterparty: 'Хостинг', comment: '', bankId: '' }
     ],
+    bankTransactions: [
+      { id: 'bank-demo-income', bankId: 'demo-bank-income', date: d(-1), type: 'income', amount: 42000, method: 'account', source: 'bank', counterparty: 'ООО «Север»', comment: 'Оплата по счёту', created: now, updated: now },
+      { id: 'bank-demo-expense', bankId: 'demo-bank-expense', date: d(-2), type: 'expense', amount: 6900, method: 'card', source: 'bank', counterparty: 'Магазин инвентаря', comment: 'Покупка оборудования', created: now, updated: now }
+    ],
     notifications: [
       { id: uid(), toId: 'u-admin', text: 'Демо-режим: это пример уведомления. Подключите базу — и они станут настоящими.', link: '#/tasks', read: false, created: now }
     ]
@@ -269,7 +273,7 @@ const LS_KEY = 'monetki_demo_db';
 const CORE_ENTITIES = ['businesses', 'memberships', 'businessOwners'];
 const BUSINESS_SCOPED_ENTITIES = ['clients', 'venues', 'players', 'tasks', 'finance', 'staffExpenses'];
 const LOCAL_ENTITIES = [
-  ...CORE_ENTITIES, 'employees', ...BUSINESS_SCOPED_ENTITIES, 'cash', 'files', 'notifications'
+  ...CORE_ENTITIES, 'employees', ...BUSINESS_SCOPED_ENTITIES, 'bankTransactions', 'cash', 'files', 'notifications'
 ];
 
 function membershipsOf(db, employeeId) {
@@ -376,6 +380,7 @@ export class LocalStore {
         players: db.players.filter(canSee),
         tasks: db.tasks.filter((t) => canSee(t) && (isAdmin || t.assigneeId === u.id)),
         finance: db.finance.filter((f) => canSee(f) && (isAdmin || f.employeeId === u.id)),
+        bankTransactions: isAdmin ? db.bankTransactions : [],
         staffExpenses: db.staffExpenses.filter((e) => canSee(e) && (isAdmin || e.employeeId === u.id)),
         cash: isAdmin ? db.cash : db.cash.filter((c) => c.employeeId === u.id),
         bankBalance: isAdmin ? { amount: 175000, updated: new Date().toISOString() } : null,
@@ -386,8 +391,9 @@ export class LocalStore {
 
   _baseWriteError(u, entity) {
     if (!LOCAL_ENTITIES.includes(entity) || entity === 'files') return 'Неизвестная сущность';
+    if (entity === 'bankTransactions') return 'Банковскую операцию можно только провести';
     if (entity === 'notifications') return 'Нельзя';
-    if ([...CORE_ENTITIES, 'employees', 'finance', 'cash'].includes(entity) && u.role !== 'admin') return 'Только для админа';
+    if ([...CORE_ENTITIES, 'employees', 'finance', 'bankTransactions', 'cash'].includes(entity) && u.role !== 'admin') return 'Только для админа';
     return null;
   }
 
@@ -624,6 +630,60 @@ export class LocalStore {
     };
   }
 
+  async processBankTransaction(token, id, businessId, category) {
+    const u = this._user(token);
+    if (!u || u.role !== 'admin') return { ok: false, error: 'Только для админа' };
+    const db = this._db();
+    id = String(id || '').trim();
+    businessId = String(businessId || '').trim();
+    category = String(category || '').trim();
+    if (!id) return { ok: false, error: 'Не указана банковская операция' };
+    if (!businessId) return { ok: false, error: 'Не указан бизнес' };
+    if (!category || category.length > 120) return { ok: false, error: 'Не указана категория' };
+    const accessError = this._scopeWriteError(db, u, { businessId, unit: businessId });
+    if (accessError) return { ok: false, error: accessError };
+    const transaction = db.bankTransactions.find((item) => item.id === id);
+    if (!transaction) {
+      const alreadyProcessed = db.finance.find((item) => item.id === `bank:${id}`);
+      return alreadyProcessed
+        ? { ok: true, item: alreadyProcessed, alreadyProcessed: true }
+        : { ok: false, error: 'Не найдено' };
+    }
+
+    // Старые проведённые операции с тем же bankId остаются источником истины.
+    // Очередь очищается, но финансовый дубль не создаётся.
+    const financeId = `bank:${transaction.id}`;
+    const existing = db.finance.find((item) => item.id === financeId || (transaction.bankId && item.bankId === transaction.bankId));
+    if (existing) {
+      db.bankTransactions = db.bankTransactions.filter((item) => item.id !== id);
+      this._save(db);
+      return { ok: true, item: existing, alreadyProcessed: true };
+    }
+
+    const now = Date.now();
+    const item = {
+      id: financeId,
+      businessId,
+      unit: businessId,
+      date: transaction.date,
+      type: transaction.type,
+      amount: transaction.amount,
+      method: transaction.method || 'account',
+      source: 'bank',
+      category,
+      counterparty: transaction.counterparty || '',
+      comment: transaction.comment || '',
+      bankId: transaction.bankId,
+      bankQueueId: transaction.id,
+      created: transaction.created || now,
+      updated: now
+    };
+    db.finance.push(item);
+    db.bankTransactions = db.bankTransactions.filter((entry) => entry.id !== id);
+    this._save(db);
+    return { ok: true, item };
+  }
+
   async migrateImport(token, data) {
     const u = this._user(token);
     const db = this._db();
@@ -697,6 +757,7 @@ class RemoteStore {
   resolveExpense(token, id, how) { return this._call({ action: 'resolve_expense', token, id, how }); }
   status() { return this._call({ action: 'status' }); }
   tochkaSync(token, days = 30) { return this._call({ action: 'tochka_sync', token, days }); }
+  processBankTransaction(token, id, businessId, category) { return this._call({ action: 'process_bank_transaction', token, id, businessId, category }); }
   migrateImport(token, data) { return this._call({ action: 'migrate_import', token, data }); }
   uploadFile(token, b64) { return this._call({ action: 'upload_file', token, b64 }); }
   getFile(token, id) { return this._call({ action: 'get_file', token, id }); }
