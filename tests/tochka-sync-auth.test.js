@@ -79,6 +79,10 @@ test("workflow ротации использует Management API и не сод
   assert.doesNotMatch(vaultReadBlock, /\/read-only/);
   assert.doesNotMatch(workflow, /\$\{database_url\}\/read-only/);
   assert.match(workflow, /\/secrets"/);
+  assert.match(workflow, /X-Tochka-Sync-Secret: \$\{tochka_sync_secret\}/);
+  assert.match(workflow, /\{"action":"tochka_sync","days":30\}/);
+  assert.match(workflow, /jq -c '\{added, outcome, diagnostics\}'/);
+  assert.doesNotMatch(workflow, /cat\s+"?\$\{sync_response\}/);
   assert.match(workflow, /vault\.(create_secret|update_secret)/);
   assert.match(workflow, /002_schedule_tochka_sync\.sql/);
   assert.match(workflow, /::add-mask::/);
