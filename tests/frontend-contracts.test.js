@@ -40,15 +40,15 @@ test('business admin остаётся в app.js и привязан к наст�
   assert.match(app, /option value="manager"[^>]*membership\?\.role === 'manager'/);
 });
 
-test('PWA v18 кэширует entrypoint и оба новых модуля', async () => {
+test('PWA v19 кэширует entrypoint и оба новых модуля', async () => {
   const sw = await read('../sw.js');
 
-  assert.match(sw, /const CACHE = 'monetki-v18'/);
+  assert.match(sw, /const CACHE = 'monetki-v19'/);
   for (const path of ['./js/app.js', './js/app-state.js', './js/store.js', './js/ui.js']) {
     assert.match(sw, new RegExp(`['"]${path.replaceAll('.', '\\.')}['"]`));
   }
 });
 
-test('механический релиз получает patch-версию config', async () => {
-  assert.match(await read('../config.js'), /version:\s*"0\.4\.1"/);
+test('текущий релиз получает patch-версию config', async () => {
+  assert.match(await read('../config.js'), /version:\s*"0\.4\.2"/);
 });

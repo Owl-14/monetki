@@ -24,6 +24,22 @@ export const EXPENSE_UNITS = ["padel"];
 
 export const isAdmin = (user) => user.role === "admin";
 
+function equalCronSecrets(provided, configured) {
+  const left = String(provided || "");
+  const right = String(configured || "");
+  if (!/^[a-f0-9]{64}$/.test(left) || !/^[a-f0-9]{64}$/.test(right)) return false;
+
+  let different = 0;
+  for (let i = 0; i < left.length; i++) different |= left.charCodeAt(i) ^ right.charCodeAt(i);
+  return different === 0;
+}
+
+export function tochkaSyncAccess(user, providedCronSecret, configuredCronSecret) {
+  if (user && isAdmin(user)) return "admin";
+  if (equalCronSecrets(providedCronSecret, configuredCronSecret)) return "cron";
+  return null;
+}
+
 export const canSeeUnit = (user, unit) =>
   isAdmin(user) || user.unit === "all" || user.unit === unit;
 

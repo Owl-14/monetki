@@ -4,5 +4,5 @@
 window.MONETKI_CONFIG = {
   backendUrl: "https://pmntdxwdsrdtaindabqb.supabase.co/functions/v1/api",
   appName: "Монетки",
-  version: "0.4.1"
+  version: "0.4.2"
 };

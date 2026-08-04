@@ -26,6 +26,7 @@ import {
   scopeMismatch,
   scopeWriteError,
   sumBankBalances,
+  tochkaSyncAccess,
   validateCoreEntity,
   visibleBootstrapData,
 } from "./rules.js";
@@ -37,7 +38,7 @@ const db = createClient(
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "content-type",
+  "Access-Control-Allow-Headers": "content-type, x-tochka-sync-secret",
   "Content-Type": "application/json",
 };
 
@@ -680,6 +681,13 @@ Deno.serve(async (req) => {
     }
     if (action === "status") return json(await statusInfo(await findUser(body.token)));
     if (action === "tochka_sync") {
+      const user = await findUser(body.token);
+      const access = tochkaSyncAccess(
+        user,
+        req.headers.get("x-tochka-sync-secret"),
+        Deno.env.get("TOCHKA_SYNC_SECRET"),
+      );
+      if (!access) return json({ ok: false, error: "auth" }, 401);
       return json(await runTochkaSync(body.days || 30));
     }
     if (action === "migrate_import") {
@@ -709,6 +717,6 @@ Deno.serve(async (req) => {
   }
 });
 
-function json(obj: unknown) {
-  return new Response(JSON.stringify(obj), { headers: CORS });
+function json(obj: unknown, status = 200) {
+  return new Response(JSON.stringify(obj), { status, headers: CORS });
 }

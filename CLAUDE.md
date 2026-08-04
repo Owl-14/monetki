@@ -14,7 +14,7 @@
 | Банк | API Точка Банка (enter.tochka.com/uapi) | выписка + баланс, cron каждый час в :05 (pg_cron → функция) |
 
 - RLS включён без политик: с anon-ключом данные недоступны, всё ходит только через функцию `api` (service role).
-- Секреты `TOCHKA_TOKEN`, `TOCHKA_UNIT` — в Edge Function Secrets (в репо их нет и быть не должно).
+- Секреты `TOCHKA_TOKEN`, `TOCHKA_UNIT`, `TOCHKA_SYNC_SECRET` — в Edge Function Secrets (в репо их нет и быть не должно). Копия `TOCHKA_SYNC_SECRET` для pg_cron хранится зашифрованной в Supabase Vault.
 - Старый бэкенд (Google Apps Script, `google-apps-script/Code.gs`) — выключенный архив, не трогать.
 
 ## Файлы фронтенда
@@ -34,7 +34,8 @@ POST на `backendUrl`, `Content-Type: text/plain` (чтобы без preflight)
 Действия: `login{code}`, `bootstrap` (все данные с учётом прав), `create/update/delete{entity,item|id}`,
 `comment{taskId,text}`, `import_players{rows}`, `mark_read{ids}`, `resolve_expense{id,how}` (how: `bank`|`cash:savva`|`cash:andrey`),
 `upload_file{b64}` / `get_file{id}` (фото чеков), `status` (диагностика без авторизации, без личных данных),
-`tochka_sync{days}`, `migrate_import{data}` (без токена только пока база пустая).
+`tochka_sync{token,days}` (только активный администратор; pg_cron вместо личного токена передаёт отдельный секрет в заголовке),
+`migrate_import{data}` (без токена только пока база пустая).
 
 ## Модель данных (entity → поля в data)
 
@@ -69,6 +70,7 @@ POST на `backendUrl`, `Content-Type: text/plain` (чтобы без preflight)
   Расход с `owner` вычитается целиком у него (не делится); категория «Перевод между счетами» игнорируется; cash не участвует.
 - Зарплата: в форме операции категория «Зарплата» + сотрудник → выбор источника (счёт / наличные Саввы / наличные Андрея) и зачёт pending-трат (`offsetIds`): сервер уменьшает сумму, создаёт строку «Компенсация сотруднику», траты → `returned_salary`.
 - Синхронизация Точки: `tochkaSync` в функции — выписка за N дней (по умолчанию 30), дедуп по bankId, классификация способа оплаты (`classifyMethod`: transactionTypeCode «Банковские карты», schemeName RU.CBR.PAN/CellphoneNumber, потом текстовые эвристики), баланс из /balances (суммы как отдаёт банк, знак НЕ переворачивать!).
+- Доступ к `tochka_sync`: ручной вызов разрешён только активному администратору с личным `token`; cron использует `X-Tochka-Sync-Secret`, общий только для Edge Function Secret и Vault. Настройка и ротация — только ручным workflow `configure-tochka-sync-secret.yml`; значение не хранится в repo и не выводится.
 
 ## Процесс изменений (ВАЖНО)
 
