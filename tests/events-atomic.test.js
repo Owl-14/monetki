@@ -6,7 +6,7 @@ const read = (path) => readFile(new URL(path, import.meta.url), "utf8");
 
 test("финансовые распределения создаются атомарным RPC и защищены триггером", async () => {
   const [migration, actions, events] = await Promise.all([
-    read("../supabase/migrations/006_atomic_event_finance.sql"),
+    read("../supabase/migrations/007_atomic_event_finance.sql"),
     read("../supabase/functions/api/actions.ts"),
     read("../supabase/functions/api/events.ts"),
   ]);
@@ -32,7 +32,7 @@ test("финансовые распределения создаются ато�
 });
 
 test("закрытие расчёта фиксирует снимок, историю и блокирует тихое переписывание", async () => {
-  const migration = await read("../supabase/migrations/006_atomic_event_finance.sql");
+  const migration = await read("../supabase/migrations/007_atomic_event_finance.sql");
   assert.match(migration, /create or replace function public\.event_close_settlement/);
   assert.match(migration, /Событие уже изменено другим запросом/);
   assert.match(migration, /settlementStatus', 'closed'/);
@@ -44,7 +44,8 @@ test("закрытие расчёта фиксирует снимок, исто�
 test("миграция событий выполняется до публикации backend", async () => {
   const workflow = await read("../.github/workflows/deploy-backend.yml");
   const previous = workflow.indexOf("005_process_bank_transaction.sql");
-  const events = workflow.indexOf("006_atomic_event_finance.sql");
+  const recovery = workflow.indexOf("006_recover_hidden_bank_transactions.sql");
+  const events = workflow.indexOf("007_atomic_event_finance.sql");
   const deploy = workflow.indexOf("supabase functions deploy api");
-  assert.ok(previous >= 0 && events > previous && deploy > events);
+  assert.ok(previous >= 0 && recovery > previous && events > recovery && deploy > events);
 });

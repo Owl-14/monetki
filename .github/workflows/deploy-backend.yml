@@ -8,7 +8,8 @@ on:
       - "supabase/migrations/003_tochka_sync_lease.sql"
       - "supabase/migrations/004_atomic_stock_operations.sql"
       - "supabase/migrations/005_process_bank_transaction.sql"
-      - "supabase/migrations/006_atomic_event_finance.sql"
+      - "supabase/migrations/006_recover_hidden_bank_transactions.sql"
+      - "supabase/migrations/007_atomic_event_finance.sql"
       - "supabase/config.toml"
       - ".github/workflows/deploy-backend.yml"
   workflow_dispatch:
@@ -29,7 +30,8 @@ jobs:
             "supabase/migrations/003_tochka_sync_lease.sql"
             "supabase/migrations/004_atomic_stock_operations.sql"
             "supabase/migrations/005_process_bank_transaction.sql"
-            "supabase/migrations/006_atomic_event_finance.sql"
+            "supabase/migrations/006_recover_hidden_bank_transactions.sql"
+            "supabase/migrations/007_atomic_event_finance.sql"
           )
           database_url="https://api.supabase.com/v1/projects/${SUPABASE_PROJECT_ID}/database/query"
           request_file="${RUNNER_TEMP}/tochka-lease-migration-request.json"

@@ -1910,6 +1910,17 @@ function renderFinBank(tabsHtml) {
   const period = S.finPeriod || 'month';
   const monthName = new Date(month + '-01').toLocaleDateString('ru-RU', { month: 'long', year: 'numeric' });
   const periodName = period === 'all' ? 'всё время' : monthName;
+  const diagnostics = S.data.bankDiagnostics || {};
+  const queueDiagnostics = diagnostics.queue || { count: (S.data.bankTransactions || []).length, earliestDate: null, latestDate: null };
+  const hiddenInvalid = Number(diagnostics.hiddenInvalidScope?.count || 0);
+  const hiddenInvalidWithoutBankId = Number(diagnostics.hiddenInvalidScopeWithoutBankId?.count || 0);
+  const hiddenInvalidRecoverable = Math.max(0, hiddenInvalid - hiddenInvalidWithoutBankId);
+  const hiddenArchived = Number(diagnostics.hiddenArchivedScope?.count || 0);
+  const hiddenInaccessible = Number(diagnostics.hiddenInaccessibleScope?.count || 0);
+  const hiddenTotal = hiddenInvalid + hiddenArchived + hiddenInaccessible;
+  const queueDates = queueDiagnostics.earliestDate
+    ? `${fmtDate(queueDiagnostics.earliestDate)} — ${fmtDate(queueDiagnostics.latestDate || queueDiagnostics.earliestDate)}`
+    : 'нет дат';
   const list = (S.data.bankTransactions || [])
     .filter((item) => period === 'all' || (item.date || '').startsWith(month))
     .sort((a, b) => (b.date || '').localeCompare(a.date || ''));
@@ -1936,6 +1947,13 @@ function renderFinBank(tabsHtml) {
         <strong>Все бизнесы <i>·</i> ${esc(periodName)} <i>·</i> до проведения не входит в доходы и расходы</strong>
       </div>
     </div>
+    <div class="banner" data-bank-diagnostics data-queue-count="${Number(queueDiagnostics.count || 0)}" data-hidden-count="${hiddenTotal}" data-blocked-count="${hiddenInvalidWithoutBankId}">
+      Диагностика загрузки: в очереди ${Number(queueDiagnostics.count || 0)}, период ${esc(queueDates)}; скрыто фильтрами ${hiddenTotal}.
+    </div>
+    ${hiddenInvalidRecoverable ? `<div class="banner warn">Обнаружено ${hiddenInvalidRecoverable} банковских операций с неверным бизнесом. Обновление сервера должно вернуть их в очередь.</div>` : ''}
+    ${hiddenInvalidWithoutBankId ? `<div class="banner warn">Из них ${hiddenInvalidWithoutBankId} операций нельзя восстановить автоматически: отсутствует банковский идентификатор. Нужна ручная проверка.</div>` : ''}
+    ${hiddenArchived ? `<div class="banner">В архивных бизнесах остаётся ${hiddenArchived} банковских операций.</div>` : ''}
+    ${hiddenInaccessible ? `<div class="banner warn">Для ${hiddenInaccessible} банковских операций у администратора нет доступа к бизнесу.</div>` : ''}
     <div class="searchbar">
       ${period === 'month' ? `
       <button class="btn small" id="bank-m-prev" aria-label="Предыдущий месяц">←</button>
