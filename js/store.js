@@ -934,6 +934,9 @@ export class LocalStore {
       const mismatch = scopeError(item);
       if (mismatch) return { ok: false, error: mismatch };
       const targetBusinessId = item.businessId || item.unit || businessIdOf(before);
+      if (STOCK_ENTITIES.includes(entity) && targetBusinessId !== businessIdOf(before)) {
+        return { ok: false, error: 'Нельзя перенести складскую запись в другой бизнес' };
+      }
       const target = { businessId: targetBusinessId, unit: targetBusinessId };
       const targetError = STOCK_ENTITIES.includes(entity) ? this._stockWriteError(db, u, target) : this._scopeWriteError(db, u, target);
       if (targetError) return { ok: false, error: targetError };
@@ -958,6 +961,9 @@ export class LocalStore {
     if (entity === 'stockItems') next = { ...next, costPrice: Number(next.costPrice), minStock: Number(next.minStock) };
     if (entity === 'reservations') next = { ...next, quantity: Number(next.quantity) };
     if (entity === 'inventories') next = { ...next, items: (next.items || []).map((row) => ({ ...row, actualQuantity: Number(row.actualQuantity) })) };
+    if (entity === 'reservations' && (before.warehouseId !== next.warehouseId || before.stockItemId !== next.stockItemId)) {
+      return { ok: false, error: 'Нельзя перенести резерв на другой склад или позицию' };
+    }
     const stockError = STOCK_ENTITIES.includes(entity) ? stockValidationError(db, entity, next, before.id) : null;
     if (stockError) return { ok: false, error: stockError };
     if (entity === 'reservations') {

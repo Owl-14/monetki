@@ -170,3 +170,26 @@ test('отключённый membership и архивный бизнес зак�
   assert.equal(local.data.stockMovements.some((item) => item.businessId === 'archive'), false);
   assert.equal(server.stockMovements.some((item) => item.businessId === 'archive'), false);
 });
+
+test('обновление склада не переносит запись между бизнесами и не меняет ссылку резерва', async () => {
+  const data = fixture();
+  data.businesses.find((business) => business.id === 'dev').modules.push('stock');
+  data.warehouses.push({ id: 'wh-padel-2', businessId: 'padel', unit: 'padel', name: 'Запасной', active: true });
+  data.stockItems.push({
+    id: 'item-padel-2', businessId: 'padel', unit: 'padel', name: 'Ракетки', sku: 'RACKET',
+    unitName: 'шт.', costPrice: 5000, minStock: 1, active: true,
+  });
+  const store = localStoreWith(data);
+
+  const movedBusiness = await store.update('demo:admin', 'warehouses', {
+    id: 'wh-padel', businessId: 'dev', unit: 'dev', name: 'Перенос', active: true,
+  });
+  assert.equal(movedBusiness.ok, false);
+  assert.match(movedBusiness.error, /другой бизнес/);
+
+  const movedReservation = await store.update('demo:admin', 'reservations', {
+    id: 'reserve-padel', warehouseId: 'wh-padel-2', stockItemId: 'item-padel-2', quantity: 2, status: 'active',
+  });
+  assert.equal(movedReservation.ok, false);
+  assert.match(movedReservation.error, /другой склад или позицию/);
+});

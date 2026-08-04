@@ -190,11 +190,11 @@ export async function createItem(u: Rec, entity: string, item: Rec) {
     if (item.type === "inventory") {
       return { ok: false, error: "Корректировка создаётся только завершением инвентаризации" };
     }
+    item.createdBy = u.id;
     return await createStockMovement(item);
   }
   if (entity === "reservations") {
-    const reservationResult = await applyReservationChange(null, item);
-    if (!reservationResult.ok) return reservationResult;
+    return await applyReservationChange(null, item);
   }
   if (entity === "inventories" && item.status === "completed") return await completeInventory(item);
   let offsets: { error?: string; sum?: number; titles?: string } = {};
@@ -292,8 +292,7 @@ export async function updateItem(u: Rec, entity: string, item: Rec) {
     if (stockDeny) return { ok: false, error: stockDeny };
   }
   if (entity === "reservations") {
-    const reservationResult = await applyReservationChange(before, merged);
-    if (!reservationResult.ok) return reservationResult;
+    return await applyReservationChange(before, merged);
   }
   if (entity === "inventories" && merged.status === "completed") return await completeInventory(merged);
   if (entity === "tasks") {
@@ -336,8 +335,7 @@ export async function deleteItem(u: Rec, entity: string, id: string) {
     if (catalogDeny) return { ok: false, error: catalogDeny };
   }
   if (entity === "reservations") {
-    const reservationResult = await applyReservationChange(before, null);
-    if (!reservationResult.ok) return reservationResult;
+    return await applyReservationChange(before, null);
   }
   if (entity === "businesses" && !hasBusinessAccess(access, before.id)) return { ok: false, error: "Нет доступа к этому бизнесу" };
   if (entity === "staffExpenses" && !isAdmin(u) && (before.employeeId !== u.id || before.status !== "pending")) {
