@@ -399,4 +399,6 @@ test("синхронизация неуспешна, если из-за ошиб
   assert.equal(result.ok, false);
   assert.equal(result.outcome, "failed");
   assert.equal(result.diagnostics.statements.notReady, 2);
+  assert.deepEqual(Object.keys(result).sort(), ["added", "diagnostics", "ok", "outcome"]);
+  assert.doesNotMatch(JSON.stringify(result), /token|authorization|responseBody|message/i);
 });

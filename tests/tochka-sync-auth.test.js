@@ -23,7 +23,7 @@ test("публичный tochka_sync отклоняется до запуска 
   assert.equal(tochkaSyncAccess(null, null, cronSecret), null);
   assert.equal(tochkaSyncAccess(null, otherSecret, cronSecret), null);
 
-  const apiSource = await readFile(new URL("../supabase/functions/api/index.ts", import.meta.url), "utf8");
+  const apiSource = await readFile(new URL("../supabase/functions/api/http.ts", import.meta.url), "utf8");
   const actionStart = apiSource.indexOf('if (action === "tochka_sync")');
   const actionEnd = apiSource.indexOf('if (action === "migrate_import")', actionStart);
   const actionBlock = apiSource.slice(actionStart, actionEnd);
@@ -65,7 +65,7 @@ test("cron проходит только с отдельным совпадаю�
 });
 
 test("банковская синхронизация обнаруживает возможное усечение и ограничивает разбиение", async () => {
-  const apiSource = await readFile(new URL("../supabase/functions/api/index.ts", import.meta.url), "utf8");
+  const apiSource = await readFile(new URL("../supabase/functions/api/bank.ts", import.meta.url), "utf8");
 
   const syncStart = apiSource.indexOf("async function tochkaSync");
   const accountsAt = apiSource.indexOf('tochkaFetch("/open-banking/v1.0/accounts"', syncStart);
@@ -86,15 +86,16 @@ test("банковская синхронизация обнаруживает �
   assert.match(apiSource, /transactions\.overall\.uniqueSeen\s*=\s*syncSeenIds\.size/);
   assert.match(apiSource, /statements\.outsideRange\s*\+=\s*statementDiagnostics\.outsideRange/);
   assert.match(apiSource, /result\.ok\s*&&\s*result\.outcome\s*!==\s*"partial"/);
-  const runStart = apiSource.indexOf("async function runTochkaSync");
-  const runEnd = apiSource.indexOf("// ---------- HTTP ----------", runStart);
+  const runStart = apiSource.indexOf("export async function runTochkaSync");
+  const runEnd = apiSource.length;
   const runBlock = apiSource.slice(runStart, runEnd);
   assert.match(runBlock, /error: "Синхронизация с Точка Банком не выполнена"/);
   assert.doesNotMatch(runBlock, /throw\s+error/);
+  assert.doesNotMatch(runBlock, /error\.message|console\.error|String\(_?error\)/);
 });
 
 test("параллельные запуски защищены атомарной арендой с безопасным перехватом", async () => {
-  const apiSource = await readFile(new URL("../supabase/functions/api/index.ts", import.meta.url), "utf8");
+  const apiSource = await readFile(new URL("../supabase/functions/api/bank.ts", import.meta.url), "utf8");
   const migration = await readFile(new URL("../supabase/migrations/003_tochka_sync_lease.sql", import.meta.url), "utf8");
   const deployWorkflow = await readFile(new URL("../.github/workflows/deploy-backend.yml", import.meta.url), "utf8");
   const applyWorkflow = await readFile(new URL("../.github/workflows/apply-bank-cron-migration.yml", import.meta.url), "utf8");
@@ -109,8 +110,8 @@ test("параллельные запуски защищены атомарно�
   assert.match(migration, /grant execute on function public\.release_tochka_sync_lease[\s\S]*to service_role/);
 
   assert.match(apiSource, /TOCHKA_SYNC_LEASE_SECONDS\s*=\s*210/);
-  const runStart = apiSource.indexOf("async function runTochkaSync");
-  const runEnd = apiSource.indexOf("// ---------- HTTP ----------", runStart);
+  const runStart = apiSource.indexOf("export async function runTochkaSync");
+  const runEnd = apiSource.length;
   const runBlock = apiSource.slice(runStart, runEnd);
   const acquireAt = runBlock.indexOf("acquireTochkaSyncLease(");
   const attemptAt = runBlock.indexOf('kvSet("LAST_SYNC_ATTEMPT"');

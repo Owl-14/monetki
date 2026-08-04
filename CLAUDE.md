@@ -9,7 +9,7 @@
 | Часть | Где | Технологии |
 |---|---|---|
 | Фронтенд (PWA) | корень репо → GitHub Pages, https://owl-14.github.io/monetki | ванильный JS (ES-модули), без сборки |
-| Бэкенд | `supabase/functions/api/index.ts` → Supabase Edge Function | Deno/TS, один HTTP-эндпоинт |
+| Бэкенд | `supabase/functions/api/index.ts` → Supabase Edge Function | Deno/TS, один HTTP-эндпоинт; логика разделена на `http`, `actions`, `auth/access`, `db/repositories`, `bank` |
 | База | Supabase Postgres, проект ref `pmntdxwdsrdtaindabqb` (Frankfurt) | одна таблица `records(entity, id, data jsonb)` + `kv(key, value)` |
 | Банк | API Точка Банка (enter.tochka.com/uapi) | выписка + баланс, cron каждый час в :05 (pg_cron → функция) |
 
@@ -77,7 +77,7 @@ POST на `backendUrl`, `Content-Type: text/plain` (чтобы без preflight)
 
 1. Ветка от `main` → изменения → **commit → push → PR → merge** (пользователь просил через PR, не пушить в main напрямую). `gh pr create` / `gh pr merge`.
 2. После merge в main всё деплоится само: фронт — GitHub Pages (~1 мин), бэкенд — Action `deploy-backend.yml` при изменении `supabase/**` (секреты в GitHub стоят). Вручную: `gh workflow run deploy-backend.yml`.
-3. Изменил фронт → подними `CACHE` в `sw.js`. Изменил права/протокол → поменяй И `LocalStore`, И `index.ts`.
+3. Изменил фронт → подними `CACHE` в `sw.js`. Изменил права/протокол → поменяй И `LocalStore`, И серверные модули `rules.js`/`auth`/`actions`/`http`.
 4. Проверка: демо-режим — `localStorage.setItem('monetki_backend','demo')` на localhost (коды: 111111 админ, 222222 падел, 333333 dev). Прод-диагностика: `POST {"action":"status"}` на backendUrl.
 5. Git identity: Owl-14 / savva.karetin0@gmail.com (уже в .git/config).
 
