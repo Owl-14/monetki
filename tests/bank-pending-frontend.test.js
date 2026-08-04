@@ -62,13 +62,40 @@ test('LocalStore мягко добавляет пустую очередь, не
 test('необработанные банковские операции доступны только администратору', async () => {
   const store = storeWith(fixture());
 
-  assert.equal((await store.bootstrap('demo:admin')).data.bankTransactions.length, 1);
-  assert.deepEqual((await store.bootstrap('demo:staff')).data.bankTransactions, []);
+  const admin = (await store.bootstrap('demo:admin')).data;
+  const staff = (await store.bootstrap('demo:staff')).data;
+  assert.equal(admin.bankTransactions.length, 1);
+  assert.equal(admin.bankDiagnostics.queue.count, 1);
+  assert.deepEqual(staff.bankTransactions, []);
+  assert.equal(staff.bankDiagnostics, null);
   assert.equal((await store.processBankTransaction('demo:staff', 'queue-1', 'padel', 'Прочее')).ok, false);
   const genericError = 'Банковскую операцию можно только провести';
   assert.equal((await store.create('demo:admin', 'bankTransactions', {})).error, genericError);
   assert.equal((await store.update('demo:admin', 'bankTransactions', { id: 'queue-1' })).error, genericError);
   assert.equal((await store.remove('demo:admin', 'bankTransactions', 'queue-1')).error, genericError);
+});
+
+test('bootstrap показывает безопасную диагностику скрытых банковских областей', async () => {
+  const data = fixture();
+  data.finance.push(
+    { id: 'hidden-all', businessId: 'all', unit: 'all', date: '2026-07-22', source: 'bank', amount: 10, bankId: 'hidden-all' },
+    { id: 'hidden-ghost', businessId: 'ghost', unit: 'ghost', date: '2026-08-04', source: 'bank', amount: 20, bankId: 'hidden-ghost' },
+  );
+  const result = (await storeWith(data).bootstrap('demo:admin')).data;
+
+  assert.equal(result.finance.some((item) => item.id === 'hidden-all' || item.id === 'hidden-ghost'), false);
+  assert.deepEqual(result.bankDiagnostics.hiddenInvalidScope, {
+    count: 2,
+    earliestDate: '2026-07-22',
+    latestDate: '2026-08-04'
+  });
+  assert.deepEqual(result.bankDiagnostics.hiddenInvalidScopeWithoutBankId, {
+    count: 0,
+    earliestDate: null,
+    latestDate: null
+  });
+  assert.equal(JSON.stringify(result.bankDiagnostics).includes('hidden-all'), false);
+  assert.equal(JSON.stringify(result.bankDiagnostics).includes('amount'), false);
 });
 
 test('проведение атомарно переносит запись в finance с выбранным бизнесом и категорией', async () => {
@@ -137,6 +164,10 @@ test('UI очереди не вставляет банковские идент�
   assert.match(source, /name="businessId" required/);
   assert.match(source, /name="category" required/);
   assert.match(source, /processBankTransaction/);
+  assert.match(source, /data-bank-diagnostics/);
+  assert.match(source, /data-queue-count/);
+  assert.match(source, /data-hidden-count/);
+  assert.match(source, /data-blocked-count/);
   assert.doesNotMatch(source, /transaction\.bankId|transaction\.accountId/);
   assert.doesNotMatch(source, /data-[^=]+="\$\{[^}]*\.(?:bankId|accountId)/);
 });

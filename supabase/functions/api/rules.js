@@ -148,6 +148,58 @@ export const hasBusinessAccess = (access, businessId) =>
 
 export const canSeeItem = (access, item) => hasBusinessAccess(access, businessIdOf(item));
 
+function safeBankDateBounds(items) {
+  const dates = (items || [])
+    .map((item) => String(item?.date || ""))
+    .filter((date) => {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return false;
+      const [year, month, day] = date.split("-").map(Number);
+      const parsed = new Date(Date.UTC(year, month - 1, day));
+      return parsed.getUTCFullYear() === year
+        && parsed.getUTCMonth() === month - 1
+        && parsed.getUTCDate() === day;
+    })
+    .sort();
+  return {
+    count: (items || []).length,
+    earliestDate: dates[0] || null,
+    latestDate: dates.at(-1) || null,
+  };
+}
+
+// Только безопасные счётчики и границы дат: без сумм, контрагентов,
+// банковских идентификаторов и названий счетов.
+export function bankScopeDiagnostics(user, data) {
+  if (!isAdmin(user)) return null;
+  const businesses = data.businesses || [];
+  const businessById = new Map(businesses.map((business) => [String(business.id), business]));
+  const access = accessSet(data.memberships || [], user.id);
+  const bankFinance = (data.finance || []).filter((item) => item?.source === "bank");
+  const invalid = [];
+  const invalidWithoutBankId = [];
+  const archived = [];
+  const inaccessible = [];
+
+  for (const item of bankFinance) {
+    const businessId = businessIdOf(item);
+    const business = businessById.get(businessId);
+    if (scopeMismatch(item) || !businessId || businessId === "all" || !business) {
+      invalid.push(item);
+      if (!item?.bankId) invalidWithoutBankId.push(item);
+    }
+    else if (business.active === false) archived.push(item);
+    else if (!hasBusinessAccess(access, businessId)) inaccessible.push(item);
+  }
+
+  return {
+    queue: safeBankDateBounds(data.bankTransactions || []),
+    hiddenInvalidScope: safeBankDateBounds(invalid),
+    hiddenInvalidScopeWithoutBankId: safeBankDateBounds(invalidWithoutBankId),
+    hiddenArchivedScope: safeBankDateBounds(archived),
+    hiddenInaccessibleScope: safeBankDateBounds(inaccessible),
+  };
+}
+
 export const profileOf = (user, memberships = []) => ({
   id: user.id,
   name: user.name,
@@ -233,6 +285,7 @@ export function visibleBootstrapData(user, data, bankBalance = null) {
     tasks: scopedItems(data.tasks).filter((task) => admin || task.assigneeId === user.id),
     finance: scopedItems(data.finance).filter((item) => admin || item.employeeId === user.id),
     bankTransactions: admin ? (data.bankTransactions || []) : [],
+    bankDiagnostics: admin ? bankScopeDiagnostics(user, data) : null,
     staffExpenses: scopedItems(data.staffExpenses).filter((item) => admin || item.employeeId === user.id),
     warehouses: stockItems(data.warehouses),
     stockItems: stockItems(data.stockItems),
