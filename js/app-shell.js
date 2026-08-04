@@ -10,7 +10,7 @@ export const NAV_GROUPS = [
 export const PAGE_META = {
   dashboard: { group: 'Обзор', subtitle: 'Главное по выбранному бизнесу' },
   tasks: { group: 'Работа', subtitle: 'Планы, сроки и обсуждения команды' },
-  clients: { group: 'Продажи', subtitle: 'Клиенты, статусы и история работы' },
+  clients: { group: 'Продажи', subtitle: 'Сделки, компании, контакты и входящие лиды' },
   venues: { group: 'Ресурсы', subtitle: 'Площадки, расписание и занятость' },
   players: { group: 'События', subtitle: 'База игроков и история участия' },
   finance: { group: 'Финансы', subtitle: 'Операции, остатки и взаиморасчёты' },
@@ -18,6 +18,19 @@ export const PAGE_META = {
   team: { group: 'Управление', subtitle: 'Сотрудники, роли и доступы' },
   settings: { group: 'Система', subtitle: 'Настройки приложения и бизнеса' },
 };
+
+export const CRM_TABS = [
+  { id: 'deals', label: 'Воронка' },
+  { id: 'companies', label: 'Компании' },
+  { id: 'contacts', label: 'Контакты' },
+  { id: 'leads', label: 'Лиды' },
+];
+
+export function crmTabFromHash(hash = '') {
+  const query = String(hash).split('?')[1] || '';
+  const requested = new URLSearchParams(query).get('tab');
+  return CRM_TABS.some((tab) => tab.id === requested) ? requested : CRM_TABS[0].id;
+}
 
 export const NAV_ICONS = {
   dashboard: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13h6V4H4v9Zm0 7h6v-4H4v4Zm10 0h6v-9h-6v9Zm0-16v4h6V4h-6Z"/></svg>',

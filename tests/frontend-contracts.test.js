@@ -107,17 +107,17 @@ test('финансы явно показывают бизнес и период 
   assert.doesNotMatch(finance, /55 операций|21\.07|04\.08/);
 });
 
-test('PWA v21 кэширует entrypoint и модули оболочки', async () => {
+test('PWA v22 кэширует entrypoint и модули оболочки', async () => {
   const sw = await read('../sw.js');
 
-  assert.match(sw, /const CACHE = 'monetki-v21'/);
+  assert.match(sw, /const CACHE = 'monetki-v22'/);
   for (const path of ['./js/app.js', './js/app-shell.js', './js/app-state.js', './js/store.js', './js/ui.js']) {
     assert.match(sw, new RegExp(`['"]${path.replaceAll('.', '\\.')}['"]`));
   }
 });
 
 test('текущий релиз получает patch-версию config', async () => {
-  assert.match(await read('../config.js'), /version:\s*"0\.4\.4"/);
+  assert.match(await read('../config.js'), /version:\s*"0\.4\.5"/);
 });
 
 test('PWA manifest использует палитру новой оболочки и сохраняет установку приложения', async () => {

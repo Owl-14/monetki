@@ -2,6 +2,13 @@ import { today } from './ui.js';
 
 const SCOPED_ENTITIES = [
   'clients',
+  'companies',
+  'contacts',
+  'leads',
+  'deals',
+  'pipelines',
+  'stages',
+  'dealItems',
   'venues',
   'players',
   'tasks',
@@ -48,6 +55,7 @@ export function createAppState(store, storage = localStorage) {
     unit: storage.getItem('monetki_unit') || 'padel',
     loading: false,
     taskFilter: { who: 'mine', status: 'active' },
+    crmPipelineId: '',
     finMonth: today().slice(0, 7),
     search: {},
   };
