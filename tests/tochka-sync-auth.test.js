@@ -76,6 +76,10 @@ test("банковская синхронизация обнаруживает �
   assert.match(apiSource, /statements:\s*\{[\s\S]*split:\s*0,\s*truncated:\s*0/);
   assert.match(apiSource, /if \(i > 0\)[\s\S]*await sleep\(wait\)/);
   assert.match(apiSource, /deadlineReached/);
+  assert.match(apiSource, /statements\.ranges\.push\(\.\.\.statementDiagnostics\.ranges\)/);
+  assert.match(apiSource, /transactions\.overall\.rawSeen\s*\+=\s*statementDiagnostics\.overall\.rawSeen/);
+  assert.match(apiSource, /transactions\.overall\.uniqueSeen\s*=\s*syncSeenIds\.size/);
+  assert.match(apiSource, /statements\.outsideRange\s*\+=\s*statementDiagnostics\.outsideRange/);
   assert.match(apiSource, /result\.ok\s*&&\s*result\.outcome\s*!==\s*"partial"/);
   const runStart = apiSource.indexOf("async function runTochkaSync");
   const runEnd = apiSource.indexOf("// ---------- HTTP ----------", runStart);

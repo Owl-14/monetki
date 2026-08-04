@@ -230,11 +230,53 @@ const UTC_DAY_MS = 864e5;
 
 function utcDateValue(date) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return NaN;
-  return Date.parse(`${date}T00:00:00.000Z`);
+  const value = Date.parse(`${date}T00:00:00.000Z`);
+  if (!Number.isFinite(value) || formatUtcDate(value) !== date) return NaN;
+  return value;
 }
 
 function formatUtcDate(value) {
   return new Date(value).toISOString().slice(0, 10);
+}
+
+function validDocumentProcessDate(value) {
+  const date = typeof value === "string" ? value : "";
+  return Number.isFinite(utcDateValue(date)) ? date : null;
+}
+
+// Диагностика намеренно содержит только даты и количества. В неё нельзя
+// добавлять операции, суммы, контрагентов, счета или банковские идентификаторы.
+export function statementRangeDiagnostics(requestedStart, requestedEnd, transactions) {
+  const safeRequestedStart = validDocumentProcessDate(requestedStart);
+  const safeRequestedEnd = validDocumentProcessDate(requestedEnd);
+  const list = Array.isArray(transactions) ? transactions : [];
+  let earliestDate = null;
+  let latestDate = null;
+  let missingDateCount = 0;
+  let outsideRange = 0;
+
+  for (const transaction of list) {
+    const date = validDocumentProcessDate(transaction?.documentProcessDate);
+    if (!date) {
+      missingDateCount++;
+      continue;
+    }
+    if (!earliestDate || date < earliestDate) earliestDate = date;
+    if (!latestDate || date > latestDate) latestDate = date;
+    if (!safeRequestedStart || !safeRequestedEnd || date < safeRequestedStart || date > safeRequestedEnd) {
+      outsideRange++;
+    }
+  }
+
+  return {
+    requestedStart: safeRequestedStart,
+    requestedEnd: safeRequestedEnd,
+    count: list.length,
+    earliestDate,
+    latestDate,
+    missingDateCount,
+    outsideRange,
+  };
 }
 
 // Диапазоны выписки включают обе границы, поэтому правая половина начинается
@@ -289,9 +331,20 @@ export async function collectStatementTransactions({
     depthLimitReached: 0,
     deadlineReached: 0,
     usable: 0,
+    outsideRange: 0,
+    ranges: [],
+    overall: { rawSeen: 0, uniqueSeen: 0, earliest: null, latest: null },
   };
 
-  const root = { startDate, endDate, depth: 0, ids: new Set(), children: null, complete: false };
+  const root = {
+    startDate,
+    endDate,
+    depth: 0,
+    ids: new Set(),
+    children: null,
+    complete: false,
+    rangeValid: true,
+  };
   const queue = [root];
 
   // Обход по уровням использует единый расходуемый бюджет. Поэтому пустая ветка
@@ -314,20 +367,24 @@ export async function collectStatementTransactions({
     try {
       statement = await fetchRange(node.startDate, node.endDate);
     } catch (_error) {
+      diagnostics.ranges.push(statementRangeDiagnostics(node.startDate, node.endDate, []));
       diagnostics.failed++;
       continue;
     }
 
     if (statement?.status === "Deadline") {
+      diagnostics.ranges.push(statementRangeDiagnostics(node.startDate, node.endDate, []));
       diagnostics.truncated++;
       diagnostics.deadlineReached++;
       continue;
     }
     if (!statement || (statement.status !== "Ready" && statement.status !== "Error")) {
+      diagnostics.ranges.push(statementRangeDiagnostics(node.startDate, node.endDate, []));
       diagnostics.notReady++;
       continue;
     }
     if (statement.status === "Error") {
+      diagnostics.ranges.push(statementRangeDiagnostics(node.startDate, node.endDate, []));
       diagnostics.failed++;
       continue;
     }
@@ -335,6 +392,20 @@ export async function collectStatementTransactions({
     diagnostics.ready++;
     diagnostics.usable++;
     const rangeTransactions = Array.isArray(statement.Transaction) ? statement.Transaction : [];
+    const rangeDiagnostics = statementRangeDiagnostics(node.startDate, node.endDate, rangeTransactions);
+    diagnostics.ranges.push(rangeDiagnostics);
+    diagnostics.overall.rawSeen += rangeDiagnostics.count;
+    diagnostics.outsideRange += rangeDiagnostics.outsideRange;
+    node.rangeValid = rangeDiagnostics.outsideRange === 0 && rangeDiagnostics.missingDateCount === 0;
+    if (!node.rangeValid) diagnostics.truncated++;
+    if (
+      rangeDiagnostics.earliestDate &&
+      (!diagnostics.overall.earliest || rangeDiagnostics.earliestDate < diagnostics.overall.earliest)
+    ) diagnostics.overall.earliest = rangeDiagnostics.earliestDate;
+    if (
+      rangeDiagnostics.latestDate &&
+      (!diagnostics.overall.latest || rangeDiagnostics.latestDate > diagnostics.overall.latest)
+    ) diagnostics.overall.latest = rangeDiagnostics.latestDate;
     for (const transaction of rangeTransactions) {
       const transactionId = bankTransactionId(transaction);
       node.ids.add(transactionId);
@@ -354,18 +425,19 @@ export async function collectStatementTransactions({
           ids: new Set(),
           children: null,
           complete: false,
+          rangeValid: true,
         }));
         queue.push(...node.children);
         continue;
       }
       if (halves && node.depth >= maxDepth) diagnostics.depthLimitReached++;
       else if (halves) diagnostics.requestLimitReached++;
-      diagnostics.truncated++;
+      if (node.rangeValid) diagnostics.truncated++;
       continue;
     }
 
     if (!rangeTransactions.length) diagnostics.empty++;
-    node.complete = true;
+    node.complete = node.rangeValid;
   }
 
   // Проверяем покрытие снизу вверх. Родительские операции уже сохранены в Map,
@@ -380,9 +452,10 @@ export async function collectStatementTransactions({
       diagnostics.inconsistentSplit++;
       diagnostics.truncated++;
     }
-    return { complete: !inconsistent, ids: childIds };
+    return { complete: node.rangeValid && !inconsistent, ids: childIds };
   }
   subtree(root);
+  diagnostics.overall.uniqueSeen = transactionsById.size;
 
   return { transactions: [...transactionsById.values()], diagnostics };
 }

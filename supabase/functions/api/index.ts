@@ -608,9 +608,18 @@ async function tochkaSync(days = 30, deadline = Date.now() + TOCHKA_SYNC_DEADLIN
     accounts: { total: accounts.length, processed: 0, partial: 0, failed: 0 },
     statements: {
       requested: 0, ready: 0, empty: 0, notReady: 0, failed: 0,
-      split: 0, truncated: 0, inconsistent: 0,
+      split: 0, truncated: 0, inconsistent: 0, outsideRange: 0,
+      ranges: [] as Array<Record<string, unknown>>,
     },
-    transactions: { seen: 0, duplicates: 0, pending: 0 },
+    transactions: {
+      seen: 0, duplicates: 0, pending: 0,
+      overall: {
+        rawSeen: 0,
+        uniqueSeen: 0,
+        earliest: null as string | null,
+        latest: null as string | null,
+      },
+    },
     limits: {
       maxStatementRequests: TOCHKA_STATEMENT_REQUEST_LIMIT,
       maxSplitDepth: TOCHKA_STATEMENT_SPLIT_DEPTH,
@@ -627,6 +636,7 @@ async function tochkaSync(days = 30, deadline = Date.now() + TOCHKA_SYNC_DEADLIN
 
   const existing = await readAll("finance");
   const known = new Set(existing.map((f) => f.bankId).filter(Boolean));
+  const syncSeenIds = new Set<string>();
   let added = 0;
   let deadlineStopped = false;
 
@@ -674,6 +684,19 @@ async function tochkaSync(days = 30, deadline = Date.now() + TOCHKA_SYNC_DEADLIN
     diagnostics.statements.split += statementDiagnostics.split;
     diagnostics.statements.truncated += statementDiagnostics.truncated;
     diagnostics.statements.inconsistent += statementDiagnostics.inconsistentSplit;
+    diagnostics.statements.outsideRange += statementDiagnostics.outsideRange;
+    diagnostics.statements.ranges.push(...statementDiagnostics.ranges);
+    diagnostics.transactions.overall.rawSeen += statementDiagnostics.overall.rawSeen;
+    if (
+      statementDiagnostics.overall.earliest &&
+      (!diagnostics.transactions.overall.earliest ||
+        statementDiagnostics.overall.earliest < diagnostics.transactions.overall.earliest)
+    ) diagnostics.transactions.overall.earliest = statementDiagnostics.overall.earliest;
+    if (
+      statementDiagnostics.overall.latest &&
+      (!diagnostics.transactions.overall.latest ||
+        statementDiagnostics.overall.latest > diagnostics.transactions.overall.latest)
+    ) diagnostics.transactions.overall.latest = statementDiagnostics.overall.latest;
     diagnostics.limits.requestLimitReached += statementDiagnostics.requestLimitReached;
     diagnostics.limits.depthLimitReached += statementDiagnostics.depthLimitReached;
     diagnostics.limits.deadlineReached += statementDiagnostics.deadlineReached;
@@ -691,6 +714,8 @@ async function tochkaSync(days = 30, deadline = Date.now() + TOCHKA_SYNC_DEADLIN
 
     const transactions = collected.transactions as Rec[];
     diagnostics.transactions.seen += transactions.length;
+    for (const transaction of transactions) syncSeenIds.add(bankTransactionId(transaction));
+    diagnostics.transactions.overall.uniqueSeen = syncSeenIds.size;
 
     for (const t of transactions) {
       if (Date.now() >= deadline) {
