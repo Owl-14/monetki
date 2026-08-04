@@ -11,7 +11,14 @@ select cron.schedule(
   $$
   select net.http_post(
     url := 'https://pmntdxwdsrdtaindabqb.supabase.co/functions/v1/api',
-    headers := '{"Content-Type":"application/json"}'::jsonb,
+    headers := jsonb_build_object(
+      'Content-Type', 'application/json',
+      'X-Tochka-Sync-Secret', (
+        select decrypted_secret
+        from vault.decrypted_secrets
+        where name = 'tochka_sync_secret'
+      )
+    ),
     body := '{"action":"tochka_sync"}'::jsonb,
     timeout_milliseconds := 180000
   )

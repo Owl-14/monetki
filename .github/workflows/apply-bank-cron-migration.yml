@@ -50,7 +50,7 @@ jobs:
             exit 1
           fi
 
-          verification_query="select count(*) filter (where active)::integer as active_job_count, count(*) filter (where active and schedule = '5 * * * *')::integer as scheduled_job_count from cron.job where jobname = 'tochka-sync-hourly';"
+          verification_query="select count(*) filter (where active)::integer as active_job_count, count(*) filter (where active and schedule = '5 * * * *' and position('vault.decrypted_secrets' in command) > 0 and position('X-Tochka-Sync-Secret' in command) > 0)::integer as scheduled_job_count from cron.job where jobname = 'tochka-sync-hourly';"
           verification_request="${RUNNER_TEMP}/verification-request.json"
           verification_response="${RUNNER_TEMP}/verification-response.json"
 
@@ -76,7 +76,7 @@ jobs:
             (.[0].active_job_count | tonumber) == 1 and
             (.[0].scheduled_job_count | tonumber) == 1
           ' "${verification_response}" > /dev/null; then
-            echo "Проверка не пройдена: ожидается ровно одна активная задача tochka-sync-hourly с расписанием 5 * * * *." >&2
+            echo "Проверка не пройдена: ожидается ровно одна защищённая задача tochka-sync-hourly с расписанием 5 * * * *." >&2
             exit 1
           fi
 

@@ -595,6 +595,22 @@ export class LocalStore {
     return { ok: true, backend: 'demo', empty: db.employees.length === 0, employees: db.employees.length };
   }
 
+  async tochkaSync(token, days = 30) {
+    const u = this._user(token);
+    if (!u || u.role !== 'admin') return { ok: false, error: 'auth' };
+    return {
+      ok: true,
+      added: 0,
+      outcome: 'zero_transactions',
+      diagnostics: {
+        accounts: { total: 0, processed: 0, failed: 0 },
+        statements: { requested: 0, ready: 0, empty: 0, notReady: 0, failed: 0 },
+        transactions: { seen: 0, duplicates: 0, pending: 0 },
+        errors: 0
+      }
+    };
+  }
+
   async migrateImport(token, data) {
     const u = this._user(token);
     const db = this._db();
@@ -667,6 +683,7 @@ class RemoteStore {
   markRead(token, ids) { return this._call({ action: 'mark_read', token, ids }); }
   resolveExpense(token, id, how) { return this._call({ action: 'resolve_expense', token, id, how }); }
   status() { return this._call({ action: 'status' }); }
+  tochkaSync(token, days = 30) { return this._call({ action: 'tochka_sync', token, days }); }
   migrateImport(token, data) { return this._call({ action: 'migrate_import', token, data }); }
   uploadFile(token, b64) { return this._call({ action: 'upload_file', token, b64 }); }
   getFile(token, id) { return this._call({ action: 'get_file', token, id }); }
