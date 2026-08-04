@@ -46,8 +46,20 @@ test('нижнее меню сотрудника использует личны
   assert.ok(routes.length <= 5);
 });
 
+test('склад доступен с телефона как приоритетный операционный раздел', () => {
+  const items = [
+    item('dashboard'), item('tasks'), item('stock'), item('venues'),
+    item('finance'), item('settings'),
+  ];
+
+  assert.deepEqual(
+    pickBottomNavItems(items, true).map((entry) => entry.r),
+    ['dashboard', 'tasks', 'finance', 'stock', 'settings'],
+  );
+});
+
 test('каждый сохранённый маршрут получает понятный контекст заголовка', () => {
-  for (const route of ['dashboard', 'tasks', 'clients', 'venues', 'players', 'finance', 'money', 'team', 'settings']) {
+  for (const route of ['dashboard', 'tasks', 'clients', 'venues', 'players', 'stock', 'finance', 'money', 'team', 'settings']) {
     assert.ok(pageMeta(route).group);
     assert.ok(pageMeta(route).subtitle);
   }
@@ -55,7 +67,7 @@ test('каждый сохранённый маршрут получает пон
 });
 
 test('все пункты оболочки имеют скрытые от скринридера SVG-иконки', () => {
-  for (const route of ['dashboard', 'tasks', 'clients', 'venues', 'players', 'finance', 'money', 'team', 'settings']) {
+  for (const route of ['dashboard', 'tasks', 'clients', 'venues', 'players', 'stock', 'finance', 'money', 'team', 'settings']) {
     assert.match(NAV_ICONS[route], /^<svg /);
     assert.match(NAV_ICONS[route], /aria-hidden="true"/);
   }

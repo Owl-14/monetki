@@ -14,6 +14,12 @@ const SCOPED_ENTITIES = [
   'tasks',
   'finance',
   'staffExpenses',
+  'warehouses',
+  'stockItems',
+  'stockMovements',
+  'stockBalances',
+  'reservations',
+  'inventories',
   'memberships',
   'businessOwners',
 ];

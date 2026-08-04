@@ -276,6 +276,62 @@ label.field > span { display: block; font-size: 13px; font-weight: 600; color: v
 .empty { display: grid; place-items: center; align-content: center; min-height: 150px; text-align: center; color: var(--muted); padding: 34px 18px; border-style: dashed; box-shadow: none; }
 .empty .big { font-size: 32px; margin-bottom: 8px; filter: saturate(.8); }
 
+/* ---------- Склад ---------- */
+.stock-summary { margin-bottom: 12px; }
+.stock-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+.stock-actions-spacer { flex: 1; }
+.stock-tabs { margin-bottom: 14px; }
+.stock-layout { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(260px, .85fr); gap: 13px; }
+.stock-panel { padding: 0; overflow: hidden; }
+.stock-panel-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 17px; border-bottom: 1px solid var(--line); }
+.stock-panel-head h2 { font-size: 16px; }
+.stock-panel-head span { color: var(--muted); font-size: 13px; }
+.stock-catalog-list { display: flex; flex-direction: column; }
+.stock-catalog-list .empty { margin: 12px; }
+.stock-catalog-row { width: 100%; display: flex; align-items: center; gap: 10px; padding: 13px 17px; border: 0; border-bottom: 1px solid var(--line); background: transparent; color: var(--text); text-align: left; }
+.stock-catalog-row:last-child { border-bottom: 0; }
+.stock-catalog-row:hover { background: var(--surface2); }
+.stock-catalog-main { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 2px; }
+.stock-catalog-main strong, .stock-catalog-main small { overflow-wrap: anywhere; }
+.stock-catalog-main small { color: var(--muted); font-size: 12px; }
+.stock-qty { font-weight: 760; white-space: nowrap; }
+.stock-qty.low { color: var(--red); }
+.stock-balance-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); gap: 12px; }
+.stock-balance-card { padding: 0; overflow: hidden; }
+.stock-balance-card.stock-low { border-color: color-mix(in srgb, var(--red) 55%, var(--line)); }
+.stock-balance-title { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; padding: 15px 16px; background: var(--surface2); }
+.stock-balance-title > div { min-width: 0; display: flex; flex-direction: column; }
+.stock-balance-title small { color: var(--muted); }
+.stock-balance-title > span { font-weight: 800; white-space: nowrap; }
+.stock-balance-line { display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 9px; padding: 10px 16px; border-top: 1px solid var(--line); }
+.stock-balance-line small { color: var(--muted); font-size: 11px; }
+.stock-warning { padding: 9px 16px; background: var(--red-soft); color: var(--red); font-size: 12px; font-weight: 700; }
+.stock-movement-sign { width: 34px; height: 34px; display: grid; place-items: center; flex: 0 0 auto; border-radius: 10px; background: var(--surface2); font-size: 18px; font-weight: 800; }
+.stock-movement-sign.plus { color: var(--green); background: var(--green-soft); }
+.stock-movement-sign.minus { color: var(--red); background: var(--red-soft); }
+.stock-count-list { display: flex; flex-direction: column; margin: 0 0 14px; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.stock-count-row { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+.stock-count-row:last-child { border-bottom: 0; }
+.stock-count-row > span { display: flex; flex: 1; min-width: 0; flex-direction: column; }
+.stock-count-row small { color: var(--muted); }
+.stock-count-row input { width: 130px; }
+
+@media (max-width: 760px) {
+  .stock-layout { grid-template-columns: 1fr; }
+  .stock-actions { display: grid; grid-template-columns: 1fr 1fr; }
+  .stock-actions .btn { justify-content: center; }
+  .stock-actions-spacer { display: none; }
+  .stock-tabs { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 3px; }
+  .stock-tabs .chip { flex: 0 0 auto; }
+}
+
+@media (max-width: 420px) {
+  .stock-actions { grid-template-columns: 1fr; }
+  .stock-catalog-row { align-items: flex-start; flex-wrap: wrap; }
+  .stock-catalog-main { flex-basis: calc(100% - 90px); }
+  .stock-count-row input { width: 105px; }
+}
+
 /* Универсальная таблица для следующих модулей карты CRM. */
 .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow); }
 table { width: 100%; border-collapse: collapse; font-size: 14px; }

@@ -4,6 +4,7 @@ import {
   CRM_ENTITIES,
   ENTITIES,
   EXPENSE_UNITS,
+  STOCK_ENTITIES,
   accessSet,
   baseWriteError,
   businessIdOf,
@@ -20,6 +21,14 @@ import {
   validateCrmEntity,
   visibleBootstrapData,
 } from "./rules.js";
+import { stockModuleWriteError, stockRecordError } from "./stock-rules.js";
+import {
+  applyReservationChange,
+  completeInventory,
+  createStockMovement,
+  deleteStockCatalog,
+  readStockData,
+} from "./stock.ts";
 import { ensureCoreData } from "./auth/access.ts";
 import { deleteRow, insertRow, kvGet, kvSet, readAll, readOne, writeRow } from "./db/repositories.ts";
 import { newId } from "./types.ts";
@@ -43,17 +52,14 @@ async function notifyAdmins(exceptId: string, text: string, link: string) {
 
 export async function bootstrap(u: Rec) {
   const admin = isAdmin(u);
-  const [businesses, memberships, businessOwners, employees, clients, companies, contacts, leads, deals, pipelines, stages, dealItems, venues, players, tasks, finance, staffExpenses, cash, notifications] =
-    await Promise.all(ENTITIES.map(readAll));
+  const entries = await Promise.all(ENTITIES.map(async (entity) => [entity, await readAll(entity)] as const));
+  const data = Object.fromEntries(entries) as Record<string, Rec[]>;
   return {
     ok: true,
-    profile: profileOf(u, memberships),
+    profile: profileOf(u, data.memberships),
     data: visibleBootstrapData(
       u,
-      {
-        businesses, memberships, businessOwners, employees, clients, companies, contacts, leads,
-        deals, pipelines, stages, dealItems, venues, players, tasks, finance, staffExpenses, cash, notifications,
-      },
+      data,
       admin ? await kvGet("BANK_BALANCE") : null,
     ),
   };
@@ -121,6 +127,13 @@ export async function createItem(u: Rec, entity: string, item: Rec) {
   item = { ...item };
   if (entity === "businesses") item.id = String(item.id || "").trim();
   if (entity === "businessOwners") item.ownerId = String(item.ownerId || "").trim();
+  if (entity === "warehouses" || entity === "stockItems") item.active = item.active !== false;
+  if (entity === "stockItems") {
+    item.costPrice = item.costPrice === "" || item.costPrice === undefined ? 0 : Number(item.costPrice);
+    item.minStock = item.minStock === "" || item.minStock === undefined ? 0 : Number(item.minStock);
+  }
+  if (entity === "reservations") item.status = item.status || "active";
+  if (entity === "inventories") item.status = item.status || "draft";
   const coreDeny = await coreValidationError(entity, item);
   if (coreDeny) return { ok: false, error: coreDeny };
   const [memberships, businesses] = await Promise.all([readAll("memberships"), readAll("businesses")]);
@@ -136,11 +149,19 @@ export async function createItem(u: Rec, entity: string, item: Rec) {
   if (CRM_ENTITIES.includes(entity)) item = normalizeCrmRecord(entity, item) as Rec;
   const crmDeny = await crmValidationError(entity, item);
   if (crmDeny) return { ok: false, error: crmDeny };
+  if (STOCK_ENTITIES.includes(entity)) {
+    const moduleDeny = stockModuleWriteError(businesses, item);
+    if (moduleDeny) return { ok: false, error: moduleDeny };
+  }
   // id всегда генерируем на сервере: иначе, прислав чужой id, можно было бы
   // перезаписать (upsert) существующую запись в своём направлении.
   item.id = entity === "businesses" && item.id ? item.id : newId();
   item.created = Date.now();
   item.updated = Date.now();
+  if (STOCK_ENTITIES.includes(entity) && entity !== "stockMovements") {
+    const stockDeny = stockRecordError(entity, item, await readStockData());
+    if (stockDeny) return { ok: false, error: stockDeny };
+  }
   if (entity === "employees" && !item.code) {
     item.code = String(Math.floor(100000 + Math.random() * 900000));
   }
@@ -164,6 +185,20 @@ export async function createItem(u: Rec, entity: string, item: Rec) {
     }
     item.status = item.status || "pending";
     await notifyAdmins(u.id as string, `${u.name}: трата ${item.amount} ₽ — ${item.title}`, "#/finance");
+  }
+  if (entity === "stockMovements") {
+    if (item.type === "inventory") {
+      return { ok: false, error: "Корректировка создаётся только завершением инвентаризации" };
+    }
+    item.createdBy = u.id;
+    return await createStockMovement(item);
+  }
+  if (entity === "reservations") {
+    return await applyReservationChange(null, item);
+  }
+  if (entity === "inventories") {
+    item.createdBy = u.id;
+    if (item.status === "completed") return await completeInventory(item, true);
   }
   let offsets: { error?: string; sum?: number; titles?: string } = {};
   if ((entity === "finance" || entity === "cash") && item.category === "Зарплата") {
@@ -209,6 +244,7 @@ export async function updateItem(u: Rec, entity: string, item: Rec) {
   if (entity === "companies" && String(item?.id || "").startsWith("legacy-client:")) {
     return { ok: false, error: "Переходная запись клиента доступна только для чтения" };
   }
+  if (entity === "stockMovements") return { ok: false, error: "Движения склада нельзя изменять" };
   const before = (await readAll(entity)).find((x) => x.id === item.id);
   if (!before) return { ok: false, error: "Не найдено" };
   const [memberships, businesses] = await Promise.all([readAll("memberships"), readAll("businesses")]);
@@ -218,9 +254,16 @@ export async function updateItem(u: Rec, entity: string, item: Rec) {
     if (sourceDeny) return { ok: false, error: sourceDeny };
     if (scopeMismatch(item)) return { ok: false, error: "businessId и unit должны совпадать" };
     const targetBusinessId = String(item.businessId || item.unit || businessIdOf(before));
+    if (STOCK_ENTITIES.includes(entity) && targetBusinessId !== businessIdOf(before)) {
+      return { ok: false, error: "Нельзя перенести складскую запись в другой бизнес" };
+    }
     const targetDeny = scopeWriteError(access, { id: "target", businessId: targetBusinessId, unit: targetBusinessId }, businesses);
     if (targetDeny) return { ok: false, error: targetDeny };
     item = { ...item, businessId: targetBusinessId, unit: targetBusinessId };
+  }
+  if (STOCK_ENTITIES.includes(entity)) {
+    const moduleDeny = stockModuleWriteError(businesses, before);
+    if (moduleDeny) return { ok: false, error: moduleDeny };
   }
   if (entity === "businesses" && !hasBusinessAccess(access, before.id)) return { ok: false, error: "Нет доступа к этому бизнесу" };
   const coreDeny = await coreValidationError(entity, { ...before, ...item } as Rec, before.id);
@@ -241,6 +284,20 @@ export async function updateItem(u: Rec, entity: string, item: Rec) {
   if (crmUpdateDeny) return { ok: false, error: crmUpdateDeny };
   const crmDeny = await crmValidationError(entity, merged);
   if (crmDeny) return { ok: false, error: crmDeny };
+  if (entity === "inventories" && before.status === "completed") {
+    return { ok: false, error: "Завершённую инвентаризацию нельзя изменять" };
+  }
+  if (entity === "reservations" && before.status === "released") {
+    return { ok: false, error: "Освобождённый резерв нельзя изменять" };
+  }
+  if (STOCK_ENTITIES.includes(entity)) {
+    const stockDeny = stockRecordError(entity, merged, await readStockData(), before.id);
+    if (stockDeny) return { ok: false, error: stockDeny };
+  }
+  if (entity === "reservations") {
+    return await applyReservationChange(before, merged);
+  }
+  if (entity === "inventories" && merged.status === "completed") return await completeInventory(merged);
   if (entity === "tasks") {
     if (before.status !== merged.status && merged.authorId && merged.authorId !== u.id) {
       const names: Record<string, string> = { new: "Не видел", progress: "В работе", question: "Есть вопросы", done: "Выполнена" };
@@ -267,6 +324,20 @@ export async function deleteItem(u: Rec, entity: string, id: string) {
   if (BUSINESS_SCOPED_ENTITIES.includes(entity) || entity === "memberships" || entity === "businessOwners") {
     const sourceDeny = scopeWriteError(access, before, businesses);
     if (sourceDeny) return { ok: false, error: sourceDeny };
+  }
+  if (STOCK_ENTITIES.includes(entity)) {
+    const moduleDeny = stockModuleWriteError(businesses, before);
+    if (moduleDeny) return { ok: false, error: moduleDeny };
+  }
+  if (entity === "stockMovements") return { ok: false, error: "Движения склада нельзя удалять" };
+  if (entity === "inventories" && before.status === "completed") {
+    return { ok: false, error: "Завершённую инвентаризацию нельзя удалять" };
+  }
+  if (entity === "warehouses" || entity === "stockItems") {
+    return await deleteStockCatalog(entity, before);
+  }
+  if (entity === "reservations") {
+    return await applyReservationChange(before, null);
   }
   if (entity === "businesses" && !hasBusinessAccess(access, before.id)) return { ok: false, error: "Нет доступа к этому бизнесу" };
   if (entity === "staffExpenses" && !isAdmin(u) && (before.employeeId !== u.id || before.status !== "pending")) {
