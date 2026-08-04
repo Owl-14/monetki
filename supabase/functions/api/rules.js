@@ -3,11 +3,17 @@ export const ENTITIES = [
   "employees", "clients", "companies", "contacts", "leads", "deals",
   "pipelines", "stages", "dealItems", "venues", "players",
   "tasks", "finance", "staffExpenses", "cash", "notifications",
+  "warehouses", "stockItems", "stockMovements", "stockBalances", "reservations", "inventories",
 ];
 
 export const CORE_ENTITIES = ["businesses", "memberships", "businessOwners"];
 export const CRM_ENTITIES = ["companies", "contacts", "leads", "deals", "pipelines", "stages", "dealItems"];
-export const BUSINESS_SCOPED_ENTITIES = ["clients", ...CRM_ENTITIES, "venues", "players", "tasks", "finance", "staffExpenses"];
+export const STOCK_ENTITIES = [
+  "warehouses", "stockItems", "stockMovements", "stockBalances", "reservations", "inventories",
+];
+export const BUSINESS_SCOPED_ENTITIES = [
+  "clients", ...CRM_ENTITIES, "venues", "players", "tasks", "finance", "staffExpenses", ...STOCK_ENTITIES,
+];
 
 export const DEFAULT_CRM_STAGES = [
   { suffix: "contact", name: "Первичный контакт", order: 10, type: "open" },
@@ -72,7 +78,7 @@ export function normalizeCrmRecord(entity, item) {
 }
 
 export const DEFAULT_BUSINESSES = [
-  { id: "padel", name: "Падел", emoji: "🎾", modules: ["dashboard", "tasks", "venues", "players", "finance", "money", "team"], active: true },
+  { id: "padel", name: "Падел", emoji: "🎾", modules: ["dashboard", "tasks", "venues", "players", "finance", "money", "team", "stock"], active: true },
   { id: "dev", name: "Разработка", emoji: "💻", modules: ["dashboard", "tasks", "clients", "finance", "money", "team"], active: true },
 ];
 
@@ -162,6 +168,12 @@ export function visibleBootstrapData(user, data, bankBalance = null) {
   const scopedItems = (items) => (items || []).filter((item) =>
     activeBusinessIds.has(businessIdOf(item)) && canSeeItem(access, item)
   );
+  const stockBusinessIds = new Set((data.businesses || [])
+    .filter((business) => business.active !== false && Array.isArray(business.modules) && business.modules.includes("stock"))
+    .map((business) => business.id));
+  const stockItems = (items) => scopedItems(items).filter((item) =>
+    !scopeMismatch(item) && stockBusinessIds.has(businessIdOf(item))
+  );
   const sharesBusiness = (leftId, rightId) => {
     const left = accessSet(memberships, leftId);
     return activeMemberships(memberships, rightId).some((membership) => left.has(businessIdOf(membership)));
@@ -221,6 +233,12 @@ export function visibleBootstrapData(user, data, bankBalance = null) {
     tasks: scopedItems(data.tasks).filter((task) => admin || task.assigneeId === user.id),
     finance: scopedItems(data.finance).filter((item) => admin || item.employeeId === user.id),
     staffExpenses: scopedItems(data.staffExpenses).filter((item) => admin || item.employeeId === user.id),
+    warehouses: stockItems(data.warehouses),
+    stockItems: stockItems(data.stockItems),
+    stockMovements: stockItems(data.stockMovements),
+    stockBalances: stockItems(data.stockBalances),
+    reservations: stockItems(data.reservations),
+    inventories: stockItems(data.inventories),
     cash: admin ? data.cash : data.cash.filter((item) => item.employeeId === user.id),
     bankBalance: admin ? bankBalance : null,
     notifications: data.notifications.filter((item) => item.toId === user.id),
@@ -229,6 +247,7 @@ export function visibleBootstrapData(user, data, bankBalance = null) {
 
 export function baseWriteError(user, entity) {
   if (!ENTITIES.includes(entity)) return "Неизвестная сущность";
+  if (entity === "stockBalances") return "Остатки изменяются только складскими операциями";
   if ([...CORE_ENTITIES, "employees", "finance", "cash"].includes(entity) && !isAdmin(user)) {
     return "Только для админа";
   }

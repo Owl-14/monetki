@@ -93,7 +93,7 @@ function logout() {
 }
 
 // ---------- Роутер ----------
-const routes = ['dashboard', 'tasks', 'clients', 'venues', 'players', 'finance', 'money', 'team', 'settings', 'login'];
+const routes = ['dashboard', 'tasks', 'clients', 'venues', 'players', 'stock', 'finance', 'money', 'team', 'settings', 'login'];
 function currentRoute() {
   const r = (location.hash || '').replace('#/', '').split('?')[0];
   return routes.includes(r) ? r : 'dashboard';
@@ -103,7 +103,7 @@ window.addEventListener('hashchange', render);
 // ---------- Навигация ----------
 function navItems() {
   const items = [];
-  const item = (r, label, group, badge = '') => ({ r, label, group, badge, ico: NAV_ICONS[r] });
+  const item = (r, label, group, badge = '') => ({ r, label, group, badge, ico: NAV_ICONS[r] || '📦' });
   if (hasModule('dashboard')) items.push(item('dashboard', 'Дашборд', 'overview'));
   if (hasModule('tasks')) items.push(item('tasks', 'Задачи', 'work', (S.data?.tasks || []).filter((t) => t.assigneeId === S.profile.id && t.status !== 'done').length || ''));
   if (!isAdmin() && hasModule('money')) items.push(item('money', 'Мои деньги', 'management'));
@@ -116,6 +116,7 @@ function navItems() {
     items.push(item('players', 'Игроки', 'operations'));
     }
   }
+  if (hasModule('stock')) items.push(item('stock', 'Склад', 'operations'));
   if (isAdmin()) {
     if (hasModule('finance')) items.push(item('finance', 'Финансы', 'management'));
     if (hasModule('team')) items.push(item('team', 'Команда', 'management'));
@@ -203,7 +204,7 @@ function render() {
   $('#bell').addEventListener('click', showNotifications);
   $('#bell-mobile').addEventListener('click', showNotifications);
 
-  const views = { dashboard: viewDashboard, tasks: viewTasks, clients: viewClients, venues: viewVenues, players: viewPlayers, finance: viewFinance, money: viewMoney, team: viewTeam, settings: viewSettings };
+  const views = { dashboard: viewDashboard, tasks: viewTasks, clients: viewClients, venues: viewVenues, players: viewPlayers, stock: viewStock, finance: viewFinance, money: viewMoney, team: viewTeam, settings: viewSettings };
   (views[route] || viewDashboard)();
 }
 
@@ -1187,6 +1188,299 @@ function openImportPlayers() {
       closeModal();
       refresh(true);
     });
+  });
+}
+
+// ---------- Склад ----------
+const STOCK_TABS = [
+  ['catalog', 'Каталог'], ['balances', 'Остатки'], ['movements', 'Движения'], ['inventories', 'Инвентаризации']
+];
+const STOCK_MOVEMENT_LABELS = { receipt: 'Приход', expense: 'Расход', transfer: 'Перемещение', inventory: 'Инвентаризация' };
+
+function stockUnits() {
+  return activeUnits().filter((id) => businessHasModule(business(id), 'stock'));
+}
+
+function stockRows(entity) {
+  const units = stockUnits();
+  return (S.data?.[entity] || []).filter((item) => units.includes(businessIdOf(item)));
+}
+
+function stockItemName(id) {
+  return (S.data?.stockItems || []).find((item) => item.id === id)?.name || 'Удалённая позиция';
+}
+
+function warehouseName(id) {
+  return (S.data?.warehouses || []).find((item) => item.id === id)?.name || 'Удалённый склад';
+}
+
+function stockBalance(warehouseId, stockItemId) {
+  return (S.data?.stockBalances || []).find((item) => item.warehouseId === warehouseId && item.stockItemId === stockItemId);
+}
+
+function stockBusinessSelect(targetBusinessId, disabled = false) {
+  const units = stockUnits();
+  if (units.length < 2) return `<input type="hidden" name="unit" value="${esc(targetBusinessId || units[0] || '')}">`;
+  return `<label class="field"><span>Бизнес</span><select name="unit" ${disabled ? 'disabled' : ''}>
+    ${units.map((id) => `<option value="${id}" ${id === targetBusinessId ? 'selected' : ''}>${esc(businessEmoji(id))} ${esc(businessName(id))}</option>`).join('')}
+  </select></label>`;
+}
+
+function stockScopeTag(item) {
+  return stockUnits().length > 1 ? `<span class="badge">${esc(businessEmoji(businessIdOf(item)))} ${esc(businessName(businessIdOf(item)))}</span>` : '';
+}
+
+async function stockCreate(entity, item, message) {
+  const result = await S.store.create(S.token, entity, item);
+  if (!result.ok) { toast(result.error || 'Ошибка', true); return null; }
+  if (message) toast(message);
+  await refresh(true);
+  return result;
+}
+
+async function stockUpdate(entity, item, message) {
+  const result = await S.store.update(S.token, entity, item);
+  if (!result.ok) { toast(result.error || 'Ошибка', true); return null; }
+  if (message) toast(message);
+  await refresh(true);
+  return result;
+}
+
+function viewStock() {
+  setTitle('Склад');
+  if (!hasModule('stock')) { location.hash = '#/dashboard'; return; }
+  const tab = S.stockTab || 'catalog';
+  const warehouses = stockRows('warehouses');
+  const items = stockRows('stockItems');
+  const balances = stockRows('stockBalances');
+  const movements = stockRows('stockMovements').sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')) || Number(b.created || 0) - Number(a.created || 0));
+  const inventories = stockRows('inventories').sort((a, b) => Number(b.created || 0) - Number(a.created || 0));
+  const totalQuantity = balances.reduce((sum, balance) => sum + Number(balance.quantity || 0), 0);
+  const lowCount = items.filter((item) => {
+    const total = balances.filter((balance) => balance.stockItemId === item.id).reduce((sum, balance) => sum + Number(balance.quantity || 0), 0);
+    return item.active !== false && Number(item.minStock || 0) > 0 && total <= Number(item.minStock);
+  }).length;
+
+  let content = '';
+  if (tab === 'catalog') content = stockCatalogHtml(warehouses, items, balances);
+  if (tab === 'balances') content = stockBalancesHtml(warehouses, items);
+  if (tab === 'movements') content = stockMovementsHtml(movements);
+  if (tab === 'inventories') content = stockInventoriesHtml(inventories);
+
+  $('#view').innerHTML = `
+    <div class="cards-row stock-summary">
+      <div class="card stat"><span class="label">Позиций</span><span class="value">${items.filter((item) => item.active !== false).length}</span><span class="hint">в каталоге</span></div>
+      <div class="card stat"><span class="label">Складов</span><span class="value">${warehouses.filter((item) => item.active !== false).length}</span><span class="hint">доступно для операций</span></div>
+      <div class="card stat"><span class="label">Единиц на остатке</span><span class="value">${new Intl.NumberFormat('ru-RU').format(totalQuantity)}</span><span class="hint">по всем складам</span></div>
+      <div class="card stat"><span class="label">Нужно пополнить</span><span class="value ${lowCount ? 'red' : 'green'}">${lowCount}</span><span class="hint">ниже минимума</span></div>
+    </div>
+    <div class="stock-actions">
+      <button class="btn" id="add-warehouse">+ Склад</button>
+      <button class="btn" id="add-stock-item">+ Позиция</button>
+      <span class="stock-actions-spacer"></span>
+      <button class="btn primary" id="stock-receipt">↓ Приход</button>
+      <button class="btn" id="stock-expense">↑ Расход</button>
+      <button class="btn" id="stock-transfer">⇄ Перемещение</button>
+      <button class="btn" id="stock-inventory">≡ Инвентаризация</button>
+    </div>
+    <div class="chip-row stock-tabs" id="stock-tabs">
+      ${STOCK_TABS.map(([id, label]) => `<button class="chip ${tab === id ? 'active' : ''}" data-stock-tab="${id}">${label}</button>`).join('')}
+    </div>
+    ${content}`;
+
+  $('#view').querySelectorAll('[data-stock-tab]').forEach((button) => button.addEventListener('click', () => { S.stockTab = button.dataset.stockTab; viewStock(); }));
+  $('#add-warehouse').addEventListener('click', () => openWarehouseForm());
+  $('#add-stock-item').addEventListener('click', () => openStockItemForm());
+  $('#stock-receipt').addEventListener('click', () => openStockMovementForm('receipt'));
+  $('#stock-expense').addEventListener('click', () => openStockMovementForm('expense'));
+  $('#stock-transfer').addEventListener('click', () => openStockMovementForm('transfer'));
+  $('#stock-inventory').addEventListener('click', () => openInventoryForm());
+  $('#view').querySelectorAll('[data-warehouse]').forEach((row) => row.addEventListener('click', () => openWarehouseForm((S.data.warehouses || []).find((item) => item.id === row.dataset.warehouse))));
+  $('#view').querySelectorAll('[data-stock-item]').forEach((row) => row.addEventListener('click', () => openStockItemForm((S.data.stockItems || []).find((item) => item.id === row.dataset.stockItem))));
+  $('#view').querySelectorAll('[data-inventory]').forEach((row) => row.addEventListener('click', () => openInventoryForm((S.data.inventories || []).find((item) => item.id === row.dataset.inventory))));
+}
+
+function stockCatalogHtml(warehouses, items, balances) {
+  const itemRows = items.map((item) => {
+    const quantity = balances.filter((balance) => balance.stockItemId === item.id).reduce((sum, balance) => sum + Number(balance.quantity || 0), 0);
+    const low = item.active !== false && Number(item.minStock || 0) > 0 && quantity <= Number(item.minStock);
+    return `<button class="stock-catalog-row ${item.active === false ? 'muted' : ''}" data-stock-item="${item.id}">
+      <span class="stock-catalog-main"><strong>${esc(item.name)}</strong><small>${esc(item.sku || 'без артикула')} · ${esc(item.unitName)}</small></span>
+      ${stockScopeTag(item)}<span class="stock-qty ${low ? 'low' : ''}">${quantity} ${esc(item.unitName)}</span>
+    </button>`;
+  }).join('');
+  const warehouseRows = warehouses.map((warehouse) => `<button class="stock-catalog-row ${warehouse.active === false ? 'muted' : ''}" data-warehouse="${warehouse.id}">
+    <span class="stock-catalog-main"><strong>${esc(warehouse.name)}</strong><small>${warehouse.active === false ? 'выключен' : 'работает'}</small></span>${stockScopeTag(warehouse)}
+  </button>`).join('');
+  return `<div class="stock-layout">
+    <section class="card stock-panel"><div class="stock-panel-head"><h2>Номенклатура</h2><span>${items.length}</span></div>
+      <div class="stock-catalog-list">${itemRows || '<div class="empty"><div class="big">📦</div>Позиции пока не добавлены</div>'}</div>
+    </section>
+    <section class="card stock-panel"><div class="stock-panel-head"><h2>Склады</h2><span>${warehouses.length}</span></div>
+      <div class="stock-catalog-list">${warehouseRows || '<div class="empty"><div class="big">🏬</div>Склады пока не добавлены</div>'}</div>
+    </section>
+  </div>`;
+}
+
+function stockBalancesHtml(warehouses, items) {
+  const activeWarehouses = warehouses.filter((item) => item.active !== false);
+  const activeItems = items.filter((item) => item.active !== false);
+  if (!activeWarehouses.length || !activeItems.length) return '<div class="card empty"><div class="big">📊</div>Сначала добавьте склад и позиции каталога</div>';
+  const cards = activeItems.map((item) => {
+    const rows = activeWarehouses.map((warehouse) => {
+      const balance = stockBalance(warehouse.id, item.id);
+      const quantity = Number(balance?.quantity || 0);
+      const reserved = Number(balance?.reserved || 0);
+      return `<div class="stock-balance-line"><span>${esc(warehouse.name)}</span><strong>${quantity}</strong>${reserved ? `<small>резерв ${reserved}</small>` : ''}</div>`;
+    }).join('');
+    const total = (S.data.stockBalances || []).filter((balance) => balance.stockItemId === item.id && activeWarehouses.some((warehouse) => warehouse.id === balance.warehouseId)).reduce((sum, balance) => sum + Number(balance.quantity || 0), 0);
+    const low = Number(item.minStock || 0) > 0 && total <= Number(item.minStock);
+    return `<article class="card stock-balance-card ${low ? 'stock-low' : ''}"><div class="stock-balance-title"><div><strong>${esc(item.name)}</strong><small>${esc(item.sku || item.unitName)}</small></div><span>${total} ${esc(item.unitName)}</span></div>${rows}${low ? `<div class="stock-warning">Ниже минимума ${esc(item.minStock)} ${esc(item.unitName)}</div>` : ''}</article>`;
+  }).join('');
+  return `<div class="stock-balance-grid">${cards}</div>`;
+}
+
+function stockMovementsHtml(movements) {
+  if (!movements.length) return '<div class="card empty"><div class="big">↕️</div>Движений пока нет. Оформите первый приход.</div>';
+  return `<div class="list">${movements.map((movement) => {
+    const sign = movement.type === 'receipt' || (movement.type === 'inventory' && movement.direction === 'increase') ? '+'
+      : movement.type === 'expense' || (movement.type === 'inventory' && movement.direction === 'decrease') ? '−' : '⇄';
+    const place = movement.type === 'transfer' ? `${warehouseName(movement.fromWarehouseId)} → ${warehouseName(movement.toWarehouseId)}` : warehouseName(movement.warehouseId);
+    const extra = movement.type === 'receipt' && movement.supplier ? ` · ${esc(movement.supplier)}` : movement.type === 'expense' && movement.reason ? ` · ${esc(movement.reason)}` : '';
+    return `<div class="row-card stock-movement-row"><span class="stock-movement-sign ${sign === '+' ? 'plus' : sign === '−' ? 'minus' : ''}">${sign}</span>
+      <div class="grow col"><div class="title">${esc(stockItemName(movement.stockItemId))}</div><div class="sub">${fmtDate(movement.date)} · ${esc(STOCK_MOVEMENT_LABELS[movement.type] || movement.type)} · ${esc(place)}${extra}${movement.note ? ` · ${esc(movement.note)}` : ''}</div></div>
+      ${stockScopeTag(movement)}<div class="amount">${esc(movement.quantity)}</div></div>`;
+  }).join('')}</div>`;
+}
+
+function stockInventoriesHtml(inventories) {
+  if (!inventories.length) return '<div class="card empty"><div class="big">🧾</div>Инвентаризаций пока не было</div>';
+  return `<div class="list">${inventories.map((inventory) => `<div class="row-card" data-inventory="${inventory.id}">
+    <div class="grow col"><div class="title">${esc(warehouseName(inventory.warehouseId))}</div><div class="sub">${fmtDate(inventory.date)} · ${inventory.items?.length || 0} позиций${inventory.note ? ` · ${esc(inventory.note)}` : ''}</div></div>
+    ${stockScopeTag(inventory)}<span class="badge ${inventory.status === 'completed' ? 'green' : 'amber'}">${inventory.status === 'completed' ? 'Завершена' : 'Черновик'}</span>
+  </div>`).join('')}</div>`;
+}
+
+function openWarehouseForm(warehouse) {
+  const isNew = !warehouse;
+  const targetBusinessId = businessIdOf(warehouse) || moduleBusinessId('stock');
+  openModal(`<h2>${isNew ? 'Новый склад' : esc(warehouse.name)}</h2><form id="warehouse-form">
+    ${stockBusinessSelect(targetBusinessId, !isNew)}
+    <label class="field"><span>Название</span><input type="text" name="name" required value="${esc(warehouse?.name || '')}" placeholder="Например, Основной склад"></label>
+    <label class="field"><span>Статус</span><select name="active"><option value="true" ${warehouse?.active !== false ? 'selected' : ''}>Работает</option><option value="false" ${warehouse?.active === false ? 'selected' : ''}>Выключен</option></select></label>
+    <div class="actions">${!isNew ? '<button type="button" class="btn danger ghost left" id="warehouse-delete">Удалить</button>' : ''}<button type="button" class="btn" id="modal-cancel">Отмена</button><button type="submit" class="btn primary">Сохранить</button></div>
+  </form>`, (root) => {
+    $('#modal-cancel', root).addEventListener('click', closeModal);
+    $('#warehouse-form', root).addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const data = Object.fromEntries(new FormData(event.target).entries());
+      const unit = data.unit || targetBusinessId;
+      const item = { ...(warehouse || {}), name: data.name.trim(), active: data.active === 'true', businessId: unit, unit };
+      closeModal();
+      if (isNew) await doCreate('warehouses', item, 'Склад добавлен'); else await doUpdate('warehouses', item, 'Склад сохранён');
+    });
+    $('#warehouse-delete', root)?.addEventListener('click', async () => { if (!confirm('Удалить склад?')) return; closeModal(); await doDelete('warehouses', warehouse.id, 'Склад удалён'); });
+  });
+}
+
+function openStockItemForm(stockItem) {
+  const isNew = !stockItem;
+  const targetBusinessId = businessIdOf(stockItem) || moduleBusinessId('stock');
+  openModal(`<h2>${isNew ? 'Новая позиция' : esc(stockItem.name)}</h2><form id="stock-item-form">
+    ${stockBusinessSelect(targetBusinessId, !isNew)}
+    <label class="field"><span>Название</span><input type="text" name="name" required value="${esc(stockItem?.name || '')}" placeholder="Например, Комплект медалей"></label>
+    <div class="form-row"><label class="field"><span>Артикул</span><input type="text" name="sku" value="${esc(stockItem?.sku || '')}"></label><label class="field"><span>Единица</span><input type="text" name="unitName" required value="${esc(stockItem?.unitName || '')}" placeholder="штука, комплект"></label></div>
+    <div class="form-row"><label class="field"><span>Себестоимость, ₽</span><input type="number" name="costPrice" required min="0" step="0.01" value="${esc(stockItem?.costPrice ?? 0)}"></label><label class="field"><span>Минимальный остаток</span><input type="number" name="minStock" required min="0" step="0.001" value="${esc(stockItem?.minStock ?? 0)}"></label></div>
+    <label class="field"><span>Статус</span><select name="active"><option value="true" ${stockItem?.active !== false ? 'selected' : ''}>Используется</option><option value="false" ${stockItem?.active === false ? 'selected' : ''}>Выключена</option></select></label>
+    <div class="actions">${!isNew ? '<button type="button" class="btn danger ghost left" id="stock-item-delete">Удалить</button>' : ''}<button type="button" class="btn" id="modal-cancel">Отмена</button><button type="submit" class="btn primary">Сохранить</button></div>
+  </form>`, (root) => {
+    $('#modal-cancel', root).addEventListener('click', closeModal);
+    $('#stock-item-form', root).addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const data = Object.fromEntries(new FormData(event.target).entries());
+      const unit = data.unit || targetBusinessId;
+      const item = { ...(stockItem || {}), name: data.name.trim(), sku: data.sku.trim(), unitName: data.unitName.trim(), costPrice: Number(data.costPrice), minStock: Number(data.minStock), active: data.active === 'true', businessId: unit, unit };
+      closeModal();
+      if (isNew) await doCreate('stockItems', item, 'Позиция добавлена'); else await doUpdate('stockItems', item, 'Позиция сохранена');
+    });
+    $('#stock-item-delete', root)?.addEventListener('click', async () => { if (!confirm('Удалить позицию?')) return; closeModal(); await doDelete('stockItems', stockItem.id, 'Позиция удалена'); });
+  });
+}
+
+function openStockMovementForm(type, forcedBusinessId = '') {
+  const targetBusinessId = forcedBusinessId || moduleBusinessId('stock');
+  const warehouses = (S.data.warehouses || []).filter((item) => businessIdOf(item) === targetBusinessId && item.active !== false);
+  const items = (S.data.stockItems || []).filter((item) => businessIdOf(item) === targetBusinessId && item.active !== false);
+  const finance = type === 'receipt' ? (S.data.finance || []).filter((item) => businessIdOf(item) === targetBusinessId && item.type === 'expense') : [];
+  if (!warehouses.length || !items.length || (type === 'transfer' && warehouses.length < 2)) {
+    toast(type === 'transfer' ? 'Для перемещения нужны позиция и два работающих склада' : 'Сначала добавьте работающий склад и позицию', true);
+    return;
+  }
+  const warehouseOptions = warehouses.map((item) => `<option value="${item.id}">${esc(item.name)}</option>`).join('');
+  const title = STOCK_MOVEMENT_LABELS[type];
+  openModal(`<h2>${esc(title)}</h2><form id="stock-movement-form">
+    ${stockBusinessSelect(targetBusinessId)}
+    <label class="field"><span>Позиция</span><select name="stockItemId" required>${items.map((item) => `<option value="${item.id}">${esc(item.name)} · ${esc(item.unitName)}</option>`).join('')}</select></label>
+    ${type === 'transfer' ? `<div class="form-row"><label class="field"><span>Откуда</span><select name="fromWarehouseId">${warehouseOptions}</select></label><label class="field"><span>Куда</span><select name="toWarehouseId">${[...warehouses].reverse().map((item) => `<option value="${item.id}">${esc(item.name)}</option>`).join('')}</select></label></div>` : `<label class="field"><span>Склад</span><select name="warehouseId">${warehouseOptions}</select></label>`}
+    <div class="form-row"><label class="field"><span>Количество</span><input type="number" name="quantity" min="0.001" step="0.001" required></label><label class="field"><span>Дата</span><input type="date" name="date" value="${today()}" required></label></div>
+    ${type === 'receipt' ? `<div class="form-row"><label class="field"><span>Поставщик</span><input type="text" name="supplier"></label><label class="field"><span>Сумма партии, ₽</span><input type="number" name="totalAmount" min="0" step="0.01"></label></div>
+      ${finance.length ? `<label class="field"><span>Связать с расходом в финансах (необязательно)</span><select name="financeId"><option value="">Не связывать</option>${finance.map((item) => `<option value="${item.id}">${fmtDate(item.date)} · ${esc(item.counterparty || item.category || 'Расход')} · ${money(item.amount)}</option>`).join('')}</select></label>` : ''}` : ''}
+    ${type === 'expense' ? '<div class="form-row"><label class="field"><span>Причина</span><select name="reason"><option value="event">На событие</option><option value="defect">Брак</option><option value="loss">Потеря</option><option value="gift">Подарок</option><option value="other">Другое</option></select></label><label class="field"><span>ID события, если есть</span><input type="text" name="eventId"></label></div>' : ''}
+    <label class="field"><span>Комментарий</span><textarea name="note"></textarea></label>
+    <div class="actions"><button type="button" class="btn" id="modal-cancel">Отмена</button><button type="submit" class="btn primary">Провести</button></div>
+  </form>`, (root) => {
+    $('#modal-cancel', root).addEventListener('click', closeModal);
+    const unitSelect = $('[name=unit]', root);
+    if (unitSelect?.tagName === 'SELECT') unitSelect.addEventListener('change', () => { closeModal(); openStockMovementForm(type, unitSelect.value); });
+    $('#stock-movement-form', root).addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const data = Object.fromEntries(new FormData(event.target).entries());
+      const unit = data.unit || targetBusinessId;
+      const item = { ...data, type, quantity: Number(data.quantity), totalAmount: data.totalAmount ? Number(data.totalAmount) : undefined, businessId: unit, unit };
+      delete item.unitName;
+      closeModal();
+      await stockCreate('stockMovements', item, `${title} проведён`);
+    });
+  });
+}
+
+function openInventoryForm(inventory, forcedBusinessId = '') {
+  const completed = inventory?.status === 'completed';
+  const targetBusinessId = businessIdOf(inventory) || forcedBusinessId || moduleBusinessId('stock');
+  const warehouses = (S.data.warehouses || []).filter((item) => businessIdOf(item) === targetBusinessId && item.active !== false);
+  const items = (S.data.stockItems || []).filter((item) => businessIdOf(item) === targetBusinessId && item.active !== false);
+  if (!inventory && (!warehouses.length || !items.length)) { toast('Сначала добавьте работающий склад и позиции', true); return; }
+  const warehouseId = inventory?.warehouseId || warehouses[0]?.id;
+  const actualByItem = new Map((inventory?.items || []).map((row) => [row.stockItemId, row.actualQuantity]));
+  const rows = items.map((item) => `<label class="stock-count-row"><span><strong>${esc(item.name)}</strong><small>${esc(item.unitName)}</small></span><input type="number" name="actual:${item.id}" min="0" step="0.001" value="${esc(actualByItem.has(item.id) ? actualByItem.get(item.id) : Number(stockBalance(warehouseId, item.id)?.quantity || 0))}" ${completed ? 'disabled' : ''}></label>`).join('');
+  openModal(`<h2>${completed ? 'Инвентаризация завершена' : inventory ? 'Черновик инвентаризации' : 'Новая инвентаризация'}</h2><form id="inventory-form">
+    ${stockBusinessSelect(targetBusinessId, !!inventory)}
+    <label class="field"><span>Склад</span><select name="warehouseId" ${completed ? 'disabled' : ''}>${warehouses.map((item) => `<option value="${item.id}" ${item.id === warehouseId ? 'selected' : ''}>${esc(item.name)}</option>`).join('')}</select></label>
+    <label class="field"><span>Дата</span><input type="date" name="date" value="${esc(inventory?.date || today())}" required ${completed ? 'disabled' : ''}></label>
+    <div class="stock-count-list">${rows || '<div class="empty">Нет активных позиций</div>'}</div>
+    <label class="field"><span>Комментарий</span><textarea name="note" ${completed ? 'disabled' : ''}>${esc(inventory?.note || '')}</textarea></label>
+    <div class="actions">${inventory && !completed ? '<button type="button" class="btn danger ghost left" id="inventory-delete">Удалить</button>' : ''}<button type="button" class="btn" id="modal-cancel">${completed ? 'Закрыть' : 'Отмена'}</button>${!completed ? '<button type="submit" class="btn" data-inventory-status="draft">Сохранить черновик</button><button type="submit" class="btn primary" data-inventory-status="completed">Завершить</button>' : ''}</div>
+  </form>`, (root) => {
+    $('#modal-cancel', root).addEventListener('click', closeModal);
+    if (completed) return;
+    const businessSelect = $('[name=unit]', root);
+    if (!inventory && businessSelect?.tagName === 'SELECT') businessSelect.addEventListener('change', () => { closeModal(); openInventoryForm(null, businessSelect.value); });
+    $('[name=warehouseId]', root).addEventListener('change', (event) => {
+      items.forEach((item) => { const input = $(`[name="actual:${item.id}"]`, root); if (input) input.value = Number(stockBalance(event.target.value, item.id)?.quantity || 0); });
+    });
+    $('#inventory-form', root).addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const status = event.submitter?.dataset.inventoryStatus || 'draft';
+      if (status === 'completed' && !confirm('Завершить инвентаризацию и заменить системные остатки фактическими?')) return;
+      const data = new FormData(event.target);
+      const unit = data.get('unit') || targetBusinessId;
+      const itemRows = items.map((item) => ({ stockItemId: item.id, actualQuantity: Number(data.get(`actual:${item.id}`) || 0) }));
+      const next = { ...(inventory || {}), businessId: unit, unit, warehouseId: data.get('warehouseId'), date: data.get('date'), note: data.get('note') || '', status, items: itemRows };
+      closeModal();
+      if (inventory) await stockUpdate('inventories', next, status === 'completed' ? 'Инвентаризация завершена' : 'Черновик сохранён');
+      else await stockCreate('inventories', next, status === 'completed' ? 'Инвентаризация завершена' : 'Черновик сохранён');
+    });
+    $('#inventory-delete', root)?.addEventListener('click', async () => { if (!confirm('Удалить черновик?')) return; closeModal(); await doDelete('inventories', inventory.id, 'Черновик удалён'); });
   });
 }
 

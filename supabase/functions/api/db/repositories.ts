@@ -18,6 +18,13 @@ export async function writeRow(entity: string, item: Rec) {
   if (error) throw new Error(error.message);
 }
 
+export async function writeRows(rows: Array<{ entity: string; item: Rec }>) {
+  if (!rows.length) return;
+  const records = rows.map(({ entity, item }) => ({ entity, id: item.id, data: item }));
+  const { error } = await db.from("records").upsert(records);
+  if (error) throw new Error(error.message);
+}
+
 export async function insertRow(entity: string, item: Rec) {
   const { error } = await db.from("records").insert({ entity, id: item.id, data: item });
   if (error?.code === "23505") return false;

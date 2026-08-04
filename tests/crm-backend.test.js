@@ -203,7 +203,8 @@ test("серверный bootstrap создаёт только справочн�
   assert.doesNotMatch(accessSource, /writeRow\("(?:companies|contacts|leads|deals|dealItems)"/);
   assert.match(actionsSource, /validateCrmEntity\(entity, item, data\)/);
   assert.match(actionsSource, /crmDeleteError\(entity, item, data\)/);
-  assert.match(actionsSource, /\[businesses, memberships, businessOwners, employees, clients, companies, contacts, leads, deals, pipelines, stages, dealItems, venues, players, tasks, finance, staffExpenses, cash, notifications\]\s*=\s*\n?\s*await Promise\.all\(ENTITIES\.map\(readAll\)\)/);
+  assert.match(actionsSource, /Promise\.all\(ENTITIES\.map\(async \(entity\) => \[entity, await readAll\(entity\)\]/);
+  assert.match(actionsSource, /Object\.fromEntries\(entries\)/);
   assert.match(actionsSource, /CRM_ENTITIES\.includes\(entity\)\) item = normalizeCrmRecord\(entity, item\)/);
   assert.match(actionsSource, /const merged = normalizeCrmRecord\(entity, \{ \.\.\.before, \.\.\.item, updated: Date\.now\(\) \}\)/);
 });

@@ -47,6 +47,12 @@ POST на `backendUrl`, `Content-Type: text/plain` (чтобы без preflight)
 - CRM продаж: `companies` (реквизиты, ответственные и отдельный статус клиента), `contacts` (люди компании), `leads` (сырой входящий контакт), `deals` (сделка и стадия), `pipelines` + `stages` (настраиваемые воронки), `dealItems` (ручные позиции сделки, в том числе регулярные). Все семь сущностей содержат одинаковые `businessId` и `unit`; bootstrap идемпотентно создаёт для активного бизнеса только стандартную пустую воронку и её стадии, но не создаёт компании, контакты, лиды или сделки.
 - `venues` (padel): + `slots` — календарь кортов, объект `{"YYYY-MM-DD_HH": {tag, price}}`, tag: `booked|free|busy|want`
 - `players` (padel): name, phone, level, notes; импорт вставкой из Excel
+- `warehouses`: businessId/unit, name, active — склады бизнеса; модуль `stock` обязателен.
+- `stockItems`: businessId/unit, name, sku, unitName, costPrice, minStock, active — складская номенклатура без начальных или демонстрационных остатков.
+- `stockMovements`: неизменяемая история `receipt|expense|transfer|inventory`; позиция, склад/склады, количество, дата, поставщик/сумма или причина/событие при наличии. Создание движения системно пересчитывает остатки.
+- `stockBalances`: системные остатки и резерв по паре склад + позиция; прямое редактирование запрещено.
+- `reservations`: резерв позиции на складе, status `active|released`; активный резерв не может превышать свободный остаток.
+- `inventories`: сверка фактических остатков склада, status `draft|completed`; завершение создаёт корректирующие движения, завершённая инвентаризация неизменяема.
 - `tasks`: assigneeId, authorId, status `new`(«Не видел», красный)`|progress|question`(жёлтый)`|done`, priority, due, comments[]
 - `finance`: unit, date, type `income|expense`, amount, method `account|card|sbp|cash|other`, source `bank|manual`, category, counterparty, comment, bankId (дедуп банка), employeeId (зарплата/компенсация), owner (`savva|andrey|dmitry` — чей расход)
 - `staffExpenses`: траты сотрудников; receiptId (фото чека, обязателен), status `pending`(красный)`|returned_cash|returned_bank|returned_salary`(зелёные)
@@ -63,6 +69,7 @@ POST на `backendUrl`, `Content-Type: text/plain` (чтобы без preflight)
 - Задачи: сотрудник ставит только себе; чужие (от админа) не редактирует — сервер режет апдейт до `{status}`; удаляет только свои.
 - Финансы/наличные/сотрудники: только админ. Сотруднику в bootstrap приходят только его выплаты (finance/cash с его employeeId) и его траты.
 - Трата без receiptId не создаётся.
+- Складские записи доступны активным участникам бизнеса только при включённом модуле `stock`. Все ссылки на склады и позиции проверяются внутри одного businessId/unit; движения и завершённые инвентаризации нельзя менять или удалять, а справочники нельзя удалить при связанных остатках или истории.
 
 ## Бизнес-логика финансов
 

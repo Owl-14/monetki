@@ -11,11 +11,11 @@ export const UNITS = {
 
 export const BUSINESS_MODULES = {
   dashboard: 'Дашборд', tasks: 'Задачи', clients: 'Клиенты', venues: 'Площадки',
-  players: 'Игроки', finance: 'Финансы', money: 'Деньги сотрудника', team: 'Команда'
+  players: 'Игроки', stock: 'Склад', finance: 'Финансы', money: 'Деньги сотрудника', team: 'Команда'
 };
 
 export const DEFAULT_BUSINESSES = [
-  { id: 'padel', name: 'Падел', emoji: '🎾', modules: ['dashboard', 'tasks', 'venues', 'players', 'finance', 'money', 'team'], active: true },
+  { id: 'padel', name: 'Падел', emoji: '🎾', modules: ['dashboard', 'tasks', 'venues', 'players', 'stock', 'finance', 'money', 'team'], active: true },
   { id: 'dev', name: 'Разработка', emoji: '💻', modules: ['dashboard', 'tasks', 'clients', 'finance', 'money', 'team'], active: true }
 ];
 
@@ -87,7 +87,10 @@ function legacyBusinessIds(employee) {
 
 function ensureCoreData(db) {
   let changed = false;
-  ['businesses', 'memberships', 'businessOwners', 'staffExpenses', 'cash', 'files', ...CRM_ENTITIES].forEach((key) => {
+  [
+    'businesses', 'memberships', 'businessOwners', 'staffExpenses', 'cash', 'files', ...CRM_ENTITIES,
+    'warehouses', 'stockItems', 'stockMovements', 'stockBalances', 'reservations', 'inventories'
+  ].forEach((key) => {
     if (!Array.isArray(db[key])) { db[key] = []; changed = true; }
   });
   DEFAULT_BUSINESSES.forEach((business) => {
@@ -144,7 +147,10 @@ function ensureCoreData(db) {
       }
     });
   });
-  ['clients', 'venues', 'players', 'tasks', 'finance', 'staffExpenses', ...CRM_ENTITIES].forEach((entity) => {
+  [
+    'clients', 'venues', 'players', 'tasks', 'finance', 'staffExpenses', ...CRM_ENTITIES,
+    'warehouses', 'stockItems', 'stockMovements', 'stockBalances', 'reservations', 'inventories'
+  ].forEach((entity) => {
     (db[entity] || []).forEach((item) => {
       const beforeBusinessId = item.businessId;
       const beforeUnit = item.unit;
@@ -303,6 +309,13 @@ function seedData() {
       { id: uid(), unit: 'padel', date: d(-3), type: 'expense', amount: 14000, method: 'card', source: 'manual', category: 'Аренда', counterparty: 'Padel Arena', comment: 'PADEL KLUB корты на турнир', bankId: '' },
       { id: uid(), unit: 'dev', date: d(-6), type: 'expense', amount: 3500, method: 'card', source: 'manual', category: 'Сервисы', counterparty: 'Хостинг', comment: '', bankId: '' }
     ],
+    // Склад начинается пустым: пользователь заводит свои реальные склады и позиции.
+    warehouses: [],
+    stockItems: [],
+    stockMovements: [],
+    stockBalances: [],
+    reservations: [],
+    inventories: [],
     notifications: [
       { id: uid(), toId: 'u-admin', text: 'Демо-режим: это пример уведомления. Подключите базу — и они станут настоящими.', link: '#/tasks', read: false, created: now }
     ]
@@ -312,7 +325,8 @@ function seedData() {
 // ---------- LocalStore (демо) ----------
 const LS_KEY = 'monetki_demo_db';
 const CORE_ENTITIES = ['businesses', 'memberships', 'businessOwners'];
-const BUSINESS_SCOPED_ENTITIES = ['clients', 'venues', 'players', 'tasks', 'finance', 'staffExpenses', ...CRM_ENTITIES];
+const STOCK_ENTITIES = ['warehouses', 'stockItems', 'stockMovements', 'stockBalances', 'reservations', 'inventories'];
+const BUSINESS_SCOPED_ENTITIES = ['clients', 'venues', 'players', 'tasks', 'finance', 'staffExpenses', ...CRM_ENTITIES, ...STOCK_ENTITIES];
 const LOCAL_ENTITIES = [
   ...CORE_ENTITIES, 'employees', ...BUSINESS_SCOPED_ENTITIES, 'cash', 'files', 'notifications'
 ];
@@ -521,6 +535,83 @@ function crmUpdateError(db, entity, before, after) {
   return null;
 }
 
+function stockReference(db, entity, id, businessId, activeOnly = true) {
+  return (db[entity] || []).find((item) => item.id === id
+    && businessIdOf(item) === businessId
+    && (!activeOnly || item.active !== false));
+}
+
+function nonNegativeNumber(value) {
+  return value !== '' && value !== null && Number.isFinite(Number(value)) && Number(value) >= 0;
+}
+
+function positiveNumber(value) {
+  return value !== '' && value !== null && Number.isFinite(Number(value)) && Number(value) > 0;
+}
+
+function stockValidationError(db, entity, item, ignoreId = '') {
+  const businessId = businessIdOf(item);
+  if (entity === 'warehouses') {
+    if (!String(item?.name || '').trim()) return 'Укажите название склада';
+    if (typeof item?.active !== 'boolean') return 'Статус склада должен быть логическим';
+    if ((db.warehouses || []).some((x) => x.id !== ignoreId && businessIdOf(x) === businessId
+      && String(x.name || '').trim().toLowerCase() === String(item.name).trim().toLowerCase())) return 'Склад с таким названием уже существует';
+  }
+  if (entity === 'stockItems') {
+    if (!String(item?.name || '').trim()) return 'Укажите название позиции';
+    if (!String(item?.unitName || '').trim()) return 'Укажите единицу измерения';
+    if (!nonNegativeNumber(item?.costPrice)) return 'Себестоимость должна быть числом не меньше нуля';
+    if (!nonNegativeNumber(item?.minStock)) return 'Минимальный остаток должен быть числом не меньше нуля';
+    if (typeof item?.active !== 'boolean') return 'Статус позиции должен быть логическим';
+    const sku = String(item?.sku || '').trim().toLowerCase();
+    if (sku && (db.stockItems || []).some((x) => x.id !== ignoreId && businessIdOf(x) === businessId
+      && String(x.sku || '').trim().toLowerCase() === sku)) return 'Позиция с таким артикулом уже существует';
+  }
+  if (entity === 'stockMovements') {
+    if (!['receipt', 'expense', 'transfer', 'inventory'].includes(item?.type)) return 'Неизвестный тип движения';
+    if (!positiveNumber(item?.quantity)) return 'Количество должно быть больше нуля';
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(item?.date || ''))) return 'Укажите дату движения';
+    if (!stockReference(db, 'stockItems', item?.stockItemId, businessId)) return 'Позиция не найдена или выключена';
+    if (item.type === 'transfer') {
+      if (!stockReference(db, 'warehouses', item?.fromWarehouseId, businessId)) return 'Склад-источник не найден или выключен';
+      if (!stockReference(db, 'warehouses', item?.toWarehouseId, businessId)) return 'Склад-получатель не найден или выключен';
+      if (item.fromWarehouseId === item.toWarehouseId) return 'Выберите разные склады';
+    } else if (!stockReference(db, 'warehouses', item?.warehouseId, businessId)) return 'Склад не найден или выключен';
+    if (item.type === 'inventory' && !item.inventoryId) return 'Не указана инвентаризация';
+    if (item.type === 'receipt' && item.totalAmount !== undefined && item.totalAmount !== '' && !nonNegativeNumber(item.totalAmount)) return 'Сумма партии должна быть числом не меньше нуля';
+    if (item.type === 'receipt' && item.financeId && !(db.finance || []).some((finance) =>
+      finance.id === item.financeId && businessIdOf(finance) === businessId && finance.type === 'expense'
+    )) return 'Финансовая операция не найдена в этом бизнесе';
+  }
+  if (entity === 'stockBalances') {
+    if (!stockReference(db, 'warehouses', item?.warehouseId, businessId, false)) return 'Склад не найден';
+    if (!stockReference(db, 'stockItems', item?.stockItemId, businessId, false)) return 'Позиция не найдена';
+    if (!nonNegativeNumber(item?.quantity) || !nonNegativeNumber(item?.reserved)) return 'Остаток и резерв не могут быть отрицательными';
+    if (Number(item.reserved) > Number(item.quantity)) return 'Резерв не может быть больше остатка';
+    if ((db.stockBalances || []).some((x) => x.id !== ignoreId && businessIdOf(x) === businessId
+      && x.warehouseId === item.warehouseId && x.stockItemId === item.stockItemId)) return 'Остаток для этой позиции уже существует';
+  }
+  if (entity === 'reservations') {
+    if (!stockReference(db, 'warehouses', item?.warehouseId, businessId)) return 'Склад не найден или выключен';
+    if (!stockReference(db, 'stockItems', item?.stockItemId, businessId)) return 'Позиция не найдена или выключена';
+    if (!positiveNumber(item?.quantity)) return 'Количество резерва должно быть больше нуля';
+    if (!['active', 'released'].includes(item?.status)) return 'Неизвестный статус резерва';
+  }
+  if (entity === 'inventories') {
+    if (!stockReference(db, 'warehouses', item?.warehouseId, businessId)) return 'Склад не найден или выключен';
+    if (!['draft', 'completed'].includes(item?.status)) return 'Неизвестный статус инвентаризации';
+    if (!Array.isArray(item?.items)) return 'Позиции инвентаризации должны быть списком';
+    const seen = new Set();
+    for (const row of item.items) {
+      if (!stockReference(db, 'stockItems', row?.stockItemId, businessId)) return 'В инвентаризации есть недоступная позиция';
+      if (!nonNegativeNumber(row?.actualQuantity)) return 'Фактический остаток не может быть отрицательным';
+      if (seen.has(row.stockItemId)) return 'Позиция добавлена в инвентаризацию дважды';
+      seen.add(row.stockItemId);
+    }
+  }
+  return null;
+}
+
 export class LocalStore {
   constructor() { this.demo = true; }
   _db() {
@@ -562,6 +653,8 @@ export class LocalStore {
       .filter(canSee)
       .filter((client) => !db.companies.some((company) => company.legacyClientId === client.id))
       .map(legacyCompany);
+    const canSeeStock = (item) => !scopeError(item) && canSee(item)
+      && db.businesses.some((business) => business.id === businessIdOf(item) && Array.isArray(business.modules) && business.modules.includes('stock'));
     return {
       ok: true,
       profile: this._profile(db, u),
@@ -586,6 +679,12 @@ export class LocalStore {
         tasks: db.tasks.filter((t) => canSee(t) && (isAdmin || t.assigneeId === u.id)),
         finance: db.finance.filter((f) => canSee(f) && (isAdmin || f.employeeId === u.id)),
         staffExpenses: db.staffExpenses.filter((e) => canSee(e) && (isAdmin || e.employeeId === u.id)),
+        warehouses: db.warehouses.filter(canSeeStock),
+        stockItems: db.stockItems.filter(canSeeStock),
+        stockMovements: db.stockMovements.filter(canSeeStock),
+        stockBalances: db.stockBalances.filter(canSeeStock),
+        reservations: db.reservations.filter(canSeeStock),
+        inventories: db.inventories.filter(canSeeStock),
         cash: isAdmin ? db.cash : db.cash.filter((c) => c.employeeId === u.id),
         bankBalance: isAdmin ? { amount: 175000, updated: new Date().toISOString() } : null,
         notifications: db.notifications.filter((n) => n.toId === u.id)
@@ -596,6 +695,7 @@ export class LocalStore {
   _baseWriteError(u, entity) {
     if (!LOCAL_ENTITIES.includes(entity) || entity === 'files') return 'Неизвестная сущность';
     if (entity === 'notifications') return 'Нельзя';
+    if (entity === 'stockBalances') return 'Остатки меняются только складскими операциями';
     if ([...CORE_ENTITIES, 'employees', 'finance', 'cash'].includes(entity) && u.role !== 'admin') return 'Только для админа';
     return null;
   }
@@ -608,6 +708,101 @@ export class LocalStore {
     if (!canAccessBusiness(db, u, businessId)) return 'Нет доступа к этому бизнесу';
     if (!db.businesses.some((business) => business.id === businessId && business.active !== false)) return 'Бизнес в архиве';
     return null;
+  }
+
+  _stockWriteError(db, u, item) {
+    const accessError = this._scopeWriteError(db, u, item);
+    if (accessError) return accessError;
+    const business = db.businesses.find((x) => x.id === businessIdOf(item));
+    if (!Array.isArray(business?.modules) || !business.modules.includes('stock')) return 'Модуль «Склад» выключен для этого бизнеса';
+    return null;
+  }
+
+  _stockBalance(db, businessId, warehouseId, stockItemId, create = false) {
+    let balance = db.stockBalances.find((x) => businessIdOf(x) === businessId
+      && x.warehouseId === warehouseId && x.stockItemId === stockItemId);
+    if (!balance && create) {
+      balance = {
+        id: uid(), businessId, unit: businessId, warehouseId, stockItemId,
+        quantity: 0, reserved: 0, created: Date.now(), updated: Date.now()
+      };
+      db.stockBalances.push(balance);
+    }
+    return balance;
+  }
+
+  _applyStockMovement(db, item) {
+    const businessId = businessIdOf(item);
+    const quantity = Number(item.quantity);
+    const change = (warehouseId, delta) => {
+      const balance = this._stockBalance(db, businessId, warehouseId, item.stockItemId, true);
+      const next = Number(balance.quantity || 0) + delta;
+      if (next < Number(balance.reserved || 0)) return 'Недостаточно свободного остатка';
+      balance.quantity = next;
+      balance.updated = Date.now();
+      return null;
+    };
+    if (item.type === 'receipt') return change(item.warehouseId, quantity);
+    if (item.type === 'expense') return change(item.warehouseId, -quantity);
+    if (item.type === 'transfer') {
+      const source = this._stockBalance(db, businessId, item.fromWarehouseId, item.stockItemId, true);
+      if (Number(source.quantity || 0) - Number(source.reserved || 0) < quantity) return 'Недостаточно свободного остатка для перемещения';
+      source.quantity = Number(source.quantity || 0) - quantity;
+      source.updated = Date.now();
+      return change(item.toWarehouseId, quantity);
+    }
+    if (item.type === 'inventory') return change(item.warehouseId, item.direction === 'decrease' ? -quantity : quantity);
+    return 'Неизвестный тип движения';
+  }
+
+  _completeInventory(db, inventory, userId) {
+    const businessId = businessIdOf(inventory);
+    for (const row of inventory.items) {
+      const balance = this._stockBalance(db, businessId, inventory.warehouseId, row.stockItemId, false);
+      if (Number(row.actualQuantity) < Number(balance?.reserved || 0)) return 'Фактический остаток не может быть меньше активного резерва';
+    }
+    for (const row of inventory.items) {
+      const balance = this._stockBalance(db, businessId, inventory.warehouseId, row.stockItemId, true);
+      const before = Number(balance.quantity || 0);
+      const actual = Number(row.actualQuantity);
+      const delta = actual - before;
+      balance.quantity = actual;
+      balance.updated = Date.now();
+      if (!delta) continue;
+      db.stockMovements.push({
+        id: uid(), businessId, unit: businessId, type: 'inventory', inventoryId: inventory.id,
+        stockItemId: row.stockItemId, warehouseId: inventory.warehouseId,
+        quantity: Math.abs(delta), direction: delta > 0 ? 'increase' : 'decrease',
+        date: inventory.date || new Date().toISOString().slice(0, 10), note: inventory.note || '',
+        createdBy: userId, created: Date.now(), updated: Date.now()
+      });
+    }
+    return null;
+  }
+
+  _changeReservation(db, before, after) {
+    const release = (item) => {
+      if (!item || item.status !== 'active') return;
+      const balance = this._stockBalance(db, businessIdOf(item), item.warehouseId, item.stockItemId, true);
+      balance.reserved = Math.max(0, Number(balance.reserved || 0) - Number(item.quantity || 0));
+      balance.updated = Date.now();
+    };
+    const reserve = (item) => {
+      if (!item || item.status !== 'active') return null;
+      const balance = this._stockBalance(db, businessIdOf(item), item.warehouseId, item.stockItemId, true);
+      if (Number(balance.quantity || 0) - Number(balance.reserved || 0) < Number(item.quantity || 0)) return 'Недостаточно свободного остатка для резерва';
+      balance.reserved = Number(balance.reserved || 0) + Number(item.quantity || 0);
+      balance.updated = Date.now();
+      return null;
+    };
+    if (after?.status === 'active') {
+      const balance = this._stockBalance(db, businessIdOf(after), after.warehouseId, after.stockItemId, true);
+      const returned = before?.status === 'active' && businessIdOf(before) === businessIdOf(after)
+        && before.warehouseId === after.warehouseId && before.stockItemId === after.stockItemId ? Number(before.quantity || 0) : 0;
+      if (Number(balance.quantity || 0) - Number(balance.reserved || 0) + returned < Number(after.quantity || 0)) return 'Недостаточно свободного остатка для резерва';
+    }
+    release(before);
+    return reserve(after);
   }
 
   _salaryOffsets(db, u, item) {
@@ -631,13 +826,21 @@ export class LocalStore {
     const baseError = this._baseWriteError(u, entity);
     if (baseError) return { ok: false, error: baseError };
     item = CRM_ENTITIES.includes(entity) ? crmDefaults(entity, item) : { ...item };
+    if (entity === 'stockMovements' && item.type === 'inventory') return { ok: false, error: 'Движение инвентаризации создаётся только при её завершении' };
     if (entity === 'businesses') item.id = String(item.id || '').trim();
     if (entity === 'businessOwners') item.ownerId = String(item.ownerId || '').trim();
+    if (entity === 'stockItems') {
+      item.costPrice = Number(item.costPrice);
+      item.minStock = Number(item.minStock);
+    }
+    if (['stockMovements', 'reservations'].includes(entity)) item.quantity = Number(item.quantity);
+    if (entity === 'reservations') item.status = item.status || 'active';
+    if (entity === 'inventories') item.items = (item.items || []).map((row) => ({ ...row, actualQuantity: Number(row.actualQuantity) }));
     const coreError = CORE_ENTITIES.includes(entity) ? coreValidationError(db, entity, item) : null;
     if (coreError) return { ok: false, error: coreError };
     if (entity === 'staffExpenses' && u.role !== 'admin' && !businessIdOf(item)) scopedItem(item, u.unit);
     if (BUSINESS_SCOPED_ENTITIES.includes(entity)) {
-      const accessError = this._scopeWriteError(db, u, item);
+      const accessError = STOCK_ENTITIES.includes(entity) ? this._stockWriteError(db, u, item) : this._scopeWriteError(db, u, item);
       if (accessError) return { ok: false, error: accessError };
       scopedItem(item);
     }
@@ -648,6 +851,8 @@ export class LocalStore {
     }
     const crmError = crmValidationError(db, entity, item);
     if (crmError) return { ok: false, error: crmError };
+    const stockError = STOCK_ENTITIES.includes(entity) ? stockValidationError(db, entity, item) : null;
+    if (stockError) return { ok: false, error: stockError };
     // id всегда серверный — нельзя перезаписать чужую запись, прислав её id
     item = { ...item, id: entity === 'businesses' && item.id ? item.id : uid(), created: Date.now(), updated: Date.now() };
     if (entity === 'employees' && !item.code) item.code = String(Math.floor(100000 + Math.random() * 900000));
@@ -665,6 +870,23 @@ export class LocalStore {
     if ((entity === 'finance' || entity === 'cash') && item.category === 'Зарплата') {
       offsets = this._salaryOffsets(db, u, item);
       if (offsets?.error) return { ok: false, error: offsets.error };
+    }
+    if (entity === 'stockMovements') {
+      item.createdBy = u.id;
+      const movementError = this._applyStockMovement(db, item);
+      if (movementError) return { ok: false, error: movementError };
+    }
+    if (entity === 'reservations') {
+      const reservationError = this._changeReservation(db, null, item);
+      if (reservationError) return { ok: false, error: reservationError };
+    }
+    if (entity === 'inventories') {
+      item.createdBy = u.id;
+      if (item.status === 'completed') {
+        item.completedAt = Date.now();
+        const inventoryError = this._completeInventory(db, item, u.id);
+        if (inventoryError) return { ok: false, error: inventoryError };
+      }
     }
     db[entity].push(item);
     if (entity === 'businesses') {
@@ -703,14 +925,17 @@ export class LocalStore {
     const i = db[entity].findIndex((x) => x.id === item.id);
     if (i < 0) return { ok: false, error: 'Не найдено' };
     const before = db[entity][i];
+    if (entity === 'stockMovements') return { ok: false, error: 'Проведённые движения нельзя изменять' };
+    if (entity === 'inventories' && before.status === 'completed') return { ok: false, error: 'Завершённую инвентаризацию нельзя изменять' };
     if (entity === 'businesses' && !canAccessBusiness(db, u, before.id)) return { ok: false, error: 'Нет доступа к этому бизнесу' };
     if (BUSINESS_SCOPED_ENTITIES.includes(entity) || ['memberships', 'businessOwners'].includes(entity)) {
-      const sourceError = this._scopeWriteError(db, u, before);
+      const sourceError = STOCK_ENTITIES.includes(entity) ? this._stockWriteError(db, u, before) : this._scopeWriteError(db, u, before);
       if (sourceError) return { ok: false, error: sourceError };
       const mismatch = scopeError(item);
       if (mismatch) return { ok: false, error: mismatch };
       const targetBusinessId = item.businessId || item.unit || businessIdOf(before);
-      const targetError = this._scopeWriteError(db, u, { businessId: targetBusinessId, unit: targetBusinessId });
+      const target = { businessId: targetBusinessId, unit: targetBusinessId };
+      const targetError = STOCK_ENTITIES.includes(entity) ? this._stockWriteError(db, u, target) : this._scopeWriteError(db, u, target);
       if (targetError) return { ok: false, error: targetError };
       item = { ...item, businessId: targetBusinessId, unit: targetBusinessId };
     }
@@ -729,7 +954,22 @@ export class LocalStore {
       if (before.assigneeId !== u.id) return { ok: false, error: 'Нет доступа' };
       item = { id: before.id, status: item.status };
     }
-    db[entity][i] = { ...before, ...item, updated: Date.now() };
+    let next = { ...before, ...item };
+    if (entity === 'stockItems') next = { ...next, costPrice: Number(next.costPrice), minStock: Number(next.minStock) };
+    if (entity === 'reservations') next = { ...next, quantity: Number(next.quantity) };
+    if (entity === 'inventories') next = { ...next, items: (next.items || []).map((row) => ({ ...row, actualQuantity: Number(row.actualQuantity) })) };
+    const stockError = STOCK_ENTITIES.includes(entity) ? stockValidationError(db, entity, next, before.id) : null;
+    if (stockError) return { ok: false, error: stockError };
+    if (entity === 'reservations') {
+      const reservationError = this._changeReservation(db, before, next);
+      if (reservationError) return { ok: false, error: reservationError };
+    }
+    if (entity === 'inventories' && before.status === 'draft' && next.status === 'completed') {
+      next.completedAt = Date.now();
+      const inventoryError = this._completeInventory(db, next, u.id);
+      if (inventoryError) return { ok: false, error: inventoryError };
+    }
+    db[entity][i] = { ...next, updated: Date.now() };
     if (entity === 'businesses') ensureCoreData(db);
     if (entity === 'tasks') {
       const t = db[entity][i];
@@ -775,10 +1015,26 @@ export class LocalStore {
     }
     const before = db[entity].find((x) => x.id === id);
     if (!before) return { ok: false, error: 'Не найдено' };
+    if (entity === 'stockMovements') return { ok: false, error: 'Проведённые движения нельзя удалять' };
+    if (entity === 'inventories' && before.status === 'completed') return { ok: false, error: 'Завершённую инвентаризацию нельзя удалять' };
     if (entity === 'businesses' && !canAccessBusiness(db, u, before.id)) return { ok: false, error: 'Нет доступа к этому бизнесу' };
     if (BUSINESS_SCOPED_ENTITIES.includes(entity) || ['memberships', 'businessOwners'].includes(entity)) {
-      const sourceError = this._scopeWriteError(db, u, before);
+      const sourceError = STOCK_ENTITIES.includes(entity) ? this._stockWriteError(db, u, before) : this._scopeWriteError(db, u, before);
       if (sourceError) return { ok: false, error: sourceError };
+    }
+    if (entity === 'warehouses') {
+      const linked = db.stockBalances.some((x) => x.warehouseId === id)
+        || db.stockMovements.some((x) => x.warehouseId === id || x.fromWarehouseId === id || x.toWarehouseId === id)
+        || db.reservations.some((x) => x.warehouseId === id)
+        || db.inventories.some((x) => x.warehouseId === id);
+      if (linked) return { ok: false, error: 'Склад уже используется. Его можно выключить, но нельзя удалить' };
+    }
+    if (entity === 'stockItems') {
+      const linked = db.stockBalances.some((x) => x.stockItemId === id)
+        || db.stockMovements.some((x) => x.stockItemId === id)
+        || db.reservations.some((x) => x.stockItemId === id)
+        || db.inventories.some((x) => (x.items || []).some((row) => row.stockItemId === id));
+      if (linked) return { ok: false, error: 'Позиция уже используется. Её можно выключить, но нельзя удалить' };
     }
     if (entity === 'tasks' && u.role !== 'admin' && before.authorId !== u.id) return { ok: false, error: 'Удалять можно только свои задачи' };
     if (entity === 'staffExpenses' && u.role !== 'admin' && (before.employeeId !== u.id || before.status !== 'pending')) return { ok: false, error: 'Нет доступа' };
@@ -787,6 +1043,7 @@ export class LocalStore {
     if (entity === 'tasks' && before.assigneeId && before.assigneeId !== u.id && before.status !== 'done') {
       db.notifications.push({ id: uid(), toId: before.assigneeId, text: `Задача удалена: ${before.title}`, link: '#/tasks', read: false, created: Date.now() });
     }
+    if (entity === 'reservations') this._changeReservation(db, before, null);
     if (entity === 'businesses') {
       const archived = { ...before, active: false, updated: Date.now() };
       db[entity] = db[entity].map((item) => item.id === id ? archived : item);
