@@ -2,6 +2,7 @@
 import { makeStore, UNITS, BUSINESS_MODULES, CLIENT_STATUSES, TASK_STATUSES, FIN_METHODS, FIN_CATEGORIES, OWNERS, ownerBalances, canUseExpenses, ownerLabel, businessIdOf } from './store.js';
 import { $, closeModal, esc, fmtDate, fmtDT, money, openModal, telHref, toast, today } from './ui.js';
 import { businessIdFromName, createAppState, createCrudHelpers } from './app-state.js';
+import { groupNavItems, NAV_ICONS, pageMeta, pickBottomNavItems } from './app-shell.js';
 
 // ---------- Состояние ----------
 const S = createAppState(makeStore());
@@ -101,25 +102,25 @@ window.addEventListener('hashchange', render);
 
 // ---------- Навигация ----------
 function navItems() {
-  const units = activeUnits();
   const items = [];
-  if (hasModule('dashboard')) items.push({ r: 'dashboard', ico: '🏠', label: 'Дашборд' });
-  if (hasModule('tasks')) items.push({ r: 'tasks', ico: '✅', label: 'Задачи', badge: (S.data?.tasks || []).filter((t) => t.assigneeId === S.profile.id && t.status !== 'done').length || '' });
-  if (!isAdmin() && hasModule('money')) items.push({ r: 'money', ico: '💰', label: 'Деньги' });
-  if (hasModule('clients')) items.push({ r: 'clients', ico: '🤝', label: 'Клиенты' });
+  const item = (r, label, group, badge = '') => ({ r, label, group, badge, ico: NAV_ICONS[r] });
+  if (hasModule('dashboard')) items.push(item('dashboard', 'Дашборд', 'overview'));
+  if (hasModule('tasks')) items.push(item('tasks', 'Задачи', 'work', (S.data?.tasks || []).filter((t) => t.assigneeId === S.profile.id && t.status !== 'done').length || ''));
+  if (!isAdmin() && hasModule('money')) items.push(item('money', 'Мои деньги', 'management'));
+  if (hasModule('clients')) items.push(item('clients', 'Клиенты', 'work'));
   if (hasModule('venues') || hasModule('players')) {
     if (hasModule('venues')) {
-    items.push({ r: 'venues', ico: '🏟️', label: 'Площадки' });
+    items.push(item('venues', 'Площадки', 'operations'));
     }
     if (hasModule('players')) {
-    items.push({ r: 'players', ico: '🎾', label: 'Игроки' });
+    items.push(item('players', 'Игроки', 'operations'));
     }
   }
   if (isAdmin()) {
-    if (hasModule('finance')) items.push({ r: 'finance', ico: '💰', label: 'Финансы' });
-    if (hasModule('team')) items.push({ r: 'team', ico: '👥', label: 'Команда' });
+    if (hasModule('finance')) items.push(item('finance', 'Финансы', 'management'));
+    if (hasModule('team')) items.push(item('team', 'Команда', 'management'));
   }
-  items.push({ r: 'settings', ico: '⚙️', label: 'Ещё' });
+  items.push(item('settings', 'Ещё', 'system'));
   return items;
 }
 
@@ -132,42 +133,62 @@ function render() {
   const items = navItems();
   const requestedRoute = currentRoute() === 'login' ? 'dashboard' : currentRoute();
   const route = items.some((i) => i.r === requestedRoute) ? requestedRoute : (items[0]?.r || 'settings');
-  const nav = items.map((i) => `
-    <button class="nav-item ${route === i.r ? 'active' : ''}" data-nav="${i.r}">
-      <span class="ico">${i.ico}</span>${i.label}
+  S.route = route;
+  if (requestedRoute !== route) history.replaceState(null, '', `#/${route}`);
+  const navButton = (i) => `
+    <button class="nav-item ${route === i.r ? 'active' : ''}" data-nav="${i.r}" ${route === i.r ? 'aria-current="page"' : ''}>
+      <span class="ico">${i.ico}</span><span>${i.label}</span>
       ${i.badge ? `<span class="badge red">${i.badge}</span>` : ''}
-    </button>`).join('');
+    </button>`;
+  const nav = groupNavItems(items.filter((i) => i.r !== 'settings')).map((group) => `
+    <section class="nav-group" aria-label="${group.label}">
+      <div class="nav-group-label">${group.label}</div>
+      ${group.items.map(navButton).join('')}
+    </section>`).join('');
+  const settingsItem = items.find((i) => i.r === 'settings');
   // Нижняя навигация (телефон): главное всегда под рукой — админу Финансы, сотруднику Деньги
-  const sectionIds = items.map((i) => i.r);
-  const unitFirst = ['clients', 'venues', 'players'].find((r) => sectionIds.includes(r));
-  const wanted = ['dashboard', 'tasks', isAdmin() ? 'finance' : 'money', unitFirst, 'settings'].filter(Boolean);
-  const bottomItems = wanted.map((r) => items.find((i) => i.r === r)).filter(Boolean);
-  const bottomNav = bottomItems.map((i) => `
-    <button class="${route === i.r ? 'active' : ''}" data-nav="${i.r}"><span class="ico">${i.ico}</span>${i.label}</button>`).join('');
+  const bottomItems = pickBottomNavItems(items, isAdmin());
+  const bottomHasRoute = bottomItems.some((i) => i.r === route);
+  const bottomNav = bottomItems.map((i) => {
+    const current = route === i.r;
+    const active = current || (!bottomHasRoute && i.r === 'settings');
+    return `<button class="${active ? 'active' : ''}" data-nav="${i.r}" ${current ? 'aria-current="page"' : ''}><span class="ico">${i.ico}</span><span>${i.label}</span></button>`;
+  }).join('');
 
   const showUnitSwitch = myUnits().length > 1;
   const unitSwitch = showUnitSwitch ? `
-    <div class="unit-switch">
-      ${myUnits().map((u) => `<button class="${S.unit === u ? 'active' : ''}" data-unit="${u}">${esc(businessEmoji(u))} ${esc(businessName(u))}</button>`).join('')}
-      <button class="${S.unit === 'all' ? 'active' : ''}" data-unit="all">Все</button>
-    </div>` : '';
+    <div class="unit-switch business-switch" role="group" aria-label="Выбор бизнеса">
+      ${myUnits().map((u) => `<button class="${S.unit === u ? 'active' : ''}" data-unit="${u}" aria-pressed="${S.unit === u}">${esc(businessEmoji(u))} ${esc(businessName(u))}</button>`).join('')}
+      <button class="${S.unit === 'all' ? 'active' : ''}" data-unit="all" aria-pressed="${S.unit === 'all'}">Все бизнесы</button>
+    </div>` : `<div class="business-single"><span>${esc(businessEmoji(myUnits()[0]))}</span>${esc(businessName(myUnits()[0]))}</div>`;
 
   const unread = unreadCount();
   app.innerHTML = `
     <div class="layout">
       <aside class="sidebar">
         <div class="brand"><div class="logo">М</div><div><div class="name">Монетки</div><div class="sub">${S.store.demo ? 'демо-режим' : 'общая база'}</div></div></div>
-        ${nav}
-        <div class="spacer"></div>
-        <div class="whoami"><b>${esc(S.profile.name)}</b>${isAdmin() ? 'администратор' : esc(myUnits().map(businessName).join(', '))}</div>
+        <div class="business-context">
+          <div class="business-label">Текущий бизнес</div>
+          ${unitSwitch}
+        </div>
+        <div class="nav-scroll">${nav}</div>
+        <div class="sidebar-settings">${navButton(settingsItem)}</div>
+        <div class="whoami"><span class="avatar">${esc(S.profile.name).slice(0, 1).toUpperCase()}</span><span><b>${esc(S.profile.name)}</b>${isAdmin() ? 'администратор' : esc(myUnits().map(businessName).join(', '))}</span></div>
       </aside>
       <main class="main">
-        <div class="topbar">
-          <h1 id="page-title"></h1>
-          <div class="grow"></div>
-          ${unitSwitch}
-          <button class="btn ghost bell" id="bell" title="Уведомления">🔔${unread ? `<span class="count">${unread}</span>` : ''}</button>
+        <div class="mobile-topbar">
+          <div class="mobile-brand"><span class="logo">М</span><b>Монетки</b></div>
+          <button class="btn ghost bell" id="bell-mobile" title="Уведомления" aria-label="Уведомления">🔔${unread ? `<span class="count">${unread}</span>` : ''}</button>
         </div>
+        <div class="mobile-business">${unitSwitch}</div>
+        <header class="page-header">
+          <div class="page-heading">
+            <div class="page-eyebrow" id="page-eyebrow"></div>
+            <h1 id="page-title"></h1>
+            <p id="page-subtitle"></p>
+          </div>
+          <button class="btn ghost bell desktop-bell" id="bell" title="Уведомления" aria-label="Уведомления">🔔${unread ? `<span class="count">${unread}</span>` : ''}</button>
+        </header>
         ${S.store.demo ? `<div class="banner warn">🧪 Демо-режим: данные хранятся только в этом браузере. Подключение общей базы — в «Ещё».</div>` : ''}
         <div id="view"></div>
       </main>
@@ -180,16 +201,24 @@ function render() {
     S.unit = b.dataset.unit; localStorage.setItem('monetki_unit', S.unit); render();
   }));
   $('#bell').addEventListener('click', showNotifications);
+  $('#bell-mobile').addEventListener('click', showNotifications);
 
   const views = { dashboard: viewDashboard, tasks: viewTasks, clients: viewClients, venues: viewVenues, players: viewPlayers, finance: viewFinance, money: viewMoney, team: viewTeam, settings: viewSettings };
   (views[route] || viewDashboard)();
 }
 
-function setTitle(t) { $('#page-title').textContent = t; }
+function setTitle(t) {
+  const meta = pageMeta(S.route || currentRoute());
+  $('#page-title').textContent = t;
+  $('#page-eyebrow').textContent = meta.group;
+  $('#page-subtitle').textContent = meta.subtitle;
+  document.title = `${t} — Монетки`;
+}
 
 // ---------- Логин ----------
 function renderLogin(app) {
   const demo = S.store.demo;
+  document.title = 'Вход — Монетки';
   app.innerHTML = `
     <div class="login-wrap">
       <div class="card login-card">
@@ -822,9 +851,18 @@ function renderFinOps(tabsHtml) {
   const expense = list.filter((f) => f.type === 'expense').reduce((s, f) => s + Number(f.amount || 0), 0);
   const monthName = new Date(m + '-01').toLocaleDateString('ru-RU', { month: 'long', year: 'numeric' });
   const periodName = period === 'all' ? 'всё время' : monthName;
+  const financeBusinessName = S.unit === 'all' ? 'Все бизнесы' : `${businessEmoji(S.unit)} ${businessName(S.unit)}`;
 
   $('#view').innerHTML = `
     ${tabsHtml}
+    <div class="finance-context" aria-label="Контекст финансов">
+      <div class="finance-context-icon">◎</div>
+      <div class="finance-context-copy">
+        <span>Сейчас показано</span>
+        <strong>${esc(financeBusinessName)} <i>·</i> ${esc(periodName)}</strong>
+      </div>
+      ${S.unit !== 'all' && myUnits().length > 1 ? '<button class="btn" id="finance-show-all">Все бизнесы</button>' : ''}
+    </div>
     <div class="searchbar">
       ${period === 'month' ? `
       <button class="btn small" id="m-prev">←</button>
@@ -850,6 +888,9 @@ function renderFinOps(tabsHtml) {
   $('#m-prev')?.addEventListener('click', () => shift(-1));
   $('#m-next')?.addEventListener('click', () => shift(1));
   $('#period-toggle').addEventListener('click', () => { S.finPeriod = (S.finPeriod === 'all') ? 'month' : 'all'; render(); });
+  $('#finance-show-all')?.addEventListener('click', () => {
+    S.unit = 'all'; localStorage.setItem('monetki_unit', S.unit); render();
+  });
   $('#add-fin').addEventListener('click', () => openFinForm());
   bindFinRows($('#view'));
 }
@@ -1678,7 +1719,7 @@ function bindEntityForm(root, entity, existing, extra = {}) {
 function syncThemeColor() {
   const forced = document.documentElement.dataset.theme;
   const dark = forced === 'dark' || (!forced && matchMedia('(prefers-color-scheme: dark)').matches);
-  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', dark ? '#16181d' : '#faf8f5');
+  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', dark ? '#10131a' : '#f4f6fa');
 }
 
 async function init() {
