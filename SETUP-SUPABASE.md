@@ -83,7 +83,8 @@ Secrets и в зашифрованном Supabase Vault; в репозитори
 1. Дождитесь успешного workflow **Deploy backend (Supabase)** после merge.
 2. В GitHub откройте **Actions** → **Настроить или ротировать секрет синхронизации Точки**.
 3. Нажмите **Run workflow** → ещё раз **Run workflow**. Значение будет сгенерировано внутри
-   GitHub Actions, замаскировано и передано в Supabase через Management API.
+   базы без открытого литерала в SQL, прочитано в защищённый временный файл GitHub Actions,
+   сразу замаскировано и передано в Edge Function Secrets через Management API.
 4. Workflow обновит Edge Function Secret, создаст или обновит запись Vault и идемпотентно
    пересоздаст ровно одно задание `tochka-sync-hourly` на пятой минуте каждого часа.
 

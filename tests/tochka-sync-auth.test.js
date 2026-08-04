@@ -68,10 +68,13 @@ test("workflow ротации использует Management API и не сод
   const workflow = await readFile(new URL("../.github/workflows/configure-tochka-sync-secret.yml", import.meta.url), "utf8");
 
   assert.match(workflow, /workflow_dispatch:/);
-  assert.match(workflow, /openssl rand -hex 32/);
+  assert.match(workflow, /concurrency:[\s\S]*group: configure-tochka-sync-secret[\s\S]*cancel-in-progress: false/);
+  assert.match(workflow, /extensions\.gen_random_bytes\(32\)/);
+  assert.match(workflow, /select decrypted_secret from vault\.decrypted_secrets/);
   assert.match(workflow, /\/secrets"/);
   assert.match(workflow, /vault\.(create_secret|update_secret)/);
   assert.match(workflow, /002_schedule_tochka_sync\.sql/);
   assert.match(workflow, /::add-mask::/);
-  assert.doesNotMatch(workflow, /[a-f0-9]{64}/);
+  assert.doesNotMatch(workflow, /vault\.(create_secret|update_secret)\([^\n]*\$\{tochka_sync_secret\}/);
+  assert.doesNotMatch(workflow, /["'][a-f0-9]{64}["']/);
 });
