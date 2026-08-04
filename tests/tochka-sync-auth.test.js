@@ -77,6 +77,7 @@ test("workflow ротации использует Management API и не сод
   );
   assert.match(vaultReadBlock, /--url "\$\{database_url\}"/);
   assert.doesNotMatch(vaultReadBlock, /\/read-only/);
+  assert.doesNotMatch(workflow, /\$\{database_url\}\/read-only/);
   assert.match(workflow, /\/secrets"/);
   assert.match(workflow, /vault\.(create_secret|update_secret)/);
   assert.match(workflow, /002_schedule_tochka_sync\.sql/);
