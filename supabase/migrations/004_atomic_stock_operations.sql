@@ -128,6 +128,8 @@ begin
   return jsonb_build_object('ok', true, 'item', p_item);
 end $$;
 
+drop function if exists stock_complete_inventory(jsonb, boolean);
+
 create or replace function stock_complete_inventory(
   p_inventory jsonb,
   p_allow_create boolean default false,

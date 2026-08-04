@@ -57,6 +57,7 @@ test("повторное завершение инвентаризации ид�
   assert.match(sql.slice(movementInsert), /on conflict \(entity, id\) do nothing/);
   assert.match(sql, /values \('inventories', v_id, p_inventory \|\| jsonb_build_object\('status', 'draft'\)\)/);
   assert.match(sql, /if not p_allow_create then[\s\S]*Инвентаризация не найдена/);
+  assert.match(sql, /drop function if exists stock_complete_inventory\(jsonb, boolean\)/);
   assert.match(sql, /p_expected is not null and v_existing is distinct from p_expected/);
   assert.match(sql, /stock_save_inventory[\s\S]*v_existing is distinct from p_before/);
 });
