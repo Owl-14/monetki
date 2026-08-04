@@ -383,8 +383,11 @@ async function remindDeadlines() {
 async function addComment(u: Rec, taskId: string, text: string) {
   const task = (await readAll("tasks")).find((t) => t.id === taskId);
   if (!task) return { ok: false, error: "Задача не найдена" };
-  const access = accessSet(await readAll("memberships"), u.id);
+  const [memberships, businesses] = await Promise.all([readAll("memberships"), readAll("businesses")]);
+  const access = accessSet(memberships, u.id);
   if (!canSeeItem(access, task) || (!isAdmin(u) && task.assigneeId !== u.id)) return { ok: false, error: "Нет доступа" };
+  const scopeDeny = scopeWriteError(access, task, businesses);
+  if (scopeDeny) return { ok: false, error: scopeDeny };
   const comments = (task.comments as Rec[]) || [];
   comments.push({ authorId: u.id, text: String(text).slice(0, 2000), ts: Date.now() } as Rec);
   task.comments = comments;
@@ -397,8 +400,12 @@ async function addComment(u: Rec, taskId: string, text: string) {
 }
 
 async function importPlayers(u: Rec, rows: Rec[]) {
-  const access = accessSet(await readAll("memberships"), u.id);
+  const [memberships, businesses] = await Promise.all([readAll("memberships"), readAll("businesses")]);
+  const access = accessSet(memberships, u.id);
   if (!hasBusinessAccess(access, "padel")) return { ok: false, error: "Нет доступа" };
+  if (!businesses.some((business) => business.id === "padel" && business.active !== false)) {
+    return { ok: false, error: "Бизнес в архиве" };
+  }
   const existing = await readAll("players");
   let added = 0;
   for (const r of rows || []) {
@@ -617,6 +624,10 @@ async function fetchTochkaStatement(
 
 async function tochkaSync(days = 30, deadline = Date.now() + TOCHKA_SYNC_DEADLINE_MS) {
   const unit = Deno.env.get("TOCHKA_UNIT") || "padel";
+  const syncBusiness = (await readAll("businesses")).find((business) => business.id === unit);
+  if (!syncBusiness || syncBusiness.active === false) {
+    return { ok: false, error: "Бизнес для банковской синхронизации недоступен", outcome: "archived_business" };
+  }
   if (Date.now() >= deadline) throw new Error("Истёк безопасный срок синхронизации");
   const accountsRes = await tochkaFetch("/open-banking/v1.0/accounts", {
     signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())),

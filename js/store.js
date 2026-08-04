@@ -576,6 +576,7 @@ export class LocalStore {
     const t = db.tasks.find((x) => x.id === taskId);
     if (!t) return { ok: false, error: 'Задача не найдена' };
     if (!canAccessBusiness(db, u, businessIdOf(t))) return { ok: false, error: 'Нет доступа' };
+    if (!db.businesses.some((business) => business.id === businessIdOf(t) && business.active !== false)) return { ok: false, error: 'Бизнес в архиве' };
     if (u.role !== 'admin' && t.assigneeId !== u.id) return { ok: false, error: 'Нет доступа' };
     t.comments = t.comments || [];
     t.comments.push({ authorId: u.id, text, ts: Date.now() });
@@ -589,6 +590,7 @@ export class LocalStore {
     const u = this._user(token); if (!u) return { ok: false, error: 'auth' };
     const db = this._db();
     if (!canAccessBusiness(db, u, 'padel')) return { ok: false, error: 'Нет доступа' };
+    if (!db.businesses.some((business) => business.id === 'padel' && business.active !== false)) return { ok: false, error: 'Бизнес в архиве' };
     let added = 0;
     for (const r of rows) {
       if (!r.name) continue;

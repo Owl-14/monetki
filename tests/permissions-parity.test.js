@@ -248,11 +248,35 @@ test("архив бизнеса скрывает рабочие данные, с
     businessId: "events", unit: "events", title: "Нельзя записать в архив",
   });
   assert.equal(blocked.error, "Бизнес в архиве");
+  assert.equal(
+    (await store.addComment("demo:admin", "task-events", "Скрытый комментарий")).error,
+    "Бизнес в архиве",
+  );
 
   assert.equal((await store.update("demo:admin", "businesses", { ...created.item, active: true })).ok, true);
   const restored = await store.bootstrap("demo:padel-a");
   assert.equal(restored.data.businesses.some((item) => item.id === "events"), true);
   assert.equal(restored.data.tasks.some((item) => item.title === "Подготовить событие"), true);
+});
+
+test("специальные действия не записывают данные в архивный бизнес", async () => {
+  const store = localStoreWith(fixture());
+  const padel = (await store.bootstrap("demo:admin")).data.businesses.find((item) => item.id === "padel");
+  assert.equal((await store.update("demo:admin", "businesses", { ...padel, active: false })).ok, true);
+  assert.equal(
+    (await store.addComment("demo:admin", "task-padel-a", "Комментарий в архив")).error,
+    "Бизнес в архиве",
+  );
+  assert.equal(
+    (await store.importPlayers("demo:admin", [{ name: "Новый игрок" }])).error,
+    "Бизнес в архиве",
+  );
+
+  const apiSource = await readFile(new URL("../supabase/functions/api/index.ts", import.meta.url), "utf8");
+  const commentBlock = apiSource.slice(apiSource.indexOf("async function addComment"), apiSource.indexOf("async function importPlayers"));
+  const importBlock = apiSource.slice(apiSource.indexOf("async function importPlayers"), apiSource.indexOf("async function markRead"));
+  assert.match(commentBlock, /scopeWriteError\(access, task, businesses\)/);
+  assert.match(importBlock, /business\.id === "padel" && business\.active !== false/);
 });
 
 test("delete бизнеса работает как архив и не освобождает его ID", async () => {
