@@ -140,3 +140,90 @@ test("клиент не может заранее закрыть расчёт и
   assert.equal(changed.ok, false);
   assert.match(changed.error, /Системные итоги/);
 });
+
+test("сотрудник не видит и не подменяет финансовые поля и управляет только своим событием", async () => {
+  const { store, token, type, event } = await context();
+  const staffLogin = await store.login("222222");
+  const created = await store.create(staffLogin.token, "events", {
+    businessId: "padel", unit: "padel", eventTypeId: type.id, title: "Своё событие",
+    startsAt: "2026-08-06T12:00", status: "planned", defaultFee: 999999,
+    responsibleId: "admin", capacity: 2, staffAmount: 999999, staffRate: 999999,
+    ownerShares: [{ ownerId: "staff", share: 1 }], chargeAmount: 999999,
+  });
+  assert.equal(created.ok, true);
+  assert.equal(created.item.defaultFee, undefined);
+  assert.equal(created.item.staffAmount, 0);
+
+  const adminBackup = await store.backup(token);
+  const raw = adminBackup.data.events.find((item) => item.id === created.item.id);
+  assert.equal(raw.defaultFee, 100);
+  assert.equal(raw.responsibleId, staffLogin.profile.id);
+  assert.equal(raw.staffAmount, undefined);
+  assert.equal(raw.staffRate, undefined);
+  assert.equal(raw.ownerShares, undefined);
+  assert.equal(raw.chargeAmount, undefined);
+
+  const participantId = adminBackup.data.players[0].id;
+  const registration = await store.create(staffLogin.token, "eventRegistrations", {
+    businessId: "padel", unit: "padel", eventId: raw.id,
+    participantType: "player", participantId, status: "confirmed", chargeAmount: 999999,
+    defaultFee: 999999, staffRate: 999999, ownerShares: [{ ownerId: "staff", share: 1 }],
+  });
+  assert.equal(registration.ok, true);
+  assert.equal(registration.item.chargeAmount, undefined);
+  const afterRegistration = await store.backup(token);
+  const rawRegistration = afterRegistration.data.eventRegistrations.find((item) => item.id === registration.item.id);
+  assert.equal(rawRegistration.chargeAmount, 100);
+  assert.equal(rawRegistration.defaultFee, undefined);
+  assert.equal(rawRegistration.staffRate, undefined);
+  assert.equal(rawRegistration.ownerShares, undefined);
+
+  assert.equal((await store.update(staffLogin.token, "events", { id: raw.id, defaultFee: 1 })).ok, false);
+  assert.equal((await store.update(staffLogin.token, "eventRegistrations", { id: registration.item.id, chargeAmount: 1 })).ok, false);
+  assert.equal((await store.update(staffLogin.token, "events", { id: event.id, title: "Чужое" })).ok, false);
+  assert.equal((await store.remove(staffLogin.token, "events", event.id)).ok, false);
+});
+
+test("закрытое начисление сотрудника не меняется после изменения типа", async () => {
+  const { store, token, type, event } = await context();
+  const staffLogin = await store.login("222222");
+  await store.update(token, "events", { id: event.id, responsibleId: staffLogin.profile.id, status: "completed" });
+  const closed = await store.closeEventSettlement(token, event.id);
+  assert.equal(closed.item.settlement.staffRate, 15);
+  assert.equal(closed.item.settlement.staffAmount, 15);
+  await store.update(token, "eventTypes", { ...type, staffRate: 999 });
+  const staffView = await store.bootstrap(staffLogin.token);
+  const visible = staffView.data.events.find((item) => item.id === event.id);
+  assert.equal(visible.staffAmount, 15);
+  assert.equal(staffView.data.eventTypes[0].staffRate, undefined);
+});
+
+test("админская копия сохраняет события архивного бизнеса и повторно восстанавливается без переписывания истории", async () => {
+  const { store, token, event } = await context();
+  const archived = await store.update(token, "businesses", { id: "padel", active: false, modules: [] });
+  assert.equal(archived.ok, true);
+  const ordinary = await store.bootstrap(token);
+  assert.equal(ordinary.data.events.some((item) => item.id === event.id), false);
+  const backup = await store.backup(token);
+  assert.equal(backup.data.events.some((item) => item.id === event.id), true);
+  assert.ok(Array.isArray(backup.data.files));
+
+  const first = await store.migrateImport(token, backup.data);
+  const retry = await store.migrateImport(token, backup.data);
+  assert.equal(first.ok, true);
+  assert.equal(retry.ok, true);
+  const conflict = structuredClone(backup.data);
+  conflict.events = conflict.events.map((item) => item.id === event.id ? { ...item, title: "Тихая подмена" } : item);
+  assert.equal((await store.migrateImport(token, conflict)).ok, false);
+  assert.equal((await store.backup(token)).data.events.find((item) => item.id === event.id).title, event.title);
+});
+
+test("нельзя удалить участника или площадку, которые нужны истории события", async () => {
+  const { store, token, event, registration } = await context();
+  const backup = await store.backup(token);
+  const player = backup.data.players.find((item) => item.id === registration.participantId);
+  assert.equal((await store.remove(token, "players", player.id)).ok, false);
+  const venue = backup.data.venues[0];
+  await store.update(token, "events", { id: event.id, venueId: venue.id });
+  assert.equal((await store.remove(token, "venues", venue.id)).ok, false);
+});

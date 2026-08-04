@@ -23,9 +23,21 @@ test("UI не создаёт второй денежный факт и испо�
   assert.match(app, /S\.store\.closeEventSettlement/);
   assert.doesNotMatch(app, /doCreate\('eventFinanceAllocations'/);
   assert.match(app, /У вас нет доступа к прибыли и финансовым операциям события/);
-  assert.match(app, /event\.responsibleId === S\.profile\.id/);
+  assert.match(app, /event\.staffAmount/);
+  assert.match(app, /const ownIncome = isResponsible \? event\.staffAmount : 0/);
+  assert.match(app, /canManageEvent\(event\)/);
+  assert.match(app, /isAdmin\(\) \? `<label class="field"><span>Начислено/);
   assert.match(app, /Доли организаторов/);
   assert.match(app, /plannedProfitPerParticipant/);
+});
+
+test("резервная копия использует отдельную админскую операцию", async () => {
+  const [app, store, http] = await Promise.all([
+    read("../js/app.js"), read("../js/store.js"), read("../supabase/functions/api/http.ts"),
+  ]);
+  assert.match(app, /S\.store\.backup\(S\.token\)/);
+  assert.match(store, /backup\(token\).*action: 'backup'/s);
+  assert.match(http, /case "backup"/);
 });
 
 test("события имеют отдельную мобильную повестку и адаптивные таблицы", async () => {

@@ -307,11 +307,19 @@ declare
   v_planned_profit numeric := 0;
   v_profit numeric := 0;
   v_paid numeric := 0;
+  v_staff_rate numeric := 0;
+  v_staff_amount numeric := 0;
 begin
   if v_id = '' then raise exception 'Не указано событие'; end if;
   select data into v_event from public.records where entity = 'events' and id = v_id;
   if v_event is null then raise exception 'Событие не найдено'; end if;
   v_business := coalesce(v_event->>'businessId', v_event->>'unit', '');
+  if v_business = '' or v_event->>'businessId' is distinct from v_business
+      or v_event->>'unit' is distinct from v_business
+      or p_expected->>'businessId' is distinct from v_business
+      or p_expected->>'unit' is distinct from v_business then
+    raise exception 'businessId и unit должны совпадать';
+  end if;
   select data into v_business_row from public.records where entity = 'businesses' and id = v_business for update;
   if v_business_row is null or v_business_row->>'active' = 'false'
       or jsonb_typeof(v_business_row->'modules') <> 'array'
@@ -319,7 +327,8 @@ begin
     raise exception 'Модуль «События» выключен для этого бизнеса';
   end if;
   select data into v_event from public.records where entity = 'events' and id = v_id for update;
-  if v_event is null or coalesce(v_event->>'businessId', v_event->>'unit', '') <> v_business then
+  if v_event is null or v_event->>'businessId' is distinct from v_business
+      or v_event->>'unit' is distinct from v_business then
     raise exception 'Событие не найдено в этом бизнесе';
   end if;
   if v_event->>'settlementStatus' = 'closed' then
@@ -335,10 +344,20 @@ begin
     select data->>'financeId' from public.records
     where entity = 'eventFinanceAllocations' and data->>'eventId' = v_id
   ) order by id for share;
+  perform 1 from public.records where entity = 'venues' and id = v_event->>'venueId'
+    and data->>'businessId' = v_business and data->>'unit' = v_business for share;
+  perform 1 from public.records where (entity, id) in (
+    select case data->>'participantType'
+      when 'player' then 'players' when 'company' then 'companies' when 'contact' then 'contacts' else '' end,
+      data->>'participantId'
+    from public.records where entity = 'eventRegistrations' and data->>'eventId' = v_id
+      and data->>'businessId' = v_business and data->>'unit' = v_business
+  ) order by entity, id for share;
 
   select count(*), coalesce(sum((data->>'chargeAmount')::numeric), 0)
   into v_count, v_accrued
   from public.records where entity = 'eventRegistrations' and data->>'eventId' = v_id
+    and data->>'businessId' = v_business and data->>'unit' = v_business
     and coalesce(data->>'status', '') not in ('cancelled', 'refunded');
 
   select
@@ -348,13 +367,16 @@ begin
     coalesce(sum(case when f.data->>'type' = 'expense' and a.data->>'purpose' = 'refund' then (a.data->>'amount')::numeric else 0 end), 0)
   into v_income, v_deposit, v_expenses, v_refunds
   from public.records a join public.records f on f.entity = 'finance' and f.id = a.data->>'financeId'
-  where a.entity = 'eventFinanceAllocations' and a.data->>'eventId' = v_id;
+    and f.data->>'businessId' = v_business and f.data->>'unit' = v_business
+  where a.entity = 'eventFinanceAllocations' and a.data->>'eventId' = v_id
+    and a.data->>'businessId' = v_business and a.data->>'unit' = v_business;
 
   select count(*) filter (where data->>'direction' = 'income'),
          coalesce(sum((data->>'plannedAmount')::numeric) filter (where data->>'direction' = 'income'), 0),
          coalesce(sum((data->>'plannedAmount')::numeric) filter (where data->>'direction' = 'expense'), 0)
   into v_planned_income_count, v_planned_income, v_planned_expenses
-  from public.records where entity = 'eventBudgetLines' and data->>'eventId' = v_id;
+  from public.records where entity = 'eventBudgetLines' and data->>'eventId' = v_id
+    and data->>'businessId' = v_business and data->>'unit' = v_business;
   if v_planned_income_count = 0 then
     v_planned_income := coalesce((v_event->>'defaultFee')::numeric, 0) * coalesce((v_event->>'capacity')::numeric, 0);
   end if;
@@ -364,10 +386,13 @@ begin
 
   select data into v_type from public.records where entity = 'eventTypes'
     and id = v_event->>'eventTypeId'
-    and coalesce(data->>'businessId', data->>'unit', '') = v_business for share;
+    and data->>'businessId' = v_business and data->>'unit' = v_business for share;
   if v_type is null then raise exception 'Тип события не найден в этом бизнесе'; end if;
+  begin v_staff_rate := coalesce((v_type->>'staffRate')::numeric, 0);
+  exception when others then raise exception 'Ставка сотрудника должна быть числом'; end;
+  v_staff_amount := round(v_staff_rate * v_count, 2);
   perform 1 from public.records where entity = 'businessOwners'
-    and coalesce(data->>'businessId', data->>'unit', '') = v_business
+    and data->>'businessId' = v_business and data->>'unit' = v_business
     and data->>'active' is distinct from 'false' order by id for share;
   v_shares := case when jsonb_typeof(v_type->'ownerShares') = 'array' and jsonb_array_length(v_type->'ownerShares') > 0
     then v_type->'ownerShares' else null end;
@@ -377,7 +402,7 @@ begin
       'share', coalesce((data->>'share')::numeric, 0)
     ) order by data->>'ownerId'), '[]'::jsonb) into v_shares
     from public.records where entity = 'businessOwners'
-      and coalesce(data->>'businessId', data->>'unit', '') = v_business
+      and data->>'businessId' = v_business and data->>'unit' = v_business
       and data->>'active' is distinct from 'false';
   end if;
   if jsonb_array_length(v_shares) = 0 or abs((
@@ -414,7 +439,8 @@ begin
     'actualIncome', v_income, 'directExpenses', v_expenses, 'profit', v_profit,
     'margin', case when v_income = 0 then null else v_profit / v_income end,
     'profitPerParticipant', case when v_count = 0 then null else v_profit / v_count end,
-    'ownerShares', v_owner_shares, 'completedAt', v_now
+    'ownerShares', v_owner_shares, 'staffRate', v_staff_rate,
+    'staffAmount', v_staff_amount, 'completedAt', v_now
   );
   v_history := coalesce(v_event->'history', '[]'::jsonb) || jsonb_build_array(jsonb_build_object(
     'id', 'event-history:' || md5(v_id || ':' || v_now::text), 'at', v_now,

@@ -1,5 +1,6 @@
 import {
   BUSINESS_SCOPED_ENTITIES,
+  BACKUP_ENTITIES,
   CORE_ENTITIES,
   CRM_ENTITIES,
   ENTITIES,
@@ -26,7 +27,10 @@ import {
   EVENT_ENTITIES,
   eventDeleteError,
   eventModuleWriteError,
+  eventReferenceDeleteError,
   eventRecordError,
+  staffEventManageError,
+  visibleEventCollections,
 } from "./event-rules.js";
 import {
   applyReservationChange,
@@ -39,8 +43,9 @@ import {
 import {
   allocateEventFinance,
   closeEventSettlement as closeEventSettlementRpc,
+  deleteEvent as deleteEventRpc,
   readEventData,
-  restoreEventChild,
+  restoreEventGraph,
 } from "./events.ts";
 import { ensureCoreData } from "./auth/access.ts";
 import { callRpc, deleteRow, insertRow, kvGet, kvSet, readAll, readOne, writeRow } from "./db/repositories.ts";
@@ -145,6 +150,12 @@ async function crmUpdateValidationError(entity: string, before: Rec, after: Rec)
   return null;
 }
 
+export async function backup(u: Rec) {
+  if (!isAdmin(u)) return { ok: false, error: "Только для админа" };
+  const entries = await Promise.all(BACKUP_ENTITIES.map(async (entity) => [entity, await readAll(entity)] as const));
+  return { ok: true, data: Object.fromEntries(entries) as Record<string, Rec[]> };
+}
+
 function normalizeEventRecord(entity: string, source: Rec) {
   const item = { ...source } as Rec;
   if (entity === "eventTypes") {
@@ -168,9 +179,31 @@ function normalizeEventRecord(entity: string, source: Rec) {
   return item;
 }
 
+function sanitizeStaffEventPayload(entity: string, item: Rec) {
+  if (entity === "events") {
+    delete item.ownerShares;
+    delete item.staffRate;
+    delete item.chargeAmount;
+  }
+  if (entity === "eventRegistrations") {
+    delete item.ownerShares;
+    delete item.defaultFee;
+    delete item.staffRate;
+    delete item.settlement;
+  }
+  return item;
+}
+
 async function eventValidationError(entity: string, item: Rec, ignoreId = "") {
   if (!EVENT_ENTITIES.includes(entity)) return null;
   return eventRecordError(entity, item, await readEventData(), ignoreId);
+}
+
+async function visibleEventMutation(u: Rec, entity: string, item: Rec) {
+  if (isAdmin(u) || !EVENT_ENTITIES.includes(entity)) return item;
+  const data = await readEventData();
+  const visible = visibleEventCollections(u, data, false) as Record<string, Rec[]>;
+  return (visible[entity] || []).find((candidate) => candidate.id === item.id) || { id: item.id };
 }
 
 function appendEventHistory(before: Rec | null, item: Rec, userId: string) {
@@ -210,6 +243,8 @@ export async function createItem(u: Rec, entity: string, item: Rec) {
   const deny = baseWriteError(u, entity);
   if (deny) return { ok: false, error: deny };
   item = { ...item };
+  delete item.staffAmount;
+  if (!isAdmin(u)) item = sanitizeStaffEventPayload(entity, item);
   if (entity === "businesses") item.id = String(item.id || "").trim();
   if (entity === "businessOwners") item.ownerId = String(item.ownerId || "").trim();
   if (entity === "warehouses" || entity === "stockItems") item.active = item.active !== false;
@@ -248,7 +283,21 @@ export async function createItem(u: Rec, entity: string, item: Rec) {
   if (EVENT_ENTITIES.includes(entity)) {
     const moduleDeny = eventModuleWriteError(businesses, item);
     if (moduleDeny) return { ok: false, error: moduleDeny };
-    const eventDeny = await eventValidationError(entity, item);
+    const eventData = await readEventData();
+    if (!isAdmin(u) && entity === "events") {
+      const type = (eventData.eventTypes || []).find((candidate) => candidate.id === item.eventTypeId
+        && businessIdOf(candidate) === businessIdOf(item));
+      item.defaultFee = Number(type?.defaultFee || 0);
+      item.responsibleId = u.id;
+    }
+    if (!isAdmin(u) && entity === "eventRegistrations") {
+      const event = (eventData.events || []).find((candidate) => candidate.id === item.eventId
+        && businessIdOf(candidate) === businessIdOf(item));
+      const manageDeny = staffEventManageError(u, event);
+      if (manageDeny) return { ok: false, error: manageDeny };
+      item.chargeAmount = Number(event?.defaultFee || 0);
+    }
+    const eventDeny = eventRecordError(entity, item, eventData);
     if (eventDeny) return { ok: false, error: eventDeny };
   }
   // id всегда генерируем на сервере: иначе, прислав чужой id, можно было бы
@@ -322,6 +371,8 @@ export async function createItem(u: Rec, entity: string, item: Rec) {
       await deleteRow(entity, item.id);
       throw error;
     }
+  } else if (entity === "eventRegistrations") {
+    if (!await insertRow(entity, item)) return { ok: false, error: "Участник уже зарегистрирован на это событие" };
   } else {
     await writeRow(entity, item);
   }
@@ -341,12 +392,15 @@ export async function createItem(u: Rec, entity: string, item: Rec) {
       "#/money",
     );
   }
-  return { ok: true, item };
+  return { ok: true, item: await visibleEventMutation(u, entity, item) };
 }
 
 export async function updateItem(u: Rec, entity: string, item: Rec) {
   const deny = baseWriteError(u, entity);
   if (deny) return { ok: false, error: deny };
+  item = { ...item };
+  delete item.staffAmount;
+  if (!isAdmin(u)) item = sanitizeStaffEventPayload(entity, item);
   if (entity === "companies" && String(item?.id || "").startsWith("legacy-client:")) {
     return { ok: false, error: "Переходная запись клиента доступна только для чтения" };
   }
@@ -374,6 +428,15 @@ export async function updateItem(u: Rec, entity: string, item: Rec) {
   if (EVENT_ENTITIES.includes(entity)) {
     const moduleDeny = eventModuleWriteError(businesses, before);
     if (moduleDeny) return { ok: false, error: moduleDeny };
+    if (!isAdmin(u) && entity === "events") {
+      const manageDeny = staffEventManageError(u, before);
+      if (manageDeny) return { ok: false, error: manageDeny };
+    }
+    if (!isAdmin(u) && entity === "eventRegistrations") {
+      const parent = (await readAll("events")).find((candidate) => candidate.id === before.eventId);
+      const manageDeny = staffEventManageError(u, parent);
+      if (manageDeny) return { ok: false, error: manageDeny };
+    }
   }
   if (entity === "businesses" && !hasBusinessAccess(access, before.id)) return { ok: false, error: "Нет доступа к этому бизнесу" };
   const coreDeny = await coreValidationError(entity, { ...before, ...item } as Rec, before.id);
@@ -391,6 +454,20 @@ export async function updateItem(u: Rec, entity: string, item: Rec) {
   }
   if (entity === "events" && before.settlementStatus === "closed") {
     return { ok: false, error: "Закрытый расчёт события нельзя изменять" };
+  }
+  if (!isAdmin(u) && entity === "events") {
+    if (("defaultFee" in item && Number(item.defaultFee) !== Number(before.defaultFee))
+      || ("eventTypeId" in item && item.eventTypeId !== before.eventTypeId)
+      || ("responsibleId" in item && item.responsibleId !== before.responsibleId)) {
+      return { ok: false, error: "Сотрудник не может менять тип, ответственного или финансовые условия события" };
+    }
+    item = { ...item, defaultFee: before.defaultFee, eventTypeId: before.eventTypeId, responsibleId: before.responsibleId } as Rec;
+  }
+  if (!isAdmin(u) && entity === "eventRegistrations") {
+    if ("chargeAmount" in item && Number(item.chargeAmount) !== Number(before.chargeAmount)) {
+      return { ok: false, error: "Сотрудник не может менять начисление участника" };
+    }
+    item = { ...item, chargeAmount: before.chargeAmount } as Rec;
   }
   if (entity === "events" && item.settlementStatus && item.settlementStatus !== before.settlementStatus) {
     return { ok: false, error: "Расчёт события закрывается отдельным безопасным действием" };
@@ -449,7 +526,7 @@ export async function updateItem(u: Rec, entity: string, item: Rec) {
     if (before.status !== "completed" && merged.status === "completed") merged.completedAt = Date.now();
   }
   await writeRow(entity, merged);
-  return { ok: true, item: merged };
+  return { ok: true, item: await visibleEventMutation(u, entity, merged) };
 }
 
 export async function deleteItem(u: Rec, entity: string, id: string) {
@@ -473,8 +550,18 @@ export async function deleteItem(u: Rec, entity: string, id: string) {
   if (EVENT_ENTITIES.includes(entity)) {
     const moduleDeny = eventModuleWriteError(businesses, before);
     if (moduleDeny) return { ok: false, error: moduleDeny };
-    const eventDeny = eventDeleteError(entity, before, await readEventData());
+    const eventData = await readEventData();
+    const parent = entity === "events"
+      ? before
+      : (eventData.events || []).find((candidate) => candidate.id === before.eventId);
+    const manageDeny = staffEventManageError(u, parent);
+    if (manageDeny) return { ok: false, error: manageDeny };
+    const eventDeny = eventDeleteError(entity, before, eventData);
     if (eventDeny) return { ok: false, error: eventDeny };
+  }
+  if (["players", "companies", "contacts", "venues"].includes(entity)) {
+    const referenceDeny = eventReferenceDeleteError(entity, before, await readEventData());
+    if (referenceDeny) return { ok: false, error: referenceDeny };
   }
   if (entity === "finance" && (await readAll("eventFinanceAllocations")).some((allocation) => allocation.financeId === before.id)) {
     return { ok: false, error: "Связанную финансовую операцию нельзя удалить" };
@@ -509,6 +596,7 @@ export async function deleteItem(u: Rec, entity: string, id: string) {
     await writeRow(entity, archived);
     return { ok: true, item: archived };
   }
+  if (entity === "events") return await deleteEventRpc(before);
   await deleteRow(entity, id);
   return { ok: true };
 }
@@ -718,20 +806,22 @@ export async function migrateImport(u: Rec | null, payload: Record<string, Rec[]
   const empty = (await readAll("employees")).length === 0;
   if (!empty && (!u || !isAdmin(u))) return { ok: false, error: "Только для админа" };
   let total = 0;
-  for (const entity of ENTITIES) {
+  const ordinaryEntities = BACKUP_ENTITIES.filter((entity) => !EVENT_ENTITIES.includes(entity) && entity !== "employees");
+  for (const entity of ordinaryEntities) {
     for (const item of payload?.[entity] || []) {
       if (!item || !item.id) continue;
-      if (["eventRegistrations", "eventBudgetLines"].includes(entity)) {
-        const restored = await restoreEventChild(entity, item);
-        if (!restored.ok) return { ok: false, error: restored.error || "Не удалось восстановить данные события" };
-      } else if (entity === "eventFinanceAllocations") {
-        const restored = await allocateEventFinance(item, true);
-        if (!restored.ok) return { ok: false, error: restored.error || "Не удалось восстановить финансовую связь события" };
-      } else {
-        await writeRow(entity, item);
-      }
+      await writeRow(entity, item);
       total++;
     }
+  }
+  const graph = Object.fromEntries(EVENT_ENTITIES.map((entity) => [entity, payload?.[entity] || []]));
+  const restored = await restoreEventGraph(graph);
+  if (!restored.ok) return { ok: false, error: restored.error || "Не удалось атомарно восстановить данные событий" };
+  total += EVENT_ENTITIES.reduce((sum, entity) => sum + (payload?.[entity] || []).filter((item) => item?.id).length, 0);
+  for (const item of payload?.employees || []) {
+    if (!item || !item.id) continue;
+    await writeRow("employees", item);
+    total++;
   }
   return { ok: true, imported: total };
 }

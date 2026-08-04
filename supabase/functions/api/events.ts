@@ -22,10 +22,14 @@ export async function allocateEventFinance(item: Rec, restore = false) {
   return await eventRpc("event_allocate_finance", { p_item: item, p_restore: restore });
 }
 
-export async function restoreEventChild(entity: string, item: Rec) {
-  return await eventRpc("event_restore_child", { p_entity: entity, p_item: item });
+export async function restoreEventGraph(graph: Record<string, Rec[]>) {
+  return await eventRpc("event_restore_graph", { p_graph: graph });
 }
 
 export async function closeEventSettlement(event: Rec, userId: string) {
   return await eventRpc("event_close_settlement", { p_expected: event, p_user_id: userId });
+}
+
+export async function deleteEvent(event: Rec) {
+  return await eventRpc("event_delete", { p_expected: event });
 }

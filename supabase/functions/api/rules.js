@@ -1,4 +1,4 @@
-import { EVENT_ENTITIES } from "./event-rules.js";
+import { EVENT_ENTITIES, visibleEventCollections } from "./event-rules.js";
 
 export const ENTITIES = [
   "businesses", "memberships", "businessOwners",
@@ -8,6 +8,7 @@ export const ENTITIES = [
   "bankTransactions", "warehouses", "stockItems", "stockMovements", "stockBalances", "reservations", "inventories",
   ...EVENT_ENTITIES,
 ];
+export const BACKUP_ENTITIES = [...ENTITIES, "files"];
 
 export const CORE_ENTITIES = ["businesses", "memberships", "businessOwners"];
 export const CRM_ENTITIES = ["companies", "contacts", "leads", "deals", "pipelines", "stages", "dealItems"];
@@ -235,6 +236,13 @@ export function visibleBootstrapData(user, data, bankBalance = null) {
   const eventItems = (items) => scopedItems(items).filter((item) =>
     !scopeMismatch(item) && eventBusinessIds.has(businessIdOf(item))
   );
+  const visibleEvents = visibleEventCollections(user, {
+    eventTypes: eventItems(data.eventTypes),
+    events: eventItems(data.events),
+    eventRegistrations: eventItems(data.eventRegistrations),
+    eventBudgetLines: eventItems(data.eventBudgetLines),
+    eventFinanceAllocations: eventItems(data.eventFinanceAllocations),
+  }, admin);
   const sharesBusiness = (leftId, rightId) => {
     const left = accessSet(memberships, leftId);
     return activeMemberships(memberships, rightId).some((membership) => left.has(businessIdOf(membership)));
@@ -291,15 +299,7 @@ export function visibleBootstrapData(user, data, bankBalance = null) {
     dealItems: scopedItems(data.dealItems),
     venues: scopedItems(data.venues),
     players: scopedItems(data.players),
-    eventTypes: admin
-      ? eventItems(data.eventTypes)
-      : eventItems(data.eventTypes).map(({ ownerShares: _ownerShares, ...item }) => item),
-    events: admin
-      ? eventItems(data.events)
-      : eventItems(data.events).map(({ settlement: _settlement, ...item }) => item),
-    eventRegistrations: eventItems(data.eventRegistrations),
-    eventBudgetLines: admin ? eventItems(data.eventBudgetLines) : [],
-    eventFinanceAllocations: admin ? eventItems(data.eventFinanceAllocations) : [],
+    ...visibleEvents,
     tasks: scopedItems(data.tasks).filter((task) => admin || task.assigneeId === user.id),
     finance: scopedItems(data.finance).filter((item) => admin || item.employeeId === user.id),
     bankTransactions: admin ? (data.bankTransactions || []) : [],

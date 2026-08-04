@@ -6,7 +6,8 @@ export const EVENT_STATUSES = ["planned", "active", "completed", "cancelled"];
 export const REGISTRATION_STATUSES = ["registered", "confirmed", "attended", "cancelled", "refunded"];
 export const PARTICIPANT_TYPES = ["player", "company", "contact"];
 
-const scopeOf = (item) => String(item?.businessId || item?.unit || "");
+const scopeMismatch = (item) => !!(item?.businessId && item?.unit && item.businessId !== item.unit);
+const scopeOf = (item) => scopeMismatch(item) ? "" : String(item?.businessId || item?.unit || "");
 const moneyValue = (value) => Number(value || 0);
 const cents = (value) => Math.round(moneyValue(value) * 100);
 const fromCents = (value) => value / 100;
@@ -112,6 +113,9 @@ export function eventEconomy(event, data) {
 export function eventSettlementSnapshot(event, data, completedAt = Date.now()) {
   const economy = eventEconomy(event, data);
   const shares = ownerSharesForEvent(event, data);
+  const type = sameBusinessRecord(data.eventTypes, event?.eventTypeId, scopeOf(event));
+  const staffRate = fromCents(cents(type?.staffRate));
+  const staffAmount = fromCents(cents(staffRate) * economy.participantCount);
   const profitCents = cents(economy.profit);
   let distributedCents = 0;
   const ownerShares = shares.map((share, index) => {
@@ -123,9 +127,52 @@ export function eventSettlementSnapshot(event, data, completedAt = Date.now()) {
   });
   return {
     ...economy,
+    staffRate,
+    staffAmount,
     ownerShares,
     completedAt,
   };
+}
+
+export function visibleEventCollections(user, data, admin = false) {
+  const eventTypes = data.eventTypes || [];
+  const events = data.events || [];
+  const registrations = data.eventRegistrations || [];
+  if (admin) {
+    return {
+      eventTypes,
+      events,
+      eventRegistrations: registrations,
+      eventBudgetLines: data.eventBudgetLines || [],
+      eventFinanceAllocations: data.eventFinanceAllocations || [],
+    };
+  }
+  const staffEvents = events.map((event) => {
+    const { defaultFee: _defaultFee, settlement: _settlement, ...visible } = event;
+    if (event.responsibleId !== user?.id) return { ...visible, staffAmount: 0 };
+    const closedAmount = Number(event.settlement?.staffAmount);
+    const type = sameBusinessRecord(eventTypes, event.eventTypeId, scopeOf(event));
+    const count = registrations.filter((item) => item.eventId === event.id
+      && !["cancelled", "refunded"].includes(item.status)).length;
+    const staffAmount = event.settlementStatus === "closed"
+      ? (Number.isFinite(closedAmount) ? closedAmount : null)
+      : fromCents(cents(type?.staffRate) * count);
+    return { ...visible, staffAmount };
+  });
+  return {
+    eventTypes: eventTypes.map(({ ownerShares: _ownerShares, defaultFee: _defaultFee, staffRate: _staffRate, ...item }) => item),
+    events: staffEvents,
+    eventRegistrations: registrations.map(({ chargeAmount: _chargeAmount, ...item }) => item),
+    eventBudgetLines: [],
+    eventFinanceAllocations: [],
+  };
+}
+
+export function staffEventManageError(user, event) {
+  if (user?.role === "admin") return null;
+  if (!event || event.responsibleId !== user?.id) return "Сотрудник может менять только своё событие";
+  if (event.settlementStatus === "closed") return "Закрытый расчёт события нельзя изменять";
+  return null;
 }
 
 export function allocatedFinanceAmount(financeId, allocations, ignoreId = "") {
@@ -136,9 +183,9 @@ export function allocatedFinanceAmount(financeId, allocations, ignoreId = "") {
 
 export function eventRecordError(entity, item, data, ignoreId = "") {
   if (!EVENT_ENTITIES.includes(entity)) return null;
+  if (scopeMismatch(item)) return "businessId и unit должны совпадать";
   const businessId = scopeOf(item);
   if (!businessId) return "Не указан бизнес";
-  if (item.businessId && item.unit && item.businessId !== item.unit) return "businessId и unit должны совпадать";
 
   if (entity === "eventTypes") {
     if (!String(item.name || "").trim()) return "Укажите название типа события";
@@ -274,6 +321,28 @@ export function eventDeleteError(entity, item, data) {
   }
   if (entity === "eventBudgetLines" && (data.eventFinanceAllocations || []).some((allocation) => allocation.budgetLineId === item.id)) {
     return "Строку бюджета со связанной финансовой операцией нельзя удалить";
+  }
+  return null;
+}
+
+export function eventReferenceDeleteError(entity, item, data) {
+  const participantType = { players: "player", companies: "company", contacts: "contact" }[entity];
+  if (participantType) {
+    const registration = (data.eventRegistrations || []).find((candidate) =>
+      candidate.participantType === participantType && candidate.participantId === item.id
+    );
+    if (!registration) return null;
+    const event = (data.events || []).find((candidate) => candidate.id === registration.eventId);
+    return event?.settlementStatus === "closed"
+      ? "Участник используется в закрытом событии и должен остаться в истории"
+      : "Участник используется в событии. Сначала удалите регистрацию";
+  }
+  if (entity === "venues") {
+    const event = (data.events || []).find((candidate) => candidate.venueId === item.id);
+    if (!event) return null;
+    return event.settlementStatus === "closed"
+      ? "Площадка используется в закрытом событии и должна остаться в истории"
+      : "Площадка используется в событии. Сначала отвяжите её от события";
   }
   return null;
 }

@@ -8,8 +8,11 @@ import {
   EVENT_ENTITIES,
   eventDeleteError,
   eventModuleWriteError,
+  eventReferenceDeleteError,
   eventRecordError,
   eventSettlementSnapshot,
+  staffEventManageError,
+  visibleEventCollections,
 } from './event-rules.js';
 
 export const UNITS = {
@@ -695,6 +698,21 @@ function normalizeEventRecord(entity, source) {
   return item;
 }
 
+function sanitizeStaffEventPayload(entity, item) {
+  if (entity === 'events') {
+    delete item.ownerShares;
+    delete item.staffRate;
+    delete item.chargeAmount;
+  }
+  if (entity === 'eventRegistrations') {
+    delete item.ownerShares;
+    delete item.defaultFee;
+    delete item.staffRate;
+    delete item.settlement;
+  }
+  return item;
+}
+
 function appendEventHistory(before, item, userId, action = '') {
   const history = Array.isArray(before?.history) ? [...before.history] : [];
   const changed = before ? Object.keys(item).filter((key) => !['history', 'updated', 'created'].includes(key)
@@ -717,6 +735,11 @@ export class LocalStore {
     return db;
   }
   _save(db) { localStorage.setItem(LS_KEY, JSON.stringify(db)); }
+  _visibleEventItem(db, u, entity, item) {
+    if (u.role === 'admin' || !EVENT_ENTITIES.includes(entity)) return item;
+    const visible = visibleEventCollections(u, db, false);
+    return (visible[entity] || []).find((candidate) => candidate.id === item.id) || { id: item.id };
+  }
 
   async login(code) {
     const db = this._db();
@@ -751,6 +774,14 @@ export class LocalStore {
       && db.businesses.some((business) => business.id === businessIdOf(item) && Array.isArray(business.modules) && business.modules.includes('stock'));
     const canSeeEvent = (item) => !scopeError(item) && canSee(item)
       && db.businesses.some((business) => business.id === businessIdOf(item) && Array.isArray(business.modules) && business.modules.includes('events'));
+    const eventCollections = visibleEventCollections(u, {
+      ...db,
+      eventTypes: db.eventTypes.filter(canSeeEvent),
+      events: db.events.filter(canSeeEvent),
+      eventRegistrations: db.eventRegistrations.filter(canSeeEvent),
+      eventBudgetLines: db.eventBudgetLines.filter(canSeeEvent),
+      eventFinanceAllocations: db.eventFinanceAllocations.filter(canSeeEvent),
+    }, isAdmin);
     return {
       ok: true,
       profile: this._profile(db, u),
@@ -772,15 +803,7 @@ export class LocalStore {
         dealItems: db.dealItems.filter(canSee),
         venues: db.venues.filter(canSee),
         players: db.players.filter(canSee),
-        eventTypes: isAdmin
-          ? db.eventTypes.filter(canSeeEvent)
-          : db.eventTypes.filter(canSeeEvent).map(({ ownerShares: _ownerShares, ...item }) => item),
-        events: isAdmin
-          ? db.events.filter(canSeeEvent)
-          : db.events.filter(canSeeEvent).map(({ settlement: _settlement, ...item }) => item),
-        eventRegistrations: db.eventRegistrations.filter(canSeeEvent),
-        eventBudgetLines: isAdmin ? db.eventBudgetLines.filter(canSeeEvent) : [],
-        eventFinanceAllocations: isAdmin ? db.eventFinanceAllocations.filter(canSeeEvent) : [],
+        ...eventCollections,
         tasks: db.tasks.filter((t) => canSee(t) && (isAdmin || t.assigneeId === u.id)),
         finance: db.finance.filter((f) => canSee(f) && (isAdmin || f.employeeId === u.id)),
         bankTransactions: isAdmin ? db.bankTransactions : [],
@@ -935,6 +958,8 @@ export class LocalStore {
     const baseError = this._baseWriteError(u, entity);
     if (baseError) return { ok: false, error: baseError };
     item = CRM_ENTITIES.includes(entity) ? crmDefaults(entity, item) : { ...item };
+    delete item.staffAmount;
+    if (u.role !== 'admin') item = sanitizeStaffEventPayload(entity, item);
     if (EVENT_ENTITIES.includes(entity)) item = normalizeEventRecord(entity, item);
     if (entity === 'events') {
       item.settlementStatus = 'open';
@@ -972,6 +997,19 @@ export class LocalStore {
     if (EVENT_ENTITIES.includes(entity)) {
       const moduleError = eventModuleWriteError(db.businesses, item);
       if (moduleError) return { ok: false, error: moduleError };
+      if (u.role !== 'admin' && entity === 'events') {
+        const type = db.eventTypes.find((candidate) => candidate.id === item.eventTypeId
+          && businessIdOf(candidate) === businessIdOf(item));
+        item.defaultFee = Number(type?.defaultFee || 0);
+        item.responsibleId = u.id;
+      }
+      if (u.role !== 'admin' && entity === 'eventRegistrations') {
+        const event = db.events.find((candidate) => candidate.id === item.eventId
+          && businessIdOf(candidate) === businessIdOf(item));
+        const manageError = staffEventManageError(u, event);
+        if (manageError) return { ok: false, error: manageError };
+        item.chargeAmount = Number(event.defaultFee || 0);
+      }
       const eventError = eventRecordError(entity, item, db);
       if (eventError) return { ok: false, error: eventError };
     }
@@ -1038,7 +1076,7 @@ export class LocalStore {
       db.notifications.push({ id: uid(), toId: item.employeeId, text: `Вам ${item.category === 'Зарплата' ? 'начислена зарплата' : 'проведена выплата'}: ${item.amount} ₽${entity === 'cash' ? ' (наличными)' : ''}`, link: '#/money', read: false, created: Date.now() });
     }
     this._save(db);
-    return { ok: true, item };
+    return { ok: true, item: this._visibleEventItem(db, u, entity, item) };
   }
 
   async update(token, entity, item) {
@@ -1046,6 +1084,9 @@ export class LocalStore {
     const db = this._db();
     const baseError = this._baseWriteError(u, entity);
     if (baseError) return { ok: false, error: baseError };
+    item = { ...item };
+    delete item.staffAmount;
+    if (u.role !== 'admin') item = sanitizeStaffEventPayload(entity, item);
     if (entity === 'companies' && String(item?.id || '').startsWith(CRM_LEGACY_PREFIX)) {
       return { ok: false, error: 'Переходная запись клиента доступна только для чтения' };
     }
@@ -1087,6 +1128,11 @@ export class LocalStore {
     if (EVENT_ENTITIES.includes(entity)) {
       const moduleError = eventModuleWriteError(db.businesses, before);
       if (moduleError) return { ok: false, error: moduleError };
+      if (u.role !== 'admin') {
+        const parent = entity === 'events' ? before : db.events.find((event) => event.id === before.eventId);
+        const manageError = staffEventManageError(u, parent);
+        if (manageError) return { ok: false, error: manageError };
+      }
     }
     if (entity === 'events' && before.settlementStatus === 'closed') return { ok: false, error: 'Закрытый расчёт события нельзя изменять' };
     if (entity === 'events' && item.settlementStatus && item.settlementStatus !== before.settlementStatus) {
@@ -1095,6 +1141,20 @@ export class LocalStore {
     if (entity === 'events' && ['settlement', 'settlementClosedAt', 'completedAt'].some((key) =>
       key in item && JSON.stringify(item[key]) !== JSON.stringify(before[key])
     )) return { ok: false, error: 'Системные итоги события нельзя изменять вручную' };
+    if (u.role !== 'admin' && entity === 'events') {
+      if (('defaultFee' in item && Number(item.defaultFee) !== Number(before.defaultFee))
+        || ('eventTypeId' in item && item.eventTypeId !== before.eventTypeId)
+        || ('responsibleId' in item && item.responsibleId !== before.responsibleId)) {
+        return { ok: false, error: 'Сотрудник не может менять тип, ответственного или финансовые условия события' };
+      }
+      item = { ...item, defaultFee: before.defaultFee, eventTypeId: before.eventTypeId, responsibleId: before.responsibleId };
+    }
+    if (u.role !== 'admin' && entity === 'eventRegistrations') {
+      if ('chargeAmount' in item && Number(item.chargeAmount) !== Number(before.chargeAmount)) {
+        return { ok: false, error: 'Сотрудник не может менять начисление участника' };
+      }
+      item = { ...item, chargeAmount: before.chargeAmount };
+    }
     if (entity === 'finance' && db.eventFinanceAllocations.some((allocation) => allocation.financeId === before.id)) {
       const financeAfter = { ...before, ...item };
       if (businessIdOf(before) !== businessIdOf(financeAfter) || before.type !== financeAfter.type || Number(before.amount) !== Number(financeAfter.amount)) {
@@ -1140,7 +1200,7 @@ export class LocalStore {
       }
     }
     this._save(db);
-    return { ok: true, item: db[entity][i] };
+    return { ok: true, item: this._visibleEventItem(db, u, entity, db[entity][i]) };
   }
 
   async uploadFile(token, b64) {
@@ -1183,8 +1243,17 @@ export class LocalStore {
     if (EVENT_ENTITIES.includes(entity)) {
       const moduleError = eventModuleWriteError(db.businesses, before);
       if (moduleError) return { ok: false, error: moduleError };
+      if (u.role !== 'admin') {
+        const parent = entity === 'events' ? before : db.events.find((event) => event.id === before.eventId);
+        const manageError = staffEventManageError(u, parent);
+        if (manageError) return { ok: false, error: manageError };
+      }
       const eventError = eventDeleteError(entity, before, db);
       if (eventError) return { ok: false, error: eventError };
+    }
+    if (['players', 'companies', 'contacts', 'venues'].includes(entity)) {
+      const referenceError = eventReferenceDeleteError(entity, before, db);
+      if (referenceError) return { ok: false, error: referenceError };
     }
     if (entity === 'finance' && db.eventFinanceAllocations.some((allocation) => allocation.financeId === before.id)) {
       return { ok: false, error: 'Связанную финансовую операцию нельзя удалить' };
@@ -1382,13 +1451,26 @@ export class LocalStore {
     return { ok: true, item };
   }
 
+  async backup(token) {
+    const u = this._user(token);
+    if (!u || u.role !== 'admin') return { ok: false, error: 'Только для админа' };
+    const db = this._db();
+    return {
+      ok: true,
+      data: Object.fromEntries(LOCAL_ENTITIES.map((entity) => [entity, structuredClone(db[entity] || [])])),
+    };
+  }
+
   async migrateImport(token, data) {
     const u = this._user(token);
-    const db = this._db();
-    if (db.employees.length && (!u || u.role !== 'admin')) return { ok: false, error: 'Только для админа' };
+    const current = this._db();
+    if (current.employees.length && (!u || u.role !== 'admin')) return { ok: false, error: 'Только для админа' };
+    const db = structuredClone(current);
     let imported = 0;
-    LOCAL_ENTITIES.forEach((entity) => {
-      (data?.[entity] || []).forEach((item) => {
+    const ordinaryEntities = LOCAL_ENTITIES.filter((entity) => !EVENT_ENTITIES.includes(entity) && entity !== 'employees');
+    ordinaryEntities.forEach((entity) => {
+      (data?.[entity] || []).forEach((source) => {
+        const item = structuredClone(source);
         if (!item?.id) return;
         db[entity] = db[entity] || [];
         const i = db[entity].findIndex((x) => x.id === item.id);
@@ -1396,6 +1478,78 @@ export class LocalStore {
         imported++;
       });
     });
+    const exact = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+    const normalizeRestoreScope = (source) => {
+      const item = structuredClone(source);
+      const mismatch = scopeError(item);
+      if (mismatch) throw new Error(mismatch);
+      const businessId = businessIdOf(item);
+      if (!businessId) throw new Error('Не указан бизнес');
+      item.businessId = businessId;
+      item.unit = businessId;
+      if (!db.businesses.some((business) => business.id === businessId)) throw new Error('Бизнес события не найден');
+      return item;
+    };
+    try {
+      for (const entity of EVENT_ENTITIES) {
+        for (const source of data?.[entity] || []) {
+          if (!source?.id) continue;
+          const item = normalizeRestoreScope(source);
+          const existing = db[entity].find((candidate) => candidate.id === item.id);
+          if (existing && !exact(existing, item)) throw new Error(`Конфликт повторного восстановления ${entity}:${item.id}`);
+          if (!existing) db[entity].push(item);
+          imported++;
+        }
+      }
+      const byId = (entity, id, businessId) => db[entity].find((item) => item.id === id
+        && !scopeError(item) && businessIdOf(item) === businessId);
+      for (const event of db.events) {
+        const businessId = businessIdOf(event);
+        if (!byId('eventTypes', event.eventTypeId, businessId)) throw new Error('Тип события не относится к бизнесу события');
+        if (event.venueId && !byId('venues', event.venueId, businessId)) throw new Error('Площадка не относится к бизнесу события');
+      }
+      const registrationKeys = new Set();
+      for (const registration of db.eventRegistrations) {
+        const businessId = businessIdOf(registration);
+        const event = byId('events', registration.eventId, businessId);
+        if (!event) throw new Error('Регистрация не относится к бизнесу события');
+        const participantEntity = { player: 'players', company: 'companies', contact: 'contacts' }[registration.participantType];
+        if (!participantEntity || !byId(participantEntity, registration.participantId, businessId)) throw new Error('Участник не относится к бизнесу регистрации');
+        const key = `${registration.eventId}\0${registration.participantType}\0${registration.participantId}`;
+        if (registrationKeys.has(key)) throw new Error('Участник уже зарегистрирован на это событие');
+        registrationKeys.add(key);
+      }
+      for (const line of db.eventBudgetLines) {
+        if (!byId('events', line.eventId, businessIdOf(line))) throw new Error('Строка бюджета не относится к бизнесу события');
+      }
+      const allocatedByFinance = new Map();
+      for (const allocation of db.eventFinanceAllocations) {
+        const businessId = businessIdOf(allocation);
+        if (!byId('events', allocation.eventId, businessId)) throw new Error('Финансовая связь не относится к бизнесу события');
+        const finance = byId('finance', allocation.financeId, businessId);
+        if (!finance) throw new Error('Финансовая операция не относится к бизнесу события');
+        if (allocation.registrationId) {
+          const registration = byId('eventRegistrations', allocation.registrationId, businessId);
+          if (!registration || registration.eventId !== allocation.eventId) throw new Error('Регистрация не относится к финансовой связи');
+        }
+        if (allocation.budgetLineId) {
+          const line = byId('eventBudgetLines', allocation.budgetLineId, businessId);
+          if (!line || line.eventId !== allocation.eventId) throw new Error('Строка бюджета не относится к финансовой связи');
+        }
+        const allocated = Number(allocatedByFinance.get(finance.id) || 0) + Number(allocation.amount || 0);
+        if (Math.round(allocated * 100) > Math.round(Number(finance.amount || 0) * 100)) throw new Error('Распределено больше суммы финансовой операции');
+        allocatedByFinance.set(finance.id, allocated);
+      }
+    } catch (error) {
+      return { ok: false, error: error.message };
+    }
+    for (const source of data?.employees || []) {
+      if (!source?.id) continue;
+      const item = structuredClone(source);
+      const i = db.employees.findIndex((candidate) => candidate.id === item.id);
+      if (i >= 0) db.employees[i] = item; else db.employees.push(item);
+      imported++;
+    }
     ensureCoreData(db);
     this._save(db);
     return { ok: true, imported };
@@ -1458,6 +1612,7 @@ class RemoteStore {
   processBankTransaction(token, id, businessId, category) { return this._call({ action: 'process_bank_transaction', token, id, businessId, category }); }
   allocateEventFinance(token, item) { return this._call({ action: 'allocate_event_finance', token, item }); }
   closeEventSettlement(token, id) { return this._call({ action: 'close_event_settlement', token, id }); }
+  backup(token) { return this._call({ action: 'backup', token }); }
   migrateImport(token, data) { return this._call({ action: 'migrate_import', token, data }); }
   uploadFile(token, b64) { return this._call({ action: 'upload_file', token, b64 }); }
   getFile(token, id) { return this._call({ action: 'get_file', token, id }); }

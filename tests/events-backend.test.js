@@ -12,8 +12,10 @@ import {
   eventDeleteError,
   eventEconomy,
   eventModuleWriteError,
+  eventReferenceDeleteError,
   eventRecordError,
   eventSettlementSnapshot,
+  staffEventManageError,
 } from "../supabase/functions/api/event-rules.js";
 
 const admin = { id: "admin", name: "Админ", role: "admin", unit: "all", active: true };
@@ -135,9 +137,44 @@ test("сотрудник видит события и участников, но
   assert.equal(visible.events.length, 1);
   assert.equal(visible.eventRegistrations.length, 2);
   assert.equal(visible.eventTypes[0].ownerShares, undefined);
+  assert.equal(visible.eventTypes[0].defaultFee, undefined);
+  assert.equal(visible.eventTypes[0].staffRate, undefined);
+  assert.equal(visible.events[0].defaultFee, undefined);
   assert.equal(visible.events[0].settlement, undefined);
+  assert.equal(visible.events[0].staffAmount, 20);
+  assert.equal(visible.eventRegistrations[0].chargeAmount, undefined);
   assert.deepEqual(visible.eventBudgetLines, []);
   assert.deepEqual(visible.eventFinanceAllocations, []);
+});
+
+test("ставка и начисление сотрудника фиксируются снимком и не пересчитываются задним числом", () => {
+  const data = fixture();
+  const snapshot = eventSettlementSnapshot(data.events[0], data, 123);
+  assert.equal(snapshot.staffRate, 10);
+  assert.equal(snapshot.staffAmount, 20);
+  data.events[0] = { ...data.events[0], settlementStatus: "closed", settlement: snapshot };
+  data.eventTypes[0].staffRate = 999;
+  assert.equal(visibleBootstrapData(staff, data).events[0].staffAmount, 20);
+  data.events[0].settlement = { ...snapshot, staffAmount: undefined };
+  assert.equal(visibleBootstrapData(staff, data).events[0].staffAmount, null);
+});
+
+test("сотрудник управляет только своим открытым событием, а исторические ссылки нельзя удалить", () => {
+  const data = fixture();
+  assert.equal(staffEventManageError(staff, data.events[0]), null);
+  assert.match(staffEventManageError(staff, { ...data.events[0], responsibleId: "other" }), /своё событие/);
+  assert.match(eventReferenceDeleteError("players", data.players[0], data), /используется в событии/);
+  assert.match(eventReferenceDeleteError("contacts", data.contacts[0], data), /используется в событии/);
+  assert.match(eventReferenceDeleteError("venues", data.venues[0], data), /используется в событии/);
+  assert.equal(eventReferenceDeleteError("companies", { id: "free" }, data), null);
+});
+
+test("несовпадающие businessId и unit связанных записей отвергаются", () => {
+  const data = fixture();
+  assert.match(eventRecordError("events", { ...data.events[0], unit: "dev" }, data), /должны совпадать/);
+  assert.match(eventRecordError("eventRegistrations", { ...data.eventRegistrations[0], unit: "dev" }, data, "r1"), /должны совпадать/);
+  assert.match(eventRecordError("eventBudgetLines", { ...data.eventBudgetLines[0], unit: "dev" }, data, "b1"), /должны совпадать/);
+  assert.match(eventRecordError("eventFinanceAllocations", { ...data.eventFinanceAllocations[0], unit: "dev" }, data, "a1"), /должны совпадать/);
 });
 
 test("завершённое событие и финансовая история не удаляются", () => {

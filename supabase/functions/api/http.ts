@@ -2,6 +2,7 @@ import { profileOf, tochkaSyncAccess } from "./rules.js";
 import { ensureCoreData, findUser } from "./auth/access.ts";
 import {
   addComment,
+  backup,
   bootstrap,
   closeEventSettlement,
   createItem,
@@ -64,6 +65,9 @@ export async function handleRequest(req: Request) {
       case "bootstrap":
         await ensureCoreData();
         return json(await bootstrap(user));
+      case "backup":
+        await ensureCoreData();
+        return json(await backup(user));
       case "create": return json(await createItem(user, body.entity, body.item));
       case "update": return json(await updateItem(user, body.entity, body.item));
       case "delete": return json(await deleteItem(user, body.entity, body.id));
