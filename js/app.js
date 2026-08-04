@@ -1,35 +1,10 @@
 // ============ Монетки: приложение ============
 import { makeStore, UNITS, BUSINESS_MODULES, CLIENT_STATUSES, TASK_STATUSES, FIN_METHODS, FIN_CATEGORIES, OWNERS, ownerBalances, canUseExpenses, ownerLabel, businessIdOf } from './store.js';
-
-// ---------- Утилиты ----------
-const $ = (sel, root = document) => root.querySelector(sel);
-const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const money = (n) => new Intl.NumberFormat('ru-RU').format(Math.round(Number(n) || 0)) + ' ₽';
-const fmtDate = (iso) => { if (!iso) return ''; const d = new Date(iso); return d.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' }); };
-const fmtDT = (ts) => new Date(ts).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
-const today = () => new Date().toISOString().slice(0, 10);
-const telHref = (p) => 'tel:' + String(p || '').replace(/[^\d+]/g, '');
-
-function toast(text, isError = false) {
-  const el = document.createElement('div');
-  el.className = 'toast' + (isError ? ' error' : '');
-  el.textContent = text;
-  $('#toast-root').appendChild(el);
-  setTimeout(() => el.remove(), 3200);
-}
+import { $, closeModal, esc, fmtDate, fmtDT, money, openModal, telHref, toast, today } from './ui.js';
+import { createAppState, createCrudHelpers } from './app-state.js';
 
 // ---------- Состояние ----------
-const S = {
-  store: makeStore(),
-  token: localStorage.getItem('monetki_token') || '',
-  profile: null,
-  data: null,
-  unit: localStorage.getItem('monetki_unit') || 'padel',
-  loading: false,
-  taskFilter: { who: 'mine', status: 'active' },
-  finMonth: today().slice(0, 7),
-  search: {}
-};
+const S = createAppState(makeStore());
 
 function isAdmin() { return S.profile && S.profile.role === 'admin'; }
 function businesses() { return (S.data?.businesses || []).filter((b) => b.active !== false); }
@@ -64,15 +39,6 @@ function employeeBusinessIds(employee) {
   return employee.unit ? [employee.unit] : [];
 }
 
-// ---------- Модалки ----------
-function openModal(html, onMount) {
-  const root = $('#modal-root');
-  root.innerHTML = `<div class="modal-backdrop"><div class="modal">${html}</div></div>`;
-  $('.modal-backdrop', root).addEventListener('click', (e) => { if (e.target.classList.contains('modal-backdrop')) closeModal(); });
-  if (onMount) onMount(root);
-}
-function closeModal() { $('#modal-root').innerHTML = ''; }
-
 // ---------- Данные ----------
 async function refresh(silent = false) {
   if (!S.token) return;
@@ -106,48 +72,7 @@ function maybeSystemNotify(prevUnreadIds) {
 
 // Быстрые изменения: применяем к данным на экране сразу, не дожидаясь полной
 // перезагрузки базы (сверка с сервером происходит фоновым refresh'ем).
-const SCOPED_ENTITIES = ['clients', 'venues', 'players', 'tasks', 'finance', 'staffExpenses', 'memberships', 'businessOwners'];
-function normalizeItemScope(entity, item) {
-  if (!SCOPED_ENTITIES.includes(entity)) return item;
-  const businessId = item.businessId || item.unit;
-  return businessId ? { ...item, businessId, unit: businessId } : item;
-}
-function applyLocal(entity, op, itemOrId) {
-  if (!S.data) return;
-  const arr = S.data[entity] || (S.data[entity] = []);
-  if (op === 'create') arr.push(itemOrId);
-  if (op === 'update') { const i = arr.findIndex((x) => x.id === itemOrId.id); if (i >= 0) arr[i] = itemOrId; else arr.push(itemOrId); }
-  if (op === 'delete') S.data[entity] = arr.filter((x) => x.id !== itemOrId);
-}
-
-async function doCreate(entity, item, okText) {
-  item = normalizeItemScope(entity, item);
-  const res = await S.store.create(S.token, entity, item);
-  if (!res.ok) { toast(res.error || 'Ошибка', true); return null; }
-  applyLocal(entity, 'create', res.item || item);
-  if (okText) toast(okText);
-  render();
-  return res;
-}
-
-async function doUpdate(entity, item, okText) {
-  item = normalizeItemScope(entity, item);
-  applyLocal(entity, 'update', item);
-  render();
-  if (okText) toast(okText);
-  const res = await S.store.update(S.token, entity, item);
-  if (!res.ok) { toast(res.error || 'Ошибка', true); refresh(true); return null; }
-  return res;
-}
-
-async function doDelete(entity, id, okText) {
-  applyLocal(entity, 'delete', id);
-  render();
-  if (okText) toast(okText);
-  const res = await S.store.remove(S.token, entity, id);
-  if (!res.ok) { toast(res.error || 'Ошибка', true); refresh(true); return null; }
-  return res;
-}
+const { doCreate, doUpdate, doDelete } = createCrudHelpers(S, { toast, render, refresh });
 
 function logout() {
   S.token = ''; S.profile = null; S.data = null;
