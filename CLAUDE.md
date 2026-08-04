@@ -53,7 +53,7 @@ POST на `backendUrl`, `Content-Type: text/plain` (чтобы без preflight)
 - `stockMovements`: неизменяемая история `receipt|expense|transfer|inventory`; позиция, склад/склады, количество, дата, поставщик/сумма или причина/событие при наличии. Создание движения системно пересчитывает остатки.
 - `stockBalances`: системные остатки и резерв по паре склад + позиция; прямое редактирование запрещено.
 - `reservations`: резерв позиции на складе, status `active|released`; активный резерв не может превышать свободный остаток.
-- `inventories`: сверка фактических остатков склада, status `draft|completed`; завершение создаёт корректирующие движения, завершённая инвентаризация неизменяема.
+- `inventories`: сверка фактических остатков склада, status `draft|completed`; сохранение/удаление черновика и завершение выполняются атомарно с проверкой актуальной версии, завершение создаёт корректирующие движения, завершённая инвентаризация неизменяема.
 - `tasks`: assigneeId, authorId, status `new`(«Не видел», красный)`|progress|question`(жёлтый)`|done`, priority, due, comments[]
 - `finance`: unit, date, type `income|expense`, amount, method `account|card|sbp|cash|other`, source `bank|manual`, category, counterparty, comment, bankId (дедуп банка), employeeId (зарплата/компенсация), owner (`savva|andrey|dmitry` — чей расход)
 - `bankTransactions`: необработанная очередь банка; id, bankId, date, type, amount, method, source `bank`, counterparty, comment, created, updated. До проведения намеренно нет `businessId`/`unit`/`category`, поэтому запись не участвует в отчётах и личных счетах. В bootstrap очередь получает только администратор; обычный CRUD запрещён.

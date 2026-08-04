@@ -36,11 +36,17 @@ export async function applyReservationChange(before: Rec | null, after: Rec | nu
   return await stockRpc("stock_apply_reservation", { p_before: before, p_after: after });
 }
 
-export async function completeInventory(inventory: Rec, allowCreate = false) {
+export async function completeInventory(inventory: Rec, allowCreate = false, expected: Rec | null = null) {
   const data = await readStockData();
   const validationError = stockRecordError("inventories", inventory, data, String(inventory.id || ""));
   if (validationError) return { ok: false, error: validationError };
-  return await stockRpc("stock_complete_inventory", { p_inventory: inventory, p_allow_create: allowCreate });
+  return await stockRpc("stock_complete_inventory", {
+    p_inventory: inventory, p_allow_create: allowCreate, p_expected: expected,
+  });
+}
+
+export async function saveInventory(before: Rec, after: Rec | null) {
+  return await stockRpc("stock_save_inventory", { p_before: before, p_after: after });
 }
 
 export async function deleteStockCatalog(entity: string, item: Rec) {

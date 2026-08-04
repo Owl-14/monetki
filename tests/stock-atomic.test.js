@@ -9,20 +9,22 @@ test("сервер делегирует все изменения остатко
     read("../supabase/functions/api/stock.ts"),
     read("../supabase/functions/api/actions.ts"),
   ]);
-  for (const rpc of ["stock_apply_movement", "stock_apply_reservation", "stock_complete_inventory", "stock_delete_catalog"]) {
+  for (const rpc of ["stock_apply_movement", "stock_apply_reservation", "stock_complete_inventory", "stock_save_inventory", "stock_delete_catalog"]) {
     assert.match(stock, new RegExp(`stockRpc\\("${rpc}"`));
   }
   assert.doesNotMatch(stock, /writeRows|writeRow\("stockBalances"/);
   assert.match(actions, /entity === "reservations"[\s\S]{0,100}return await applyReservationChange\(null, item\)/);
   assert.match(actions, /entity === "reservations"[\s\S]{0,100}return await applyReservationChange\(before, merged\)/);
   assert.match(actions, /entity === "reservations"[\s\S]{0,100}return await applyReservationChange\(before, null\)/);
+  assert.match(actions, /entity === "inventories"[\s\S]{0,160}return await saveInventory\(before, merged\)/);
+  assert.match(actions, /entity === "inventories"[\s\S]{0,100}return await saveInventory\(before, null\)/);
   assert.match(actions, /entity === "inventories"[\s\S]{0,100}item\.createdBy = u\.id/);
   assert.match(actions, /entity === "warehouses" \|\| entity === "stockItems"[\s\S]{0,100}return await deleteStockCatalog\(entity, before\)/);
 });
 
 test("SQL блокирует остатки и проверяет доступное количество внутри транзакции", async () => {
   const sql = await read("../supabase/migrations/004_atomic_stock_operations.sql");
-  for (const fn of ["stock_apply_movement", "stock_apply_reservation", "stock_complete_inventory", "stock_delete_catalog"]) {
+  for (const fn of ["stock_apply_movement", "stock_apply_reservation", "stock_complete_inventory", "stock_save_inventory", "stock_delete_catalog"]) {
     assert.match(sql, new RegExp(`create or replace function ${fn}`));
   }
   assert.ok((sql.match(/for update/gi) || []).length >= 4, "нет блокировок актуальных строк");
@@ -55,6 +57,9 @@ test("повторное завершение инвентаризации ид�
   assert.match(sql.slice(movementInsert), /on conflict \(entity, id\) do nothing/);
   assert.match(sql, /values \('inventories', v_id, p_inventory \|\| jsonb_build_object\('status', 'draft'\)\)/);
   assert.match(sql, /if not p_allow_create then[\s\S]*Инвентаризация не найдена/);
+  assert.match(sql, /drop function if exists stock_complete_inventory\(jsonb, boolean\)/);
+  assert.match(sql, /p_expected is not null and v_existing is distinct from p_expected/);
+  assert.match(sql, /stock_save_inventory[\s\S]*v_existing is distinct from p_before/);
 });
 
 test("RPC закрыты от клиентских ролей и миграция выполняется до деплоя функции", async () => {
@@ -62,8 +67,8 @@ test("RPC закрыты от клиентских ролей и миграци�
     read("../supabase/migrations/004_atomic_stock_operations.sql"),
     read("../.github/workflows/deploy-backend.yml"),
   ]);
-  assert.ok((sql.match(/revoke all on function/g) || []).length === 4);
-  assert.ok((sql.match(/grant execute on function/g) || []).length === 4);
+  assert.ok((sql.match(/revoke all on function/g) || []).length === 5);
+  assert.ok((sql.match(/grant execute on function/g) || []).length === 5);
   assert.match(sql, /from public, anon, authenticated/);
   assert.match(sql, /notify pgrst, 'reload schema'/);
   assert.ok(workflow.indexOf("004_atomic_stock_operations.sql") < workflow.indexOf("Deploy api function"));
