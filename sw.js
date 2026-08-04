@@ -1,5 +1,5 @@
 // Service worker «Монеток»: кэшируем оболочку приложения, чтобы PWA открывалась мгновенно и офлайн.
-const CACHE = 'monetki-v25';
+const CACHE = 'monetki-v26';
 const SHELL = [
   './',
   './index.html',
@@ -8,8 +8,10 @@ const SHELL = [
   './js/app.js',
   './js/app-shell.js',
   './js/app-state.js',
+  './js/event-rules.js',
   './js/store.js',
   './js/ui.js',
+  './supabase/functions/api/event-rules.js',
   './manifest.webmanifest',
   './icons/icon-192.png',
   './icons/icon-512.png'

@@ -1,10 +1,14 @@
+import { EVENT_ENTITIES, visibleEventCollections } from "./event-rules.js";
+
 export const ENTITIES = [
   "businesses", "memberships", "businessOwners",
   "employees", "clients", "companies", "contacts", "leads", "deals",
   "pipelines", "stages", "dealItems", "venues", "players",
   "tasks", "finance", "staffExpenses", "cash", "notifications",
   "bankTransactions", "warehouses", "stockItems", "stockMovements", "stockBalances", "reservations", "inventories",
+  ...EVENT_ENTITIES,
 ];
+export const BACKUP_ENTITIES = [...ENTITIES, "files"];
 
 export const CORE_ENTITIES = ["businesses", "memberships", "businessOwners"];
 export const CRM_ENTITIES = ["companies", "contacts", "leads", "deals", "pipelines", "stages", "dealItems"];
@@ -12,7 +16,7 @@ export const STOCK_ENTITIES = [
   "warehouses", "stockItems", "stockMovements", "stockBalances", "reservations", "inventories",
 ];
 export const BUSINESS_SCOPED_ENTITIES = [
-  "clients", ...CRM_ENTITIES, "venues", "players", "tasks", "finance", "staffExpenses", ...STOCK_ENTITIES,
+  "clients", ...CRM_ENTITIES, "venues", "players", "tasks", "finance", "staffExpenses", ...STOCK_ENTITIES, ...EVENT_ENTITIES,
 ];
 
 export const DEFAULT_CRM_STAGES = [
@@ -78,7 +82,7 @@ export function normalizeCrmRecord(entity, item) {
 }
 
 export const DEFAULT_BUSINESSES = [
-  { id: "padel", name: "Падел", emoji: "🎾", modules: ["dashboard", "tasks", "venues", "players", "finance", "money", "team", "stock"], active: true },
+  { id: "padel", name: "Падел", emoji: "🎾", modules: ["dashboard", "tasks", "events", "venues", "players", "finance", "money", "team", "stock"], active: true },
   { id: "dev", name: "Разработка", emoji: "💻", modules: ["dashboard", "tasks", "clients", "finance", "money", "team"], active: true },
 ];
 
@@ -226,6 +230,19 @@ export function visibleBootstrapData(user, data, bankBalance = null) {
   const stockItems = (items) => scopedItems(items).filter((item) =>
     !scopeMismatch(item) && stockBusinessIds.has(businessIdOf(item))
   );
+  const eventBusinessIds = new Set((data.businesses || [])
+    .filter((business) => business.active !== false && Array.isArray(business.modules) && business.modules.includes("events"))
+    .map((business) => business.id));
+  const eventItems = (items) => scopedItems(items).filter((item) =>
+    !scopeMismatch(item) && eventBusinessIds.has(businessIdOf(item))
+  );
+  const visibleEvents = visibleEventCollections(user, {
+    eventTypes: eventItems(data.eventTypes),
+    events: eventItems(data.events),
+    eventRegistrations: eventItems(data.eventRegistrations),
+    eventBudgetLines: eventItems(data.eventBudgetLines),
+    eventFinanceAllocations: eventItems(data.eventFinanceAllocations),
+  }, admin);
   const sharesBusiness = (leftId, rightId) => {
     const left = accessSet(memberships, leftId);
     return activeMemberships(memberships, rightId).some((membership) => left.has(businessIdOf(membership)));
@@ -282,6 +299,7 @@ export function visibleBootstrapData(user, data, bankBalance = null) {
     dealItems: scopedItems(data.dealItems),
     venues: scopedItems(data.venues),
     players: scopedItems(data.players),
+    ...visibleEvents,
     tasks: scopedItems(data.tasks).filter((task) => admin || task.assigneeId === user.id),
     finance: scopedItems(data.finance).filter((item) => admin || item.employeeId === user.id),
     bankTransactions: admin ? (data.bankTransactions || []) : [],
@@ -301,9 +319,10 @@ export function visibleBootstrapData(user, data, bankBalance = null) {
 
 export function baseWriteError(user, entity) {
   if (entity === "bankTransactions") return "Банковскую операцию можно только провести";
+  if (entity === "eventFinanceAllocations") return "Финансовое распределение создаётся отдельным безопасным действием";
   if (!ENTITIES.includes(entity)) return "Неизвестная сущность";
   if (entity === "stockBalances") return "Остатки изменяются только складскими операциями";
-  if ([...CORE_ENTITIES, "employees", "finance", "cash"].includes(entity) && !isAdmin(user)) {
+  if ([...CORE_ENTITIES, "employees", "finance", "cash", "eventTypes", "eventBudgetLines"].includes(entity) && !isAdmin(user)) {
     return "Только для админа";
   }
   if (entity === "notifications") return "Нельзя";

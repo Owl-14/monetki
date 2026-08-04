@@ -223,6 +223,9 @@ test("новый активный бизнес автоматически дос
   const membership = secondAdmin.data.memberships.find((item) => item.employeeId === "admin-other" && businessIdOf(item) === "events");
   assert.equal(membership.role, "owner");
   assert.equal(membership.active, true);
+  const creatorShare = secondAdmin.data.businessOwners.find((item) => item.ownerId === "admin" && businessIdOf(item) === "events");
+  assert.equal(creatorShare.share, 1);
+  assert.equal(creatorShare.name, "Админ");
 });
 
 test("архив бизнеса скрывает рабочие данные, сохраняет их и позволяет восстановление", async () => {

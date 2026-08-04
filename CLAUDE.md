@@ -9,7 +9,7 @@
 | Часть | Где | Технологии |
 |---|---|---|
 | Фронтенд (PWA) | корень репо → GitHub Pages, https://owl-14.github.io/monetki | ванильный JS (ES-модули), без сборки |
-| Бэкенд | `supabase/functions/api/index.ts` → Supabase Edge Function | Deno/TS, один HTTP-эндпоинт; логика разделена на `http`, `actions`, `auth/access`, `db/repositories`, `bank` |
+| Бэкенд | `supabase/functions/api/index.ts` → Supabase Edge Function | Deno/TS, один HTTP-эндпоинт; логика разделена на `http`, `actions`, `auth/access`, `db/repositories`, `bank`, `events` |
 | База | Supabase Postgres, проект ref `pmntdxwdsrdtaindabqb` (Frankfurt) | одна таблица `records(entity, id, data jsonb)` + `kv(key, value)` |
 | Банк | API Точка Банка (enter.tochka.com/uapi) | выписка + баланс, cron каждый час в :05 (pg_cron → функция) |
 
@@ -22,7 +22,8 @@
 - `index.html` — оболочка; инлайн-скрипт темы до CSS (не мигает).
 - `config.js` — `backendUrl` (адрес функции), версия.
 - `js/store.js` — слой данных: `LocalStore` (демо, localStorage) и `RemoteStore` (fetch к функции). Оба реализуют одинаковые методы и симметричные права. Здесь же справочники: `UNITS` (legacy), `DEFAULT_BUSINESSES`, `BUSINESS_MODULES`, `TASK_STATUSES`, `FIN_*`, `OWNERS` (fallback долей) и `ownerBalances()` (расчёт личных счетов из `businessOwners`).
-- `js/app.js` — весь UI: роутер по hash (`#/dashboard` и т.д.), функции `view*` рендерят разделы в `#view`, `open*Form` — модалки. Быстрые сохранения: `doCreate/doUpdate/doDelete` меняют `S.data` локально и шлют запрос, без перечитывания базы.
+- `js/app.js` — весь UI: роутер по hash (`#/dashboard`, `#/events?view=calendar`, `#/events?id=…&tab=economy` и т.д.), функции `view*` рендерят разделы в `#view`, `open*Form` — модалки. Быстрые сохранения: `doCreate/doUpdate/doDelete` меняют `S.data` локально и шлют запрос, без перечитывания базы. Неизменяемые связи финансов и закрытие расчёта используют специальные методы store с последующим bootstrap.
+- `js/event-rules.js` → `supabase/functions/api/event-rules.js` — общие для браузера и сервера правила событий и расчёт экономики в копейках; не дублировать формулы в UI.
 - `css/style.css` — стили; переменные тем в `:root` (светлая) + два блока тёмной (`prefers-color-scheme` и `[data-theme="dark"]`).
 - `sw.js` — service worker. **При любом изменении фронтенда поднимать версию `CACHE` ('monetki-vN')**.
 
@@ -36,13 +37,16 @@ POST на `backendUrl`, `Content-Type: text/plain` (чтобы без preflight)
 `upload_file{b64}` / `get_file{id}` (фото чеков), `status` (диагностика без авторизации, без личных данных),
 `tochka_sync{token,days}` (только активный администратор; pg_cron вместо личного токена передаёт отдельный секрет в заголовке),
 `process_bank_transaction{id,businessId,category}` (только администратор; атомарно проводит запись из банковской очереди),
-`migrate_import{data}` (без токена только пока база пустая).
+`allocate_event_finance{item}` (только администратор; атомарно и идемпотентно связывает существующий `finance` с событием),
+`close_event_settlement{id}` (только администратор; отдельно от операционного статуса фиксирует расчёт завершённого/отменённого события),
+`backup` (только администратор; отдельная полная копия всех записей, включая files и события архивных бизнесов/выключенного модуля; обычный bootstrap не расширяет),
+`migrate_import{data}` (без токена только пока база пустая; event-граф восстанавливается одной транзакцией и допускает безопасный повтор той же копии).
 
 ## Модель данных (entity → поля в data)
 
 - `businesses`: id (безопасный служебный slug; `padel|dev` — legacy), name, emoji, modules[], active. Число бизнесов не ограничено; `active:false` — мягкий архив без удаления данных.
 - `memberships`: employeeId, businessId, unit (=businessId для совместимости), role `owner|staff`, active
-- `businessOwners`: businessId, unit (=businessId), ownerId (`savva|andrey|dmitry`), name, share (0…1), active
+- `businessOwners`: businessId, unit (=businessId), ownerId (legacy `savva|andrey|dmitry` или ID создателя нового бизнеса), name, share (0…1), active. При создании бизнеса администратор автоматически получает запись с долей 1; дальше доли редактируются в карточке бизнеса.
 - `employees`: id, name, code (=токен входа), role `admin|staff`, unit `padel|dev|all` (legacy/bootstrap), phone, tg, active
 - `clients` (legacy, только dev): прежняя карточка клиента с status `lead|talks|work|support|refused`, amount, notes. Новая CRM читает её как помеченную старую карточку, не дублирует и не перезаписывает через новые сущности.
 - CRM продаж: `companies` (реквизиты, ответственные и отдельный статус клиента), `contacts` (люди компании), `leads` (сырой входящий контакт), `deals` (сделка и стадия), `pipelines` + `stages` (настраиваемые воронки), `dealItems` (ручные позиции сделки, в том числе регулярные). Все семь сущностей содержат одинаковые `businessId` и `unit`; bootstrap идемпотентно создаёт для активного бизнеса только стандартную пустую воронку и её стадии, но не создаёт компании, контакты, лиды или сделки.
@@ -54,6 +58,11 @@ POST на `backendUrl`, `Content-Type: text/plain` (чтобы без preflight)
 - `stockBalances`: системные остатки и резерв по паре склад + позиция; прямое редактирование запрещено.
 - `reservations`: резерв позиции на складе, status `active|released`; активный резерв не может превышать свободный остаток.
 - `inventories`: сверка фактических остатков склада, status `draft|completed`; сохранение/удаление черновика и завершение выполняются атомарно с проверкой актуальной версии, завершение создаёт корректирующие движения, завершённая инвентаризация неизменяема.
+- `eventTypes`: businessId/unit, name, active, defaultFee, staffRate, ownerShares[] — универсальный тип события и доли его прибыли; модуль `events` обязателен.
+- `events`: businessId/unit, eventTypeId, title, status `planned|active|completed|cancelled`, отдельный settlementStatus `open|closed`, startsAt/endsAt, responsibleId, capacity/defaultFee, универсальные locationName/resourceName, необязательный same-business venueId, description, append-only history[] изменений карточки события и закрытия расчёта. Изменения участников/бюджета/связей отражаются в соответствующих сущностях, а не дублируются в history. Закрытие сохраняет неизменяемый settlement со снимком плана/факта, прибыли, маржи, долей, staffRate и staffAmount.
+- `eventRegistrations`: businessId/unit, eventId, participantType `player|company|contact`, participantId, status `registered|confirmed|attended|cancelled|refunded`, chargeAmount, note. Ссылка участника всегда проверяется внутри того же бизнеса; уникальный SQL-индекс атомарно запрещает повторную регистрацию одного участника.
+- `eventBudgetLines`: businessId/unit, eventId, direction `income|expense`, name, plannedAmount, category, note — только план, не денежный факт.
+- `eventFinanceAllocations`: неизменяемая связь события с существующим `finance`: eventId, financeId, optional registrationId/budgetLineId, purpose `payment|deposit|expense|refund`, amount, idempotencyKey. Прямая CRUD-запись запрещена; SQL под блокировкой не даёт распределить больше суммы операции. Связанные сумма/type/business у `finance` защищены от изменения и удаления.
 - `tasks`: assigneeId, authorId, status `new`(«Не видел», красный)`|progress|question`(жёлтый)`|done`, priority, due, comments[]
 - `finance`: unit, date, type `income|expense`, amount, method `account|card|sbp|cash|other`, source `bank|manual`, category, counterparty, comment, bankId (дедуп банка), employeeId (зарплата/компенсация), owner (`savva|andrey|dmitry` — чей расход)
 - `bankTransactions`: необработанная очередь банка; id, bankId, date, type, amount, method, source `bank`, counterparty, comment, created, updated. До проведения намеренно нет `businessId`/`unit`/`category`, поэтому запись не участвует в отчётах и личных счетах. В bootstrap очередь получает только администратор; обычный CRUD запрещён.
@@ -72,6 +81,9 @@ POST на `backendUrl`, `Content-Type: text/plain` (чтобы без preflight)
 - Финансы/наличные/сотрудники: только админ. Сотруднику в bootstrap приходят только его выплаты (finance/cash с его employeeId) и его траты.
 - Трата без receiptId не создаётся.
 - Складские записи доступны активным участникам бизнеса только при включённом модуле `stock`. Все ссылки на склады и позиции проверяются внутри одного businessId/unit; движения и завершённые инвентаризации нельзя менять или удалять, а справочники нельзя удалить при связанных остатках или истории.
+- События доступны активным участникам бизнеса только при включённом модуле `events`. Полные типы (`ownerShares/defaultFee/staffRate`), взносы регистраций, план, финансовые связи, полный факт и прибыль доступны только администратору. Сотрудник видит безопасные типы, события и участников; создаёт событие только на себя, управляет только своим открытым событием и его регистрациями, а `defaultFee`/`chargeAmount` сервер берёт из защищённых настроек. Чужие события доступны только для чтения. Сотруднику-ответственному выдаётся только его `staffAmount`: до закрытия расчётный, после закрытия исключительно из settlement; ставка ему не раскрывается.
+- `completed`/`cancelled` не закрывает поздние оплаты автоматически. После ручного `close_event_settlement` событие, участники, бюджет и финансовые связи становятся неизменяемыми; история и итог не пересчитываются задним числом.
+- Player/company/contact/venue нельзя физически удалить, пока на запись ссылается событие; это сохраняет ссылки закрытой истории. Создание дочерней строки и удаление события сериализуются блокировкой родителя: ни одна из двух очередностей гонки не оставляет сироту.
 
 ## Бизнес-логика финансов
 
@@ -82,6 +94,7 @@ POST на `backendUrl`, `Content-Type: text/plain` (чтобы без preflight)
 - Синхронизация Точки: `tochkaSync` в функции — выписка за N дней (по умолчанию 30), дедуп по bankId одновременно по старым `finance` и новой очереди `bankTransactions`, классификация способа оплаты (`classifyMethod`: transactionTypeCode «Банковские карты», schemeName RU.CBR.PAN/CellphoneNumber, потом текстовые эвристики), баланс из /balances (суммы как отдаёт банк, знак НЕ переворачивать!). Новая завершённая операция попадает только в `bankTransactions`; старые `finance` не мигрируют и считаются уже проведёнными.
 - Проведение необработанной операции: администратор назначает активный доступный бизнес и категорию. SQL-функция из `005_process_bank_transaction.sql` под блокировкой и в одной транзакции сохраняет исходный `bankId`, создаёт `finance` и удаляет очередь. Повторный запрос, двойной клик и уже существующий legacy-`finance.bankId` не создают дубль.
 - Восстановление разрыва 20.07: миграция `006_recover_hidden_bank_transactions.sql` атомарно возвращает в `bankTransactions` только банковские `finance` с отсутствующим, `all`, несовпадающим или несуществующим бизнесом и исходным `bankId`. Валидные и архивные бизнесы не меняются; существующий `finance`/очередь с тем же `bankId` не дублируются; строка без `bankId` или со складской ссылкой блокирует автоматическое перемещение. Admin-bootstrap отдаёт `bankDiagnostics` только как счётчики и границы дат очереди/скрытых областей, включая отдельный счётчик строк без `bankId`, без сумм, контрагентов, счетов и банковских идентификаторов.
+- Экономика событий: начислено = активные регистрации; оплачено/депозит/возврат/прямой расход считаются только по неизменяемым `eventFinanceAllocations` к реальным `finance`; прибыль = фактический доход − прямые расходы − возвраты; маржа и прибыль на участника вычисляются из того же снимка. Доли типа должны давать 100%; последняя доля получает копеечный остаток, поэтому распределение точно равно прибыли. `007_atomic_event_finance.sql` фиксирует расчёт, а `008_event_review_guarantees.sql` добавляет атомарную уникальность регистрации, event-delete RPC, строгую businessId/unit-проверку и транзакционный идемпотентный restore графа.
 - Диагностика выписки содержит только безопасные границы и счётчики: по каждому запросу `requestedStart`/`requestedEnd`, `count`, раннюю/позднюю валидную `documentProcessDate`, число отсутствующих или неверных дат и `outsideRange`; по запуску — `rawSeen`/`uniqueSeen` и крайние даты. Ответы банка, суммы, контрагенты, `accountId`, `bankId` в диагностику не добавлять. Операции вне диапазона или без валидной даты не теряются, но синхронизация считается частичной и не обновляет `LAST_SYNC`.
 - Доступ к `tochka_sync`: ручной вызов разрешён только активному администратору с личным `token`; cron использует `X-Tochka-Sync-Secret`, общий только для Edge Function Secret и Vault. Настройка и ротация — только ручным workflow `configure-tochka-sync-secret.yml`; значение не хранится в repo и не выводится.
 
@@ -89,7 +102,7 @@ POST на `backendUrl`, `Content-Type: text/plain` (чтобы без preflight)
 
 1. Ветка от `main` → изменения → **commit → push → PR → merge** (пользователь просил через PR, не пушить в main напрямую). `gh pr create` / `gh pr merge`.
 2. После merge в main всё деплоится само: фронт — GitHub Pages (~1 мин), бэкенд — Action `deploy-backend.yml` при изменении `supabase/**` (секреты в GitHub стоят). Вручную: `gh workflow run deploy-backend.yml`.
-3. Изменил фронт → подними `CACHE` в `sw.js`. Изменил права/протокол → поменяй И `LocalStore`, И серверные модули `rules.js`/`auth`/`actions`/`http`.
+3. Изменил фронт → подними `CACHE` в `sw.js` и версию в `config.js`. Изменил права/протокол → поменяй И `LocalStore`, И серверные модули `rules.js`/`auth`/`actions`/`http`. Для событий общие чистые правила живут в `event-rules.js`, атомарные гарантии — в миграции и RPC.
 4. Проверка: демо-режим — `localStorage.setItem('monetki_backend','demo')` на localhost (коды: 111111 админ, 222222 падел, 333333 dev). Прод-диагностика: `POST {"action":"status"}` на backendUrl.
 5. Git identity: Owl-14 / savva.karetin0@gmail.com (уже в .git/config).
 

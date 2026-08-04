@@ -1,19 +1,22 @@
 // ============ Монетки: приложение ============
-import { makeStore, UNITS, BUSINESS_MODULES, CLIENT_STATUSES, TASK_STATUSES, FIN_METHODS, FIN_CATEGORIES, OWNERS, ownerBalances, canUseExpenses, ownerLabel, businessIdOf } from './store.js';
+import { makeStore, UNITS, BUSINESS_MODULES, CLIENT_STATUSES, TASK_STATUSES, FIN_METHODS, FIN_CATEGORIES, OWNERS, ownerBalances, canUseExpenses, ownerLabel, businessIdOf, uid } from './store.js';
 import { $, closeModal, esc, fmtDate, fmtDT, money, openModal, telHref, toast, today } from './ui.js';
 import { businessIdFromName, createAppState, createCrudHelpers } from './app-state.js';
-import { CRM_TABS, crmTabFromHash, groupNavItems, NAV_ICONS, pageMeta, pickBottomNavItems } from './app-shell.js';
+import { CRM_TABS, EVENT_TABS, crmTabFromHash, eventIdFromHash, eventTabFromHash, eventViewFromHash, groupNavItems, NAV_ICONS, pageMeta, pickBottomNavItems } from './app-shell.js';
+import { eventEconomy } from './event-rules.js';
 
 // ---------- Состояние ----------
 const S = createAppState(makeStore());
 
 function isAdmin() { return S.profile && S.profile.role === 'admin'; }
+function canManageEvent(event) { return isAdmin() || event?.responsibleId === S.profile?.id; }
 function allBusinesses() { return S.data?.businesses || []; }
 function businesses() { return allBusinesses().filter((b) => b.active !== false); }
 function business(id) { return allBusinesses().find((b) => b.id === id) || UNITS[id] || { id, name: id, emoji: '🏢', modules: [] }; }
 function businessName(id) { return business(id).name || id; }
 function businessEmoji(id) { return business(id).emoji || '🏢'; }
 function businessHasModule(item, moduleId) {
+  if (moduleId === 'events') return Array.isArray(item?.modules) && item.modules.includes(moduleId);
   return !Array.isArray(item?.modules) || item.modules.includes(moduleId);
 }
 function myUnits() {
@@ -93,7 +96,7 @@ function logout() {
 }
 
 // ---------- Роутер ----------
-const routes = ['dashboard', 'tasks', 'clients', 'venues', 'players', 'stock', 'finance', 'money', 'team', 'settings', 'login'];
+const routes = ['dashboard', 'tasks', 'clients', 'events', 'venues', 'players', 'stock', 'finance', 'money', 'team', 'settings', 'login'];
 function currentRoute() {
   const r = (location.hash || '').replace('#/', '').split('?')[0];
   return routes.includes(r) ? r : 'dashboard';
@@ -108,6 +111,7 @@ function navItems() {
   if (hasModule('tasks')) items.push(item('tasks', 'Задачи', 'work', (S.data?.tasks || []).filter((t) => t.assigneeId === S.profile.id && t.status !== 'done').length || ''));
   if (!isAdmin() && hasModule('money')) items.push(item('money', 'Мои деньги', 'management'));
   if (hasModule('clients')) items.push(item('clients', 'CRM продаж', 'work'));
+  if (hasModule('events')) items.push(item('events', 'События', 'operations'));
   if (hasModule('venues') || hasModule('players')) {
     if (hasModule('venues')) {
     items.push(item('venues', 'Площадки', 'operations'));
@@ -204,7 +208,7 @@ function render() {
   $('#bell').addEventListener('click', showNotifications);
   $('#bell-mobile').addEventListener('click', showNotifications);
 
-  const views = { dashboard: viewDashboard, tasks: viewTasks, clients: viewClients, venues: viewVenues, players: viewPlayers, stock: viewStock, finance: viewFinance, money: viewMoney, team: viewTeam, settings: viewSettings };
+  const views = { dashboard: viewDashboard, tasks: viewTasks, clients: viewClients, events: viewEvents, venues: viewVenues, players: viewPlayers, stock: viewStock, finance: viewFinance, money: viewMoney, team: viewTeam, settings: viewSettings };
   (views[route] || viewDashboard)();
 }
 
@@ -949,6 +953,376 @@ function openLeadConversion(lead) {
       closeModal();
       location.hash = '#/clients?tab=deals';
     });
+  });
+}
+
+// ---------- Универсальные события ----------
+const EVENT_STATUS = {
+  planned: { name: 'Запланировано', color: 'blue' },
+  active: { name: 'Идёт', color: 'amber' },
+  completed: { name: 'Завершено', color: 'green' },
+  cancelled: { name: 'Отменено', color: 'red' },
+};
+const REGISTRATION_STATUS = {
+  registered: { name: 'Зарегистрирован', color: 'blue' },
+  confirmed: { name: 'Подтверждён', color: 'green' },
+  attended: { name: 'Участвовал', color: 'green' },
+  cancelled: { name: 'Отменён', color: 'red' },
+  refunded: { name: 'Возврат', color: 'amber' },
+};
+const PARTICIPANT_LABEL = { player: 'Игрок', company: 'Контрагент', contact: 'Контакт' };
+
+function eventRows(entity, businessId = '') {
+  return (S.data?.[entity] || []).filter((item) => {
+    const scope = businessIdOf(item);
+    return (!businessId ? activeUnits().includes(scope) : scope === businessId)
+      && businessHasModule(business(scope), 'events');
+  });
+}
+function eventTypeFor(event) {
+  return eventRows('eventTypes', businessIdOf(event)).find((type) => type.id === event.eventTypeId);
+}
+function eventDateTime(value) {
+  const time = Date.parse(value || '');
+  return Number.isFinite(time) ? fmtDT(time) : '—';
+}
+function eventParticipant(registration) {
+  const entity = { player: 'players', company: 'companies', contact: 'contacts' }[registration.participantType];
+  const record = (S.data?.[entity] || []).find((item) => item.id === registration.participantId
+    && businessIdOf(item) === businessIdOf(registration));
+  return record ? (record.name || record.company || 'Без названия') : 'Связанная запись недоступна';
+}
+function eventParticipantMoney(registration, event) {
+  const allocations = eventRows('eventFinanceAllocations', businessIdOf(event)).filter((item) => item.registrationId === registration.id);
+  const finance = new Map((S.data.finance || []).map((item) => [item.id, item]));
+  let paid = 0; let refund = 0;
+  allocations.forEach((allocation) => {
+    const operation = finance.get(allocation.financeId);
+    if (operation?.type === 'income') paid += Number(allocation.amount || 0);
+    if (operation?.type === 'expense' && allocation.purpose === 'refund') refund += Number(allocation.amount || 0);
+  });
+  const charged = ['cancelled', 'refunded'].includes(registration.status) ? 0 : Number(registration.chargeAmount || 0);
+  return { charged, paid, debt: Math.max(0, charged - paid), refund };
+}
+function eventHash(id = '', tab = 'overview', view = '') {
+  const params = new URLSearchParams(String(location.hash).split('?')[1] || '');
+  const origin = params.get('from') || eventViewFromHash(location.hash);
+  if (id) return `#/events?id=${encodeURIComponent(id)}&tab=${tab}&from=${origin}`;
+  return `#/events?view=${view || params.get('from') || eventViewFromHash(location.hash)}`;
+}
+
+function eventLocalDay(value) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? '' : isoDay(date);
+}
+
+function viewEvents() {
+  if (!hasModule('events')) { location.hash = '#/dashboard'; return; }
+  const id = eventIdFromHash(location.hash);
+  if (id) viewEventCard(id);
+  else viewEventDirectory();
+}
+
+function viewEventDirectory() {
+  setTitle('События');
+  const mode = eventViewFromHash(location.hash);
+  const types = eventRows('eventTypes');
+  if (S.eventFilter.typeId && !types.some((type) => type.id === S.eventFilter.typeId)) S.eventFilter.typeId = '';
+  const q = String(S.eventSearch || '').trim().toLowerCase();
+  const list = eventRows('events')
+    .filter((event) => S.eventFilter.status === 'all' || event.status === S.eventFilter.status)
+    .filter((event) => !S.eventFilter.typeId || event.eventTypeId === S.eventFilter.typeId)
+    .filter((event) => !q || [event.title, event.locationName, event.resourceName, eventTypeFor(event)?.name]
+      .some((value) => String(value || '').toLowerCase().includes(q)))
+    .sort((left, right) => String(left.startsAt || '').localeCompare(String(right.startsAt || '')));
+  const filtered = q || S.eventFilter.status !== 'all' || S.eventFilter.typeId;
+  const toolbar = `
+    <div class="event-toolbar">
+      <div class="event-view-toggle" role="group" aria-label="Вид событий">
+        <button class="btn ${mode === 'list' ? 'primary' : ''}" data-event-view="list">Список</button>
+        <button class="btn ${mode === 'calendar' ? 'primary' : ''}" data-event-view="calendar">Календарь</button>
+      </div>
+      <input class="event-search" id="event-search" type="search" placeholder="Название, место или ресурс" value="${esc(S.eventSearch || '')}">
+      <select id="event-status-filter"><option value="all">Все статусы</option>${Object.entries(EVENT_STATUS).map(([id, status]) => `<option value="${id}" ${S.eventFilter.status === id ? 'selected' : ''}>${status.name}</option>`).join('')}</select>
+      <select id="event-type-filter"><option value="">Все типы</option>${types.map((type) => `<option value="${type.id}" ${S.eventFilter.typeId === type.id ? 'selected' : ''}>${esc(type.name)}</option>`).join('')}</select>
+      <div class="event-toolbar-actions">${isAdmin() ? '<button class="btn" id="event-types">Типы событий</button>' : ''}<button class="btn primary" id="add-event">+ Событие</button></div>
+    </div>`;
+  $('#view').innerHTML = `${toolbar}${mode === 'calendar' ? eventCalendarHtml(list) : eventListHtml(list, filtered)}`;
+  bindEventDirectory();
+}
+
+function eventListHtml(list, filtered) {
+  if (!list.length) return `<div class="card empty event-empty"><div class="big">📅</div><b>${filtered ? 'По выбранным фильтрам событий нет' : 'Событий пока нет'}</b><span>${filtered ? 'Измените условия поиска или сбросьте фильтры.' : 'Создайте тип события, затем добавьте первое мероприятие.'}</span>${filtered ? '<button class="btn" id="event-reset">Сбросить фильтры</button>' : '<button class="btn primary" id="event-first">Создать первое событие</button>'}</div>`;
+  return `<div class="event-list">${list.map((event) => {
+    const status = EVENT_STATUS[event.status] || EVENT_STATUS.planned;
+    const registrations = eventRows('eventRegistrations', businessIdOf(event)).filter((item) => item.eventId === event.id && item.status !== 'cancelled').length;
+    return `<button class="card event-row" data-event-id="${event.id}">
+      <time><b>${fmtDate(eventLocalDay(event.startsAt))}</b><span>${new Date(event.startsAt).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}</span></time>
+      <span class="event-row-main"><strong>${esc(event.title)}</strong><small>${esc(eventTypeFor(event)?.name || 'Тип недоступен')}${event.locationName ? ` · ${esc(event.locationName)}` : ''}${event.resourceName ? ` · ${esc(event.resourceName)}` : ''}</small></span>
+      ${S.unit === 'all' ? `<span class="badge">${esc(businessName(businessIdOf(event)))}</span>` : ''}
+      <span class="event-capacity">${registrations}${Number(event.capacity) ? ` / ${Number(event.capacity)}` : ''} участ.</span>
+      <span class="badge ${status.color} dot">${status.name}</span>
+    </button>`;
+  }).join('')}</div>`;
+}
+
+function eventCalendarHtml(list) {
+  const month = S.eventMonth || today().slice(0, 7);
+  const first = new Date(`${month}-01T00:00:00`);
+  const start = new Date(first); start.setDate(1 - ((first.getDay() + 6) % 7));
+  const cells = Array.from({ length: 42 }, (_, index) => { const date = new Date(start); date.setDate(start.getDate() + index); return date; });
+  const byDate = new Map();
+  list.filter((event) => eventLocalDay(event.startsAt).slice(0, 7) === month).forEach((event) => {
+    const date = eventLocalDay(event.startsAt);
+    if (!byDate.has(date)) byDate.set(date, []);
+    byDate.get(date).push(event);
+  });
+  const title = first.toLocaleDateString('ru-RU', { month: 'long', year: 'numeric' });
+  const agenda = [...byDate.entries()].sort().map(([date, events]) => `<section class="event-agenda-day"><h3>${fmtDate(date)}</h3>${events.map((event) => `<button data-event-id="${event.id}"><span>${new Date(event.startsAt).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}</span><b>${esc(event.title)}</b><small>${esc(event.locationName || event.resourceName || '')}</small></button>`).join('')}</section>`).join('');
+  return `<div class="event-calendar-nav"><button class="btn" id="event-month-prev">←</button><strong>${title}</strong><button class="btn" id="event-month-next">→</button><button class="btn" id="event-month-today">Сегодня</button></div>
+    <div class="event-calendar-head">${['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'].map((day) => `<span>${day}</span>`).join('')}</div>
+    <div class="event-calendar-grid">${cells.map((date) => {
+      const iso = isoDay(date); const events = byDate.get(iso) || [];
+      return `<div class="event-day ${date.getMonth() !== first.getMonth() ? 'outside' : ''}"><span>${date.getDate()}</span><div class="event-day-events">${events.map((event) => `<button data-event-id="${event.id}" class="event-calendar-item">${new Date(event.startsAt).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })} ${esc(event.title)}</button>`).join('')}</div></div>`;
+    }).join('')}</div>
+    <div class="event-agenda">${agenda || '<div class="card empty">В этом месяце событий нет</div>'}</div>`;
+}
+
+function bindEventDirectory() {
+  $('#view').querySelectorAll('[data-event-view]').forEach((button) => button.addEventListener('click', () => { location.hash = eventHash('', '', button.dataset.eventView); }));
+  $('#event-search')?.addEventListener('input', (event) => {
+    S.eventSearch = event.target.value;
+    viewEventDirectory();
+    const search = $('#event-search');
+    search?.focus();
+    search?.setSelectionRange(S.eventSearch.length, S.eventSearch.length);
+  });
+  $('#event-status-filter')?.addEventListener('change', (event) => { S.eventFilter.status = event.target.value; viewEventDirectory(); });
+  $('#event-type-filter')?.addEventListener('change', (event) => { S.eventFilter.typeId = event.target.value; viewEventDirectory(); });
+  $('#event-reset')?.addEventListener('click', () => { S.eventSearch = ''; S.eventFilter = { status: 'all', typeId: '' }; viewEventDirectory(); });
+  $('#add-event')?.addEventListener('click', () => openEventForm());
+  $('#event-first')?.addEventListener('click', () => openEventForm());
+  $('#event-types')?.addEventListener('click', () => openEventTypeManager());
+  $('#view').querySelectorAll('[data-event-id]').forEach((button) => button.addEventListener('click', () => { location.hash = eventHash(button.dataset.eventId); }));
+  const shift = (delta) => { const date = new Date(`${S.eventMonth}-01T00:00:00`); date.setMonth(date.getMonth() + delta); S.eventMonth = isoDay(date).slice(0, 7); viewEventDirectory(); };
+  $('#event-month-prev')?.addEventListener('click', () => shift(-1));
+  $('#event-month-next')?.addEventListener('click', () => shift(1));
+  $('#event-month-today')?.addEventListener('click', () => { S.eventMonth = today().slice(0, 7); viewEventDirectory(); });
+}
+
+function viewEventCard(id) {
+  const event = eventRows('events').find((item) => item.id === id);
+  if (!event) { history.replaceState(null, '', eventHash()); viewEventDirectory(); return; }
+  setTitle(event.title);
+  const tab = eventTabFromHash(location.hash);
+  const status = EVENT_STATUS[event.status] || EVENT_STATUS.planned;
+  const locked = event.settlementStatus === 'closed';
+  const manageable = canManageEvent(event);
+  $('#view').innerHTML = `
+    <div class="event-card-head">
+      <button class="btn ghost" id="event-back">← Все события</button>
+      <div class="grow"><div class="event-card-title"><h2>${esc(event.title)}</h2><span class="badge ${status.color} dot">${status.name}</span></div><p>${eventDateTime(event.startsAt)}${event.locationName ? ` · ${esc(event.locationName)}` : ''}${event.resourceName ? ` · ${esc(event.resourceName)}` : ''}</p></div>
+      ${locked ? '<span class="badge green">Расчёт зафиксирован</span>' : `${manageable ? '<button class="btn" id="event-edit">Изменить</button>' : ''}${isAdmin() && ['completed', 'cancelled'].includes(event.status) ? '<button class="btn primary" id="event-close-settlement">Зафиксировать расчёт</button>' : ''}`}
+    </div>
+    ${locked ? '<div class="banner event-locked">🔒 Расчёт зафиксирован. Участники, план и финансовые связи доступны только для чтения.</div>' : ''}
+    <div class="event-tabs" role="tablist">${EVENT_TABS.map((item) => `<button class="${tab === item.id ? 'active' : ''}" data-event-tab="${item.id}">${item.label}</button>`).join('')}</div>
+    <div class="event-tab-panel">${tab === 'overview' ? eventOverviewHtml(event) : tab === 'participants' ? eventParticipantsHtml(event, locked || !manageable) : tab === 'economy' ? eventEconomyHtml(event, locked) : eventHistoryHtml(event)}</div>`;
+  bindEventCard(event, tab, locked);
+}
+
+function eventOverviewHtml(event) {
+  const type = eventTypeFor(event);
+  return `<div class="event-overview-grid">
+    <section class="card event-section"><h3>Основное</h3><dl class="event-details"><dt>Тип</dt><dd>${esc(type?.name || 'Связанная запись недоступна')}</dd><dt>Начало</dt><dd>${eventDateTime(event.startsAt)}</dd><dt>Окончание</dt><dd>${event.endsAt ? eventDateTime(event.endsAt) : '—'}</dd><dt>Ответственный</dt><dd>${esc(empName(event.responsibleId))}</dd><dt>Вместимость</dt><dd>${Number(event.capacity) || 'без ограничения'}</dd>${isAdmin() ? `<dt>Стоимость участия</dt><dd>${money(event.defaultFee)}</dd>` : ''}</dl></section>
+    <section class="card event-section"><h3>Место и ресурс</h3><dl class="event-details"><dt>Площадка</dt><dd>${esc(event.locationName || 'не указана')}</dd><dt>Ресурс</dt><dd>${esc(event.resourceName || 'не указан')}</dd>${event.venueId ? `<dt>Справочник</dt><dd>${esc((S.data.venues || []).find((venue) => venue.id === event.venueId && businessIdOf(venue) === businessIdOf(event))?.name || 'Связанная запись недоступна')}</dd>` : ''}</dl></section>
+    <section class="card event-section event-description"><h3>Описание</h3><p>${esc(event.description || 'Описание пока не добавлено')}</p></section>
+  </div>`;
+}
+
+function eventParticipantsHtml(event, locked) {
+  const registrations = eventRows('eventRegistrations', businessIdOf(event)).filter((item) => item.eventId === event.id);
+  const rows = registrations.map((registration) => {
+    const status = REGISTRATION_STATUS[registration.status] || REGISTRATION_STATUS.registered;
+    if (!isAdmin()) return `<button class="event-participant-row" data-registration-id="${registration.id}"><span><b>${esc(eventParticipant(registration))}</b><small>${PARTICIPANT_LABEL[registration.participantType] || 'Участник'}</small></span><span class="badge ${status.color} dot">${status.name}</span></button>`;
+    const amounts = eventParticipantMoney(registration, event);
+    const charged = ['cancelled', 'refunded'].includes(registration.status) ? 0 : Number(registration.chargeAmount || 0);
+    return `<button class="event-participant-row" data-registration-id="${registration.id}"><span><b>${esc(eventParticipant(registration))}</b><small>${PARTICIPANT_LABEL[registration.participantType] || 'Участник'}</small></span><span class="badge ${status.color} dot">${status.name}</span><span>${money(charged)}</span><span>${money(amounts.paid)}</span><span>${money(amounts.debt)}</span><span>${money(amounts.refund)}</span></button>`;
+  }).join('');
+  return `<section class="card event-section"><header><div><h3>Участники</h3><p>${registrations.length ? `${registrations.length} записей` : 'Участников пока нет'}</p></div>${locked ? '' : '<button class="btn primary" id="add-registration">+ Участник</button>'}</header>
+    ${registrations.length ? `<div class="event-participant-head"><span>Участник</span><span>Статус</span>${isAdmin() ? '<span>Начислено</span><span>Оплачено</span><span>Долг</span><span>Возврат</span>' : ''}</div><div class="event-participant-table">${rows}</div>` : '<div class="empty">Добавьте первого участника события.</div>'}
+  </section>`;
+}
+
+function eventEconomyHtml(event, locked) {
+  if (!isAdmin()) {
+    const isResponsible = event.responsibleId === S.profile.id;
+    const ownIncome = isResponsible ? event.staffAmount : 0;
+    return `<div class="banner">У вас нет доступа к прибыли и финансовым операциям события.</div><div class="card stat"><div class="label">Ваше начисление по событию</div><div class="value">${ownIncome == null ? '—' : money(ownIncome)}</div><div class="hint">${isResponsible ? (event.settlementStatus === 'closed' ? 'зафиксировано при закрытии расчёта' : 'рассчитано по текущим участникам') : 'начисление доступно ответственному сотруднику'}</div></div>`;
+  }
+  const data = {
+    eventRegistrations: eventRows('eventRegistrations', businessIdOf(event)),
+    eventBudgetLines: eventRows('eventBudgetLines', businessIdOf(event)),
+    eventFinanceAllocations: eventRows('eventFinanceAllocations', businessIdOf(event)),
+    finance: (S.data.finance || []).filter((item) => businessIdOf(item) === businessIdOf(event)),
+  };
+  const economy = event.settlementStatus === 'closed' && event.settlement ? event.settlement : eventEconomy(event, data);
+  const lines = data.eventBudgetLines.filter((item) => item.eventId === event.id);
+  const allocations = data.eventFinanceAllocations.filter((item) => item.eventId === event.id);
+  const finance = new Map(data.finance.map((item) => [item.id, item]));
+  const margin = economy.margin == null ? '—' : `${(Number(economy.margin) * 100).toLocaleString('ru-RU', { maximumFractionDigits: 1 })}%`;
+  const ownerShares = Array.isArray(economy.ownerShares) ? economy.ownerShares : [];
+  return `<div class="event-kpi-grid">
+      ${[['Начислено', economy.accrued], ['Оплачено', economy.paid], ['Долг', economy.debt], ['Возврат', economy.refunds]].map(([label, value]) => `<div class="card stat"><div class="label">${label}</div><div class="value">${money(value)}</div></div>`).join('')}
+    </div>
+    <div class="event-economy-grid">
+      <section class="card event-section"><h3>План</h3><dl class="event-details"><dt>Доход</dt><dd>${money(economy.plannedIncome)}</dd><dt>Прямые расходы</dt><dd>${money(economy.plannedExpenses)}</dd><dt>Прибыль</dt><dd>${money(economy.plannedProfit)}</dd><dt>Маржа</dt><dd>${economy.plannedMargin == null ? '—' : `${(Number(economy.plannedMargin) * 100).toLocaleString('ru-RU', { maximumFractionDigits: 1 })}%`}</dd><dt>Прибыль на участника</dt><dd>${economy.plannedProfitPerParticipant == null ? '—' : money(economy.plannedProfitPerParticipant)}</dd></dl></section>
+      <section class="card event-section"><h3>Факт</h3><dl class="event-details"><dt>Доход</dt><dd>${money(economy.actualIncome)}</dd><dt>Прямые расходы</dt><dd>${money(economy.directExpenses)}</dd><dt>Прибыль</dt><dd>${money(economy.profit)}</dd><dt>Маржа</dt><dd>${margin}</dd><dt>Прибыль на участника</dt><dd>${economy.profitPerParticipant == null ? '—' : money(economy.profitPerParticipant)}</dd><dt>Зачтено депозитом</dt><dd>${money(economy.depositApplied)}</dd></dl></section>
+    </div>
+    ${ownerShares.length ? `<section class="card event-section"><h3>Доли организаторов</h3><div class="list">${ownerShares.map((share) => `<div class="row-card"><span class="grow">${esc(share.name || ownerLabel(share.ownerId))} · ${(Number(share.share) * 100).toLocaleString('ru-RU', { maximumFractionDigits: 2 })}%</span><strong>${money(share.amount)}</strong></div>`).join('')}</div></section>` : ''}
+    <section class="card event-section"><header><div><h3>Плановые строки</h3><p>${lines.length ? `${lines.length} строк` : 'План ещё не заполнен'}</p></div>${locked ? '' : '<button class="btn" id="add-budget-line">+ Строка плана</button>'}</header>${lines.length ? `<div class="list">${lines.map((line) => `<button class="row-card" data-budget-line="${line.id}"><span class="grow col"><b>${esc(line.name)}</b><small>${line.direction === 'income' ? 'Доход' : 'Расход'}${line.category ? ` · ${esc(line.category)}` : ''}</small></span><strong>${money(line.plannedAmount)}</strong></button>`).join('')}</div>` : '<div class="empty">Добавьте ожидаемые доходы и прямые расходы.</div>'}</section>
+    <section class="card event-section"><header><div><h3>Фактические операции</h3><p>${allocations.length ? `${allocations.length} связей` : 'Фактические операции пока не связаны'}</p></div>${locked ? '' : '<button class="btn primary" id="add-event-allocation">Привязать операцию</button>'}</header>${allocations.length ? `<div class="list">${allocations.map((allocation) => { const operation = finance.get(allocation.financeId); return `<div class="row-card"><span class="grow col"><b>${allocation.purpose === 'deposit' ? 'Зачёт депозита' : allocation.purpose === 'refund' ? 'Возврат' : allocation.purpose === 'expense' ? 'Прямой расход' : 'Оплата'}</b><small>${operation ? `${fmtDate(operation.date)} · ${esc(operation.category || '')}` : 'Связанная операция недоступна'}</small></span><strong>${money(allocation.amount)}</strong><span class="badge">неизменяемо</span></div>`; }).join('')}</div>` : '<div class="empty">Свяжите существующую операцию из раздела «Финансы».</div>'}</section>`;
+}
+
+function eventHistoryHtml(event) {
+  const historyItems = [...(Array.isArray(event.history) ? event.history : [])].sort((left, right) => Number(right.at || 0) - Number(left.at || 0));
+  return `<section class="card event-section"><h3>История</h3>${historyItems.length ? `<div class="event-history-list">${historyItems.map((item) => `<div class="event-history-item"><span class="event-history-dot"></span><div><b>${item.action === 'created' ? 'Событие создано' : item.action === 'settlement_closed' ? 'Расчёт зафиксирован' : item.fromStatus !== item.toStatus ? `Статус: ${(EVENT_STATUS[item.fromStatus] || {}).name || '—'} → ${(EVENT_STATUS[item.toStatus] || {}).name || '—'}` : 'Карточка изменена'}</b><small>${esc(empName(item.byId))} · ${fmtDT(Number(item.at || 0))}${item.changed?.length ? ` · ${esc(item.changed.join(', '))}` : ''}</small></div></div>`).join('')}</div>` : '<div class="empty">История пока пуста</div>'}</section>`;
+}
+
+function bindEventCard(event, tab, locked) {
+  $('#event-back')?.addEventListener('click', () => { location.hash = eventHash(); });
+  $('#event-edit')?.addEventListener('click', () => openEventForm(event));
+  $('#view').querySelectorAll('[data-event-tab]').forEach((button) => button.addEventListener('click', () => { location.hash = eventHash(event.id, button.dataset.eventTab); }));
+  $('#add-registration')?.addEventListener('click', () => openEventRegistrationForm(event));
+  $('#view').querySelectorAll('[data-registration-id]').forEach((button) => button.addEventListener('click', () => {
+    const registration = eventRows('eventRegistrations', businessIdOf(event)).find((item) => item.id === button.dataset.registrationId);
+    if (registration && !locked && canManageEvent(event)) openEventRegistrationForm(event, registration);
+  }));
+  $('#add-budget-line')?.addEventListener('click', () => openEventBudgetLineForm(event));
+  $('#view').querySelectorAll('[data-budget-line]').forEach((button) => button.addEventListener('click', () => {
+    const line = eventRows('eventBudgetLines', businessIdOf(event)).find((item) => item.id === button.dataset.budgetLine);
+    if (line && !locked) openEventBudgetLineForm(event, line);
+  }));
+  $('#add-event-allocation')?.addEventListener('click', () => openEventFinanceAllocationForm(event));
+  $('#event-close-settlement')?.addEventListener('click', async () => {
+    if (!confirm('Зафиксировать расчёт? После этого участники, план и финансовые связи станут неизменяемыми.')) return;
+    const result = await S.store.closeEventSettlement(S.token, event.id);
+    if (!result.ok) { toast(result.error || 'Не удалось зафиксировать расчёт', true); return; }
+    toast('Расчёт зафиксирован'); await refresh(true); location.hash = eventHash(event.id, tab);
+  });
+}
+
+function openEventTypeManager() {
+  const targetBusinessId = moduleBusinessId('events');
+  const types = eventRows('eventTypes', targetBusinessId);
+  openModal(`<div class="crm-modal-heading"><div><h2>Типы событий</h2><p class="muted small">Тип задаёт базовый взнос, ставку сотрудника и доли прибыли.</p></div><button class="btn primary" id="add-event-type">+ Тип</button></div>
+    <div class="list">${types.length ? types.map((type) => `<button class="row-card" data-event-type="${type.id}"><span class="grow col"><b>${esc(type.name)}</b><small>${type.active === false ? 'выключен' : 'активен'} · взнос ${money(type.defaultFee)}</small></span><span>Изменить</span></button>`).join('') : '<div class="empty">Типов событий пока нет</div>'}</div><div class="actions"><button class="btn" id="modal-cancel">Закрыть</button></div>`, (root) => {
+    $('#modal-cancel', root).addEventListener('click', closeModal);
+    $('#add-event-type', root).addEventListener('click', () => openEventTypeForm(null, targetBusinessId));
+    root.querySelectorAll('[data-event-type]').forEach((button) => button.addEventListener('click', () => openEventTypeForm(types.find((type) => type.id === button.dataset.eventType), targetBusinessId)));
+  });
+}
+
+function openEventTypeForm(type, forcedBusinessId = '') {
+  const isNew = !type;
+  const businessId = businessIdOf(type) || forcedBusinessId || moduleBusinessId('events');
+  const owners = (S.data.businessOwners || []).filter((owner) => businessIdOf(owner) === businessId && owner.active !== false);
+  const shares = new Map((type?.ownerShares || []).map((share) => [share.ownerId, Number(share.share || 0)]));
+  openModal(`<h2>${isNew ? 'Новый тип события' : esc(type.name)}</h2><form id="event-type-form">
+    <label class="field"><span>Название</span><input name="name" required value="${esc(type?.name || '')}"></label>
+    <div class="form-row"><label class="field"><span>Взнос по умолчанию, ₽</span><input name="defaultFee" type="number" min="0" step="0.01" value="${Number(type?.defaultFee || 0)}"></label><label class="field"><span>Ставка сотрудника за участника, ₽</span><input name="staffRate" type="number" min="0" step="0.01" value="${Number(type?.staffRate || 0)}"></label></div>
+    <label class="checkline"><input name="active" type="checkbox" ${type?.active !== false ? 'checked' : ''}><span>Тип доступен для новых событий</span></label>
+    <div class="section-title">Доли прибыли</div><div class="owner-grid">${owners.map((owner) => `<label class="field owner-share"><span>${esc(owner.name || owner.ownerId)}</span><div class="suffix-input"><input type="number" min="0" max="100" step="0.01" data-event-owner="${owner.ownerId}" data-owner-name="${esc(owner.name || '')}" value="${(shares.has(owner.ownerId) ? shares.get(owner.ownerId) : Number(owner.share || 0)) * 100}"><span>%</span></div></label>`).join('') || '<p class="muted small">Сначала добавьте участников бизнеса в настройках.</p>'}</div>
+    <div class="actions">${!isNew ? '<button class="btn danger ghost left" type="button" id="event-type-delete">Удалить</button>' : ''}<button class="btn" type="button" id="modal-cancel">Отмена</button><button class="btn primary">Сохранить</button></div></form>`, (root) => {
+    $('#modal-cancel', root).addEventListener('click', closeModal);
+    $('#event-type-delete', root)?.addEventListener('click', async () => { if (!confirm('Удалить этот тип события?')) return; const result = await doDelete('eventTypes', type.id, 'Тип удалён'); if (result) { closeModal(); render(); } });
+    $('#event-type-form', root).addEventListener('submit', async (submitEvent) => {
+      submitEvent.preventDefault(); const form = submitEvent.currentTarget;
+      const inputs = [...form.querySelectorAll('[data-event-owner]')];
+      const total = inputs.reduce((sum, input) => sum + Number(input.value || 0), 0);
+      if (inputs.length && Math.abs(total - 100) > 0.01) { toast('Доли должны в сумме давать 100%', true); return; }
+      const ownerShares = inputs.filter((input) => Number(input.value) > 0).map((input) => ({ ownerId: input.dataset.eventOwner, name: input.dataset.ownerName, share: Number(input.value) / 100 }));
+      const item = { ...(type || {}), businessId, unit: businessId, name: form.elements.name.value.trim(), defaultFee: Number(form.elements.defaultFee.value || 0), staffRate: Number(form.elements.staffRate.value || 0), active: form.elements.active.checked, ownerShares };
+      const result = isNew ? await doCreate('eventTypes', item, 'Тип создан') : await doUpdate('eventTypes', item, 'Тип сохранён');
+      if (result) { closeModal(); render(); }
+    });
+  });
+}
+
+function openEventForm(event, forcedBusinessId = '') {
+  const isNew = !event;
+  const eventBusinesses = myUnits().filter((id) => businessHasModule(business(id), 'events'));
+  const businessId = businessIdOf(event) || forcedBusinessId || (S.unit !== 'all' && eventBusinesses.includes(S.unit) ? S.unit : eventBusinesses[0]);
+  const types = eventRows('eventTypes', businessId).filter((type) => type.active !== false || type.id === event?.eventTypeId);
+  if (!types.length) { toast('Сначала создайте тип события', true); if (isAdmin()) openEventTypeManager(); return; }
+  const selectedType = types.find((type) => type.id === event?.eventTypeId) || types[0];
+  const venues = (S.data.venues || []).filter((venue) => businessIdOf(venue) === businessId);
+  const employees = (S.data.employees || []).filter((employee) => employeeBusinessIds(employee).includes(businessId));
+  openModal(`<h2>${isNew ? 'Новое событие' : esc(event.title)}</h2><form id="event-form">
+    ${isNew && eventBusinesses.length > 1 ? `<label class="field"><span>Бизнес</span><select name="businessId">${eventBusinesses.map((id) => `<option value="${id}" ${id === businessId ? 'selected' : ''}>${esc(businessName(id))}</option>`).join('')}</select></label>` : ''}
+    <label class="field"><span>Название</span><input name="title" required value="${esc(event?.title || '')}"></label>
+    <div class="form-row"><label class="field"><span>Тип</span><select name="eventTypeId" ${!isAdmin() && !isNew ? 'disabled' : ''}>${types.map((type) => `<option value="${type.id}" ${type.id === (event?.eventTypeId || selectedType.id) ? 'selected' : ''}>${esc(type.name)}</option>`).join('')}</select></label><label class="field"><span>Статус</span><select name="status">${Object.entries(EVENT_STATUS).map(([id, status]) => `<option value="${id}" ${id === (event?.status || 'planned') ? 'selected' : ''}>${status.name}</option>`).join('')}</select></label></div>
+    <div class="form-row"><label class="field"><span>Начало</span><input name="startsAt" type="datetime-local" required value="${esc(String(event?.startsAt || '').slice(0, 16))}"></label><label class="field"><span>Окончание</span><input name="endsAt" type="datetime-local" value="${esc(String(event?.endsAt || '').slice(0, 16))}"></label></div>
+    <div class="form-row">${isAdmin() ? `<label class="field"><span>Ответственный</span><select name="responsibleId"><option value="">— не выбран —</option>${employees.map((employee) => `<option value="${employee.id}" ${employee.id === event?.responsibleId ? 'selected' : ''}>${esc(employee.name)}</option>`).join('')}</select></label>` : ''}<label class="field"><span>Вместимость</span><input name="capacity" type="number" min="0" step="1" value="${Number(event?.capacity || 0)}"></label>${isAdmin() ? `<label class="field"><span>Стоимость участия, ₽</span><input name="defaultFee" type="number" min="0" step="0.01" value="${Number(event?.defaultFee ?? selectedType.defaultFee ?? 0)}"></label>` : ''}</div>
+    <div class="form-row"><label class="field"><span>Площадка — текст</span><input name="locationName" value="${esc(event?.locationName || '')}" placeholder="Любое место"></label><label class="field"><span>Ресурс</span><input name="resourceName" value="${esc(event?.resourceName || '')}" placeholder="Зал, кабинет, машина…"></label></div>
+    ${venues.length ? `<label class="field"><span>Связать со справочником площадок (необязательно)</span><select name="venueId"><option value="">— без ссылки —</option>${venues.map((venue) => `<option value="${venue.id}" ${venue.id === event?.venueId ? 'selected' : ''}>${esc(venue.name)}</option>`).join('')}</select></label>` : ''}
+    <label class="field"><span>Описание</span><textarea name="description">${esc(event?.description || '')}</textarea></label>
+    <div class="actions">${!isNew && canManageEvent(event) ? '<button class="btn danger ghost left" type="button" id="event-delete">Удалить</button>' : ''}<button class="btn" type="button" id="modal-cancel">Отмена</button><button class="btn primary">Сохранить</button></div></form>`, (root) => {
+    $('#modal-cancel', root).addEventListener('click', closeModal);
+    const businessSelect = $('#event-form', root).elements.businessId;
+    businessSelect?.addEventListener('change', () => openEventForm(null, businessSelect.value));
+    const form = $('#event-form', root);
+    form.elements.eventTypeId.addEventListener('change', () => {
+      if (!isNew) return;
+      const selected = types.find((type) => type.id === form.elements.eventTypeId.value);
+      if (form.elements.defaultFee) form.elements.defaultFee.value = Number(selected?.defaultFee || 0);
+    });
+    $('#event-delete', root)?.addEventListener('click', async () => { if (!confirm('Удалить это событие?')) return; const result = await doDelete('events', event.id, 'Событие удалено'); if (result) { closeModal(); location.hash = eventHash(); } });
+    $('#event-form', root).addEventListener('submit', async (submitEvent) => {
+      submitEvent.preventDefault(); const form = submitEvent.currentTarget;
+      const item = { ...(isNew ? {} : { id: event.id }), businessId, unit: businessId, title: form.elements.title.value.trim(), eventTypeId: isAdmin() || isNew ? form.elements.eventTypeId.value : event.eventTypeId, status: form.elements.status.value, startsAt: form.elements.startsAt.value, endsAt: form.elements.endsAt.value, capacity: Number(form.elements.capacity.value || 0), locationName: form.elements.locationName.value.trim(), resourceName: form.elements.resourceName.value.trim(), venueId: form.elements.venueId?.value || '', description: form.elements.description.value.trim() };
+      if (isAdmin()) { item.responsibleId = form.elements.responsibleId.value; item.defaultFee = Number(form.elements.defaultFee.value || 0); }
+      const result = isNew ? await doCreate('events', item, 'Событие создано') : await doUpdate('events', item, 'Событие сохранено');
+      if (result) { if (!isAdmin()) await refresh(true); closeModal(); location.hash = eventHash(result.item?.id || event.id); }
+    });
+  });
+}
+
+function openEventRegistrationForm(event, registration) {
+  const isNew = !registration; const businessId = businessIdOf(event);
+  const options = [
+    ...(S.data.players || []).filter((item) => businessIdOf(item) === businessId).map((item) => ({ type: 'player', id: item.id, name: item.name })),
+    ...(S.data.companies || []).filter((item) => businessIdOf(item) === businessId && !item.legacy).map((item) => ({ type: 'company', id: item.id, name: item.name })),
+    ...(S.data.contacts || []).filter((item) => businessIdOf(item) === businessId).map((item) => ({ type: 'contact', id: item.id, name: item.name })),
+  ];
+  if (!options.length) { toast('Сначала добавьте игрока, контрагента или контакт в этом бизнесе', true); return; }
+  const currentRef = registration ? `${registration.participantType}:${registration.participantId}` : '';
+  openModal(`<h2>${isNew ? 'Добавить участника' : esc(eventParticipant(registration))}</h2><form id="event-registration-form"><label class="field"><span>Участник</span><select name="participantRef" required>${options.map((option) => `<option value="${option.type}:${option.id}" ${`${option.type}:${option.id}` === currentRef ? 'selected' : ''}>${PARTICIPANT_LABEL[option.type]} · ${esc(option.name)}</option>`).join('')}</select></label><div class="form-row"><label class="field"><span>Статус</span><select name="status">${Object.entries(REGISTRATION_STATUS).map(([id, status]) => `<option value="${id}" ${id === (registration?.status || 'registered') ? 'selected' : ''}>${status.name}</option>`).join('')}</select></label>${isAdmin() ? `<label class="field"><span>Начислено, ₽</span><input name="chargeAmount" type="number" min="0" step="0.01" value="${Number(registration?.chargeAmount ?? event.defaultFee ?? 0)}"></label>` : ''}</div><label class="field"><span>Результат или примечание</span><textarea name="note">${esc(registration?.note || '')}</textarea></label><div class="actions">${!isNew ? '<button class="btn danger ghost left" type="button" id="registration-delete">Удалить</button>' : ''}<button class="btn" type="button" id="modal-cancel">Отмена</button><button class="btn primary">Сохранить</button></div></form>`, (root) => {
+    $('#modal-cancel', root).addEventListener('click', closeModal);
+    $('#registration-delete', root)?.addEventListener('click', async () => { if (!confirm('Удалить регистрацию участника?')) return; const result = await doDelete('eventRegistrations', registration.id, 'Участник удалён'); if (result) { closeModal(); location.hash = eventHash(event.id, 'participants'); } });
+    $('#event-registration-form', root).addEventListener('submit', async (submitEvent) => { submitEvent.preventDefault(); const form = submitEvent.currentTarget; const [participantType, participantId] = form.elements.participantRef.value.split(':'); const item = { ...(isNew ? {} : { id: registration.id }), businessId, unit: businessId, eventId: event.id, participantType, participantId, status: form.elements.status.value, note: form.elements.note.value.trim() }; if (isAdmin()) item.chargeAmount = Number(form.elements.chargeAmount.value || 0); const result = isNew ? await doCreate('eventRegistrations', item, 'Участник добавлен') : await doUpdate('eventRegistrations', item, 'Регистрация сохранена'); if (result) { if (!isAdmin()) await refresh(true); closeModal(); location.hash = eventHash(event.id, 'participants'); } });
+  });
+}
+
+function openEventBudgetLineForm(event, line) {
+  const isNew = !line; const businessId = businessIdOf(event);
+  openModal(`<h2>${isNew ? 'Строка плана' : esc(line.name)}</h2><form id="event-budget-form"><label class="field"><span>Название</span><input name="name" required value="${esc(line?.name || '')}"></label><div class="form-row"><label class="field"><span>Направление</span><select name="direction"><option value="income" ${line?.direction === 'income' ? 'selected' : ''}>Доход</option><option value="expense" ${line?.direction !== 'income' ? 'selected' : ''}>Расход</option></select></label><label class="field"><span>Плановая сумма, ₽</span><input name="plannedAmount" type="number" min="0" step="0.01" value="${Number(line?.plannedAmount || 0)}"></label></div><label class="field"><span>Категория</span><input name="category" value="${esc(line?.category || '')}"></label><label class="field"><span>Комментарий</span><textarea name="note">${esc(line?.note || '')}</textarea></label><div class="actions">${!isNew ? '<button class="btn danger ghost left" type="button" id="budget-delete">Удалить</button>' : ''}<button class="btn" type="button" id="modal-cancel">Отмена</button><button class="btn primary">Сохранить</button></div></form>`, (root) => {
+    $('#modal-cancel', root).addEventListener('click', closeModal);
+    $('#budget-delete', root)?.addEventListener('click', async () => { if (!confirm('Удалить строку плана?')) return; const result = await doDelete('eventBudgetLines', line.id, 'Строка удалена'); if (result) { closeModal(); location.hash = eventHash(event.id, 'economy'); } });
+    $('#event-budget-form', root).addEventListener('submit', async (submitEvent) => { submitEvent.preventDefault(); const form = submitEvent.currentTarget; const item = { ...(line || {}), businessId, unit: businessId, eventId: event.id, name: form.elements.name.value.trim(), direction: form.elements.direction.value, plannedAmount: Number(form.elements.plannedAmount.value || 0), category: form.elements.category.value.trim(), note: form.elements.note.value.trim() }; const result = isNew ? await doCreate('eventBudgetLines', item, 'Строка добавлена') : await doUpdate('eventBudgetLines', item, 'Строка сохранена'); if (result) { closeModal(); location.hash = eventHash(event.id, 'economy'); } });
+  });
+}
+
+function openEventFinanceAllocationForm(event) {
+  const businessId = businessIdOf(event); const key = `event:${event.id}:${uid()}`;
+  const allocations = eventRows('eventFinanceAllocations', businessId);
+  const allocated = (financeId) => allocations.filter((item) => item.financeId === financeId).reduce((sum, item) => sum + Number(item.amount || 0), 0);
+  const operations = (S.data.finance || []).filter((item) => businessIdOf(item) === businessId && Number(item.amount || 0) - allocated(item.id) > 0.009);
+  const registrations = eventRows('eventRegistrations', businessId).filter((item) => item.eventId === event.id);
+  const lines = eventRows('eventBudgetLines', businessId).filter((item) => item.eventId === event.id);
+  if (!operations.length) { toast('Нет финансовых операций с нераспределённым остатком', true); return; }
+  openModal(`<h2>Привязать финансовую операцию</h2><p class="muted small">Новая денежная операция не создаётся. Связь после сохранения нельзя изменить или удалить.</p><form id="event-allocation-form"><label class="field"><span>Операция</span><select name="financeId">${operations.map((operation) => `<option value="${operation.id}">${fmtDate(operation.date)} · ${operation.type === 'income' ? 'приход' : 'расход'} · ${esc(operation.category || '')} · остаток ${money(Number(operation.amount) - allocated(operation.id))}</option>`).join('')}</select></label><div class="form-row"><label class="field"><span>Назначение</span><select name="purpose"><option value="payment">Оплата участия</option><option value="deposit">Депозит участника (приход)</option><option value="expense">Прямой расход</option><option value="refund">Возврат участнику</option></select></label><label class="field"><span>Сумма, ₽</span><input name="amount" type="number" min="0.01" step="0.01" required></label></div><label class="field"><span>Участник (обязательно для оплаты, депозита и возврата)</span><select name="registrationId"><option value="">— без участника —</option>${registrations.map((registration) => `<option value="${registration.id}">${esc(eventParticipant(registration))}</option>`).join('')}</select></label><label class="field"><span>Строка плана</span><select name="budgetLineId"><option value="">— без строки —</option>${lines.map((line) => `<option value="${line.id}">${esc(line.name)}</option>`).join('')}</select></label><div class="actions"><button class="btn" type="button" id="modal-cancel">Отмена</button><button class="btn primary" type="submit">Связать навсегда</button></div></form>`, (root) => {
+    $('#modal-cancel', root).addEventListener('click', closeModal);
+    $('#event-allocation-form', root).addEventListener('submit', async (submitEvent) => { submitEvent.preventDefault(); const form = submitEvent.currentTarget; const submit = form.querySelector('[type=submit]'); submit.disabled = true; const item = { businessId, unit: businessId, eventId: event.id, financeId: form.elements.financeId.value, registrationId: form.elements.registrationId.value, budgetLineId: form.elements.budgetLineId.value, purpose: form.elements.purpose.value, amount: Number(form.elements.amount.value), idempotencyKey: key }; const result = await S.store.allocateEventFinance(S.token, item); if (!result.ok) { submit.disabled = false; toast(result.error || 'Не удалось связать операцию', true); return; } closeModal(); toast(result.alreadyAllocated ? 'Связь уже была сохранена' : 'Операция связана'); await refresh(true); location.hash = eventHash(event.id, 'economy'); });
   });
 }
 
@@ -2464,7 +2838,7 @@ function viewSettings() {
   });
   $('#backup-download')?.addEventListener('click', async () => {
     toast('Собираю копию…');
-    const res = await S.store.bootstrap(S.token);
+    const res = await S.store.backup(S.token);
     if (!res.ok) { toast('Не удалось собрать копию', true); return; }
     const payload = { app: 'monetki', exported: new Date().toISOString(), ...res.data };
     const blob = new Blob([JSON.stringify(payload, null, 1)], { type: 'application/json' });
