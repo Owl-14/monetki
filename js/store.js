@@ -354,6 +354,48 @@ function scopeError(item) {
   return null;
 }
 
+function safeBankDateBounds(items) {
+  const dates = (items || [])
+    .map((item) => String(item?.date || ''))
+    .filter((date) => {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return false;
+      const [year, month, day] = date.split('-').map(Number);
+      const parsed = new Date(Date.UTC(year, month - 1, day));
+      return parsed.getUTCFullYear() === year
+        && parsed.getUTCMonth() === month - 1
+        && parsed.getUTCDate() === day;
+    })
+    .sort();
+  return { count: (items || []).length, earliestDate: dates[0] || null, latestDate: dates.at(-1) || null };
+}
+
+function bankScopeDiagnostics(db, user) {
+  if (user.role !== 'admin') return null;
+  const businessById = new Map((db.businesses || []).map((business) => [String(business.id), business]));
+  const bankFinance = (db.finance || []).filter((item) => item?.source === 'bank');
+  const invalid = [];
+  const invalidWithoutBankId = [];
+  const archived = [];
+  const inaccessible = [];
+  bankFinance.forEach((item) => {
+    const businessId = businessIdOf(item);
+    const business = businessById.get(String(businessId));
+    if (scopeError(item) || !businessId || businessId === 'all' || !business) {
+      invalid.push(item);
+      if (!item?.bankId) invalidWithoutBankId.push(item);
+    }
+    else if (business.active === false) archived.push(item);
+    else if (!canAccessBusiness(db, user, businessId)) inaccessible.push(item);
+  });
+  return {
+    queue: safeBankDateBounds(db.bankTransactions || []),
+    hiddenInvalidScope: safeBankDateBounds(invalid),
+    hiddenInvalidScopeWithoutBankId: safeBankDateBounds(invalidWithoutBankId),
+    hiddenArchivedScope: safeBankDateBounds(archived),
+    hiddenInaccessibleScope: safeBankDateBounds(inaccessible),
+  };
+}
+
 function coreValidationError(db, entity, item, ignoreId = '') {
   if (entity === 'businesses') {
     const id = String(item?.id || '').trim();
@@ -683,6 +725,7 @@ export class LocalStore {
         tasks: db.tasks.filter((t) => canSee(t) && (isAdmin || t.assigneeId === u.id)),
         finance: db.finance.filter((f) => canSee(f) && (isAdmin || f.employeeId === u.id)),
         bankTransactions: isAdmin ? db.bankTransactions : [],
+        bankDiagnostics: isAdmin ? bankScopeDiagnostics(db, u) : null,
         staffExpenses: db.staffExpenses.filter((e) => canSee(e) && (isAdmin || e.employeeId === u.id)),
         warehouses: db.warehouses.filter(canSeeStock),
         stockItems: db.stockItems.filter(canSeeStock),
