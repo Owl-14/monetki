@@ -296,6 +296,9 @@ function coreValidationError(db, entity, item, ignoreId = '') {
     const id = String(item?.id || '').trim();
     if (!id || ['all', 'personal', 'total'].includes(id) || !/^[a-z0-9][a-z0-9-]{0,62}$/.test(id)) return 'ID бизнеса должен быть безопасным slug';
     if (db.businesses.some((business) => business.id === id && business.id !== ignoreId)) return 'Бизнес с таким ID уже существует';
+    if (!String(item?.name || '').trim()) return 'Не указано название бизнеса';
+    if (!Array.isArray(item?.modules)) return 'Модули бизнеса должны быть списком';
+    if (typeof item?.active !== 'boolean') return 'Статус бизнеса должен быть логическим';
   }
   if (entity === 'memberships') {
     const businessId = businessIdOf(item);
@@ -355,12 +358,13 @@ export class LocalStore {
     const u = this._user(token);
     if (!u) return { ok: false, error: 'auth' };
     const isAdmin = u.role === 'admin';
-    const canSee = (item) => canAccessBusiness(db, u, businessIdOf(item));
+    const activeBusinessIds = new Set(db.businesses.filter((business) => business.active !== false).map((business) => business.id));
+    const canSee = (item) => activeBusinessIds.has(businessIdOf(item)) && canAccessBusiness(db, u, businessIdOf(item));
     return {
       ok: true,
       profile: this._profile(db, u),
       data: {
-        businesses: db.businesses.filter((b) => b.active !== false && canAccessBusiness(db, u, b.id)),
+        businesses: db.businesses.filter((b) => canAccessBusiness(db, u, b.id) && (isAdmin || b.active !== false)),
         memberships: isAdmin ? db.memberships : db.memberships.filter((m) => m.employeeId === u.id),
         businessOwners: isAdmin ? db.businessOwners : [],
         // сотрудник видит только людей доступных ему бизнесов (и админов)
@@ -393,6 +397,7 @@ export class LocalStore {
     const businessId = businessIdOf(item);
     if (!businessId) return 'Не указан бизнес';
     if (!canAccessBusiness(db, u, businessId)) return 'Нет доступа к этому бизнесу';
+    if (!db.businesses.some((business) => business.id === businessId && business.active !== false)) return 'Бизнес в архиве';
     return null;
   }
 
@@ -553,6 +558,12 @@ export class LocalStore {
     if (entity === 'staffExpenses' && u.role !== 'admin' && (before.employeeId !== u.id || before.status !== 'pending')) return { ok: false, error: 'Нет доступа' };
     if (entity === 'tasks' && before.assigneeId && before.assigneeId !== u.id && before.status !== 'done') {
       db.notifications.push({ id: uid(), toId: before.assigneeId, text: `Задача удалена: ${before.title}`, link: '#/tasks', read: false, created: Date.now() });
+    }
+    if (entity === 'businesses') {
+      const archived = { ...before, active: false, updated: Date.now() };
+      db[entity] = db[entity].map((item) => item.id === id ? archived : item);
+      this._save(db);
+      return { ok: true, item: archived };
     }
     db[entity] = db[entity].filter((x) => x.id !== id);
     this._save(db);

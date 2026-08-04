@@ -39,7 +39,7 @@ POST на `backendUrl`, `Content-Type: text/plain` (чтобы без preflight)
 
 ## Модель данных (entity → поля в data)
 
-- `businesses`: id (`padel|dev` для двух текущих), name, emoji, modules[], active
+- `businesses`: id (безопасный служебный slug; `padel|dev` — legacy), name, emoji, modules[], active. Число бизнесов не ограничено; `active:false` — мягкий архив без удаления данных.
 - `memberships`: employeeId, businessId, unit (=businessId для совместимости), role `owner|staff`, active
 - `businessOwners`: businessId, unit (=businessId), ownerId (`savva|andrey|dmitry`), name, share (0…1), active
 - `employees`: id, name, code (=токен входа), role `admin|staff`, unit `padel|dev|all` (legacy/bootstrap), phone, tg, active
@@ -58,7 +58,7 @@ POST на `backendUrl`, `Content-Type: text/plain` (чтобы без preflight)
 ## Права (дублируются в LocalStore и в функции — менять оба!)
 
 - Доступ к бизнесу задаётся активным `memberships`. Сотрудник видит только доступные бизнесы, общих с ним людей и только свои задачи. Финансы/Команда — только legacy-админ; модули дополнительно должны быть включены в карточке бизнеса.
-- `create` проверяет целевой бизнес, `delete` — исходный, `update` — оба до слияния. Нельзя обойти изоляцию несовпадающими `businessId`/`unit` или переносом доступной записи в недоступный бизнес.
+- `create` проверяет целевой бизнес, `delete` — исходный, `update` — оба до слияния. Нельзя обойти изоляцию несовпадающими `businessId`/`unit` или переносом доступной записи в недоступный бизнес. В архивный бизнес нельзя писать; `delete` для самого `businesses` означает мягкий архив, а не физическое удаление.
 - Задачи: сотрудник ставит только себе; чужие (от админа) не редактирует — сервер режет апдейт до `{status}`; удаляет только свои.
 - Финансы/наличные/сотрудники: только админ. Сотруднику в bootstrap приходят только его выплаты (finance/cash с его employeeId) и его траты.
 - Трата без receiptId не создаётся.

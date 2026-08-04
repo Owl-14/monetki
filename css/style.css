@@ -113,8 +113,8 @@ input, select, textarea { font: inherit; color: var(--text); }
 .topbar .grow { flex: 1; }
 
 /* Переключатель направлений */
-.unit-switch { display: flex; background: var(--surface2); border-radius: 10px; padding: 3px; gap: 2px; }
-.unit-switch button { border: 0; background: transparent; padding: 6px 14px; border-radius: 8px; color: var(--muted); font-weight: 600; font-size: 13px; }
+.unit-switch { display: flex; max-width: 100%; overflow-x: auto; background: var(--surface2); border-radius: 10px; padding: 3px; gap: 2px; }
+.unit-switch button { flex: 0 0 auto; border: 0; background: transparent; padding: 6px 14px; border-radius: 8px; color: var(--muted); font-weight: 600; font-size: 13px; white-space: nowrap; }
 .unit-switch button.active { background: var(--surface); color: var(--text); box-shadow: var(--shadow); }
 
 /* Нижняя навигация (мобильная) */
@@ -300,8 +300,12 @@ label.field > span { display: block; font-size: 13px; font-weight: 600; color: v
 .checkline input { width: 18px; height: 18px; }
 
 /* Администрирование бизнесов */
+.business-admin-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; margin-bottom: 14px; }
+.business-admin-head p { margin-bottom: 0; }
+.create-business { flex: 0 0 auto; font-size: 15px; padding: 10px 16px; }
 .business-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; }
 .business-card { border: 1px solid var(--line); border-radius: 14px; padding: 14px; background: var(--surface2); }
+.business-card.archived { border-style: dashed; background: var(--surface); }
 .business-card-title { display: flex; align-items: center; gap: 8px; font-size: 18px; margin-bottom: 12px; }
 .business-card-title code { margin-left: auto; color: var(--muted); font-size: 12px; }
 .compact-field { max-width: 100px; }
@@ -313,6 +317,8 @@ label.field > span { display: block; font-size: 13px; font-weight: 600; color: v
 .access-row { display: flex; align-items: center; gap: 10px; padding: 2px 0; }
 .access-row select { width: auto; min-width: 120px; }
 @media (max-width: 560px) {
+  .business-admin-head { flex-direction: column; }
+  .create-business { width: 100%; }
   .business-grid { grid-template-columns: 1fr; }
   .check-grid { grid-template-columns: 1fr; }
   .access-row { align-items: flex-start; }

@@ -216,12 +216,86 @@ test("новый активный бизнес автоматически дос
   assert.equal(membership.active, true);
 });
 
+test("архив бизнеса скрывает рабочие данные, сохраняет их и позволяет восстановление", async () => {
+  const store = localStoreWith(fixture());
+  const created = await store.create("demo:admin", "businesses", {
+    id: "events", name: "События", emoji: "📅", modules: ["dashboard", "tasks"], active: true,
+  });
+  assert.equal(created.ok, true);
+  assert.equal(
+    (await store.bootstrap("demo:admin")).data.memberships.some((item) =>
+      item.employeeId === "admin" && businessIdOf(item) === "events" && item.role === "owner"
+    ),
+    true,
+  );
+
+  assert.equal((await store.create("demo:admin", "memberships", {
+    businessId: "events", unit: "events", employeeId: "padel-a", role: "staff", active: true,
+  })).ok, true);
+  assert.equal((await store.create("demo:admin", "tasks", {
+    businessId: "events", unit: "events", assigneeId: "padel-a", title: "Подготовить событие", status: "new",
+  })).ok, true);
+
+  assert.equal((await store.update("demo:admin", "businesses", { ...created.item, active: false })).ok, true);
+  const adminArchived = await store.bootstrap("demo:admin");
+  const staffArchived = await store.bootstrap("demo:padel-a");
+  assert.equal(adminArchived.data.businesses.find((item) => item.id === "events")?.active, false);
+  assert.equal(adminArchived.data.tasks.some((item) => businessIdOf(item) === "events"), false);
+  assert.equal(staffArchived.data.businesses.some((item) => item.id === "events"), false);
+  assert.equal(staffArchived.data.tasks.some((item) => businessIdOf(item) === "events"), false);
+
+  const blocked = await store.create("demo:admin", "tasks", {
+    businessId: "events", unit: "events", title: "Нельзя записать в архив",
+  });
+  assert.equal(blocked.error, "Бизнес в архиве");
+
+  assert.equal((await store.update("demo:admin", "businesses", { ...created.item, active: true })).ok, true);
+  const restored = await store.bootstrap("demo:padel-a");
+  assert.equal(restored.data.businesses.some((item) => item.id === "events"), true);
+  assert.equal(restored.data.tasks.some((item) => item.title === "Подготовить событие"), true);
+});
+
+test("delete бизнеса работает как архив и не освобождает его ID", async () => {
+  const store = localStoreWith(fixture());
+  const business = { id: "events", name: "События", emoji: "📅", modules: ["dashboard"], active: true };
+  assert.equal((await store.create("demo:admin", "businesses", business)).ok, true);
+  const removed = await store.remove("demo:admin", "businesses", "events");
+  assert.equal(removed.ok, true);
+  assert.equal(removed.item.active, false);
+  assert.equal((await store.bootstrap("demo:admin")).data.businesses.find((item) => item.id === "events")?.active, false);
+  assert.equal((await store.create("demo:admin", "businesses", business)).error, "Бизнес с таким ID уже существует");
+});
+
+test("API rules скрывают записи архива и запрещают запись так же, как LocalStore", () => {
+  const data = fixture();
+  data.businesses.push({ id: "events", name: "События", modules: ["tasks"], active: false });
+  data.memberships.push(
+    { id: "m-admin-events", employeeId: "admin", businessId: "events", unit: "events", role: "owner", active: true },
+    { id: "m-padel-events", employeeId: "padel-a", businessId: "events", unit: "events", role: "staff", active: true },
+  );
+  data.tasks.push({ id: "task-events", businessId: "events", unit: "events", assigneeId: "padel-a" });
+
+  const admin = visibleBootstrapData(users.admin, data);
+  const staff = visibleBootstrapData(users.padel, data);
+  assert.equal(admin.businesses.find((item) => item.id === "events")?.active, false);
+  assert.equal(admin.tasks.some((item) => item.id === "task-events"), false);
+  assert.equal(staff.businesses.some((item) => item.id === "events"), false);
+  assert.equal(staff.tasks.some((item) => item.id === "task-events"), false);
+  assert.equal(
+    scopeWriteError(accessSet(data.memberships, users.admin.id), { businessId: "events", unit: "events" }, data.businesses),
+    "Бизнес в архиве",
+  );
+});
+
 test("валидация CORE симметрично отклоняет небезопасные и ссылочно неверные записи", async () => {
   const cases = [
     ["businesses", { id: "all", name: "Нельзя" }, "ID бизнеса должен быть безопасным slug"],
     ["businesses", { id: "personal", name: "Нельзя" }, "ID бизнеса должен быть безопасным slug"],
     ["businesses", { id: "total", name: "Нельзя" }, "ID бизнеса должен быть безопасным slug"],
     ["businesses", { id: "dev", name: "Дубль" }, "Бизнес с таким ID уже существует"],
+    ["businesses", { id: "empty", name: "", modules: [], active: true }, "Не указано название бизнеса"],
+    ["businesses", { id: "modules", name: "Модули", modules: "tasks", active: true }, "Модули бизнеса должны быть списком"],
+    ["businesses", { id: "status", name: "Статус", modules: [], active: "yes" }, "Статус бизнеса должен быть логическим"],
     ["memberships", { businessId: "missing", unit: "missing", employeeId: "padel-a", role: "staff" }, "Бизнес не найден"],
     ["memberships", { businessId: "dev", unit: "dev", employeeId: "missing", role: "staff" }, "Сотрудник не найден"],
     ["memberships", { businessId: "dev", unit: "dev", employeeId: "padel-a", role: "admin" }, "Неизвестная роль доступа"],
