@@ -110,14 +110,14 @@ test('финансы явно показывают бизнес и период 
 test('PWA v22 кэширует entrypoint и модули оболочки', async () => {
   const sw = await read('../sw.js');
 
-  assert.match(sw, /const CACHE = 'monetki-v23'/);
+  assert.match(sw, /const CACHE = 'monetki-v24'/);
   for (const path of ['./js/app.js', './js/app-shell.js', './js/app-state.js', './js/store.js', './js/ui.js']) {
     assert.match(sw, new RegExp(`['"]${path.replaceAll('.', '\\.')}['"]`));
   }
 });
 
 test('текущий релиз получает patch-версию config', async () => {
-  assert.match(await read('../config.js'), /version:\s*"0\.4\.6"/);
+  assert.match(await read('../config.js'), /version:\s*"0\.4\.7"/);
 });
 
 test('PWA manifest использует палитру новой оболочки и сохраняет установку приложения', async () => {

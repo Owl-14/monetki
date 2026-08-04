@@ -9,6 +9,7 @@ import {
   importPlayers,
   markRead,
   migrateImport,
+  processBankTransaction,
   resolveExpense,
   statusInfo,
   updateItem,
@@ -68,6 +69,7 @@ export async function handleRequest(req: Request) {
       case "import_players": return json(await importPlayers(user, body.rows));
       case "mark_read": return json(await markRead(user, body.ids));
       case "resolve_expense": return json(await resolveExpense(user, body.id, body.how));
+      case "process_bank_transaction": return json(await processBankTransaction(user, body.id, body.businessId, body.category));
       case "upload_file": return json(await uploadFile(user, body.b64));
       case "get_file": return json(await getFile(user, body.id));
       default: return json({ ok: false, error: "Неизвестное действие" });

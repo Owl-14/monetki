@@ -69,8 +69,8 @@ test("банковская синхронизация обнаруживает �
 
   const syncStart = apiSource.indexOf("async function tochkaSync");
   const accountsAt = apiSource.indexOf('tochkaFetch("/open-banking/v1.0/accounts"', syncStart);
-  const archivedAt = apiSource.indexOf('outcome: "archived_business"', syncStart);
-  assert.ok(syncStart >= 0 && archivedAt > syncStart && archivedAt < accountsAt);
+  assert.ok(syncStart >= 0 && accountsAt > syncStart);
+  assert.doesNotMatch(apiSource.slice(syncStart, accountsAt), /TOCHKA_UNIT|archived_business/);
 
   assert.match(apiSource, /TOCHKA_STATEMENT_REQUEST_LIMIT\s*=\s*32/);
   assert.match(apiSource, /TOCHKA_STATEMENT_SPLIT_DEPTH\s*=\s*8/);
