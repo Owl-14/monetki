@@ -168,11 +168,12 @@ test("сервер применяет складские операции тол
   assert.match(actions, /entity === "stockMovements"[\s\S]*createStockMovement\(item\)/);
   assert.match(actions, /Корректировка создаётся только завершением инвентаризации/);
   assert.match(actions, /entity === "reservations"[\s\S]*applyReservationChange\(null, item\)/);
-  assert.match(actions, /entity === "inventories" && item\.status === "completed"[\s\S]*completeInventory\(item\)/);
+  assert.match(actions, /entity === "inventories"[\s\S]*item\.status === "completed"[\s\S]*completeInventory\(item, true\)/);
   assert.match(actions, /Движения склада нельзя изменять/);
   assert.match(actions, /Движения склада нельзя удалять/);
-  assert.match(stock, /await writeRows\(\[/);
-  assert.match(stock, /entity: "stockMovements", item/);
-  assert.match(stock, /entity: "stockBalances", item: balance/);
-  assert.match(stock, /direction: adjustment\.delta > 0 \? "increase" : "decrease"/);
+  assert.match(stock, /stockRpc\("stock_apply_movement", \{ p_item: item \}\)/);
+  assert.match(stock, /stockRpc\("stock_apply_reservation", \{ p_before: before, p_after: after \}\)/);
+  assert.match(stock, /stockRpc\("stock_complete_inventory", \{ p_inventory: inventory, p_allow_create: allowCreate \}\)/);
+  assert.match(stock, /stockRpc\("stock_delete_catalog", \{ p_entity: entity, p_item: item \}\)/);
+  assert.doesNotMatch(stock, /writeRows|writeRow\("stockBalances"/);
 });

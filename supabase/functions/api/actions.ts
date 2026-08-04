@@ -26,8 +26,8 @@ import {
   applyReservationChange,
   completeInventory,
   createStockMovement,
+  deleteStockCatalog,
   readStockData,
-  stockCatalogDeleteError,
 } from "./stock.ts";
 import { ensureCoreData } from "./auth/access.ts";
 import { deleteRow, insertRow, kvGet, kvSet, readAll, readOne, writeRow } from "./db/repositories.ts";
@@ -196,7 +196,10 @@ export async function createItem(u: Rec, entity: string, item: Rec) {
   if (entity === "reservations") {
     return await applyReservationChange(null, item);
   }
-  if (entity === "inventories" && item.status === "completed") return await completeInventory(item);
+  if (entity === "inventories") {
+    item.createdBy = u.id;
+    if (item.status === "completed") return await completeInventory(item, true);
+  }
   let offsets: { error?: string; sum?: number; titles?: string } = {};
   if ((entity === "finance" || entity === "cash") && item.category === "Зарплата") {
     offsets = await applySalaryOffsets(item);
@@ -331,8 +334,7 @@ export async function deleteItem(u: Rec, entity: string, id: string) {
     return { ok: false, error: "Завершённую инвентаризацию нельзя удалять" };
   }
   if (entity === "warehouses" || entity === "stockItems") {
-    const catalogDeny = stockCatalogDeleteError(entity, before, await readStockData());
-    if (catalogDeny) return { ok: false, error: catalogDeny };
+    return await deleteStockCatalog(entity, before);
   }
   if (entity === "reservations") {
     return await applyReservationChange(before, null);
