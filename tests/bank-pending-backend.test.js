@@ -55,7 +55,8 @@ test("проведение проверяет права, сохраняет ban
   assert.match(migration, /data ->> 'bankId' = v_bank_id/);
   assert.match(migration, /'bank:' \|\| p_queue_id/);
   assert.match(migration, /delete from public\.records where entity = 'bankTransactions'/);
-  assert.match(migration, /revoke all on function public\.process_bank_transaction[\s\S]*grant execute[\s\S]*to service_role/);
+  assert.match(migration, /revoke all on function public\.process_bank_transaction\(text, text, text\) from public, anon, authenticated/);
+  assert.match(migration, /grant execute on function public\.process_bank_transaction[\s\S]*to service_role/);
 });
 
 test("ошибка Точки не включает тело банковского ответа", async () => {
