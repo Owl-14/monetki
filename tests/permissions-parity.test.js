@@ -232,9 +232,10 @@ test("архив бизнеса скрывает рабочие данные, с
   assert.equal((await store.create("demo:admin", "memberships", {
     businessId: "events", unit: "events", employeeId: "padel-a", role: "staff", active: true,
   })).ok, true);
-  assert.equal((await store.create("demo:admin", "tasks", {
+  const createdTask = await store.create("demo:admin", "tasks", {
     businessId: "events", unit: "events", assigneeId: "padel-a", title: "Подготовить событие", status: "new",
-  })).ok, true);
+  });
+  assert.equal(createdTask.ok, true);
 
   assert.equal((await store.update("demo:admin", "businesses", { ...created.item, active: false })).ok, true);
   const adminArchived = await store.bootstrap("demo:admin");
@@ -249,7 +250,7 @@ test("архив бизнеса скрывает рабочие данные, с
   });
   assert.equal(blocked.error, "Бизнес в архиве");
   assert.equal(
-    (await store.addComment("demo:admin", "task-events", "Скрытый комментарий")).error,
+    (await store.addComment("demo:admin", createdTask.item.id, "Скрытый комментарий")).error,
     "Бизнес в архиве",
   );
 
