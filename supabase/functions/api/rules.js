@@ -3,7 +3,7 @@ export const ENTITIES = [
   "employees", "clients", "companies", "contacts", "leads", "deals",
   "pipelines", "stages", "dealItems", "venues", "players",
   "tasks", "finance", "staffExpenses", "cash", "notifications",
-  "warehouses", "stockItems", "stockMovements", "stockBalances", "reservations", "inventories",
+  "bankTransactions", "warehouses", "stockItems", "stockMovements", "stockBalances", "reservations", "inventories",
 ];
 
 export const CORE_ENTITIES = ["businesses", "memberships", "businessOwners"];
@@ -232,6 +232,7 @@ export function visibleBootstrapData(user, data, bankBalance = null) {
     players: scopedItems(data.players),
     tasks: scopedItems(data.tasks).filter((task) => admin || task.assigneeId === user.id),
     finance: scopedItems(data.finance).filter((item) => admin || item.employeeId === user.id),
+    bankTransactions: admin ? (data.bankTransactions || []) : [],
     staffExpenses: scopedItems(data.staffExpenses).filter((item) => admin || item.employeeId === user.id),
     warehouses: stockItems(data.warehouses),
     stockItems: stockItems(data.stockItems),
@@ -246,6 +247,7 @@ export function visibleBootstrapData(user, data, bankBalance = null) {
 }
 
 export function baseWriteError(user, entity) {
+  if (entity === "bankTransactions") return "Банковскую операцию можно только провести";
   if (!ENTITIES.includes(entity)) return "Неизвестная сущность";
   if (entity === "stockBalances") return "Остатки изменяются только складскими операциями";
   if ([...CORE_ENTITIES, "employees", "finance", "cash"].includes(entity) && !isAdmin(user)) {

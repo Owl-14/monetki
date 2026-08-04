@@ -1523,11 +1523,123 @@ function viewFinance() {
   setTitle('Финансы');
   const tab = S.finTab || 'ops';
   const pendingCount = (S.data.staffExpenses || []).filter((e) => e.status === 'pending').length;
-  const tabs = [['ops', '💸 Операции'], ['staff', `🧾 Траты${pendingCount ? ' (' + pendingCount + ')' : ''}`], ['accounts', '👥 Счета'], ['cash', '💵 Наличные']];
+  const bankPendingCount = (S.data.bankTransactions || []).length;
+  const tabs = [['bank', `🏦 Необработанные${bankPendingCount ? ' (' + bankPendingCount + ')' : ''}`], ['ops', '💸 Операции'], ['staff', `🧾 Траты${pendingCount ? ' (' + pendingCount + ')' : ''}`], ['accounts', '👥 Счета'], ['cash', '💵 Наличные']];
   const tabsHtml = `<div class="chip-row">${tabs.map(([k, l]) => `<button class="chip ${tab === k ? 'active' : ''}" data-fintab="${k}">${l}</button>`).join('')}</div>`;
-  const renderers = { ops: renderFinOps, staff: renderFinStaff, accounts: renderFinAccounts, cash: renderFinCash };
+  const renderers = { bank: renderFinBank, ops: renderFinOps, staff: renderFinStaff, accounts: renderFinAccounts, cash: renderFinCash };
   (renderers[tab] || renderFinOps)(tabsHtml);
   $('#view').querySelectorAll('[data-fintab]').forEach((b) => b.addEventListener('click', () => { S.finTab = b.dataset.fintab; render(); }));
+}
+
+function renderFinBank(tabsHtml) {
+  const month = S.finMonth;
+  const period = S.finPeriod || 'month';
+  const monthName = new Date(month + '-01').toLocaleDateString('ru-RU', { month: 'long', year: 'numeric' });
+  const periodName = period === 'all' ? 'всё время' : monthName;
+  const list = (S.data.bankTransactions || [])
+    .filter((item) => period === 'all' || (item.date || '').startsWith(month))
+    .sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+
+  const row = (item, index) => {
+    const method = FIN_METHODS.find((entry) => entry.id === item.method)?.name || 'Счёт';
+    return `<div class="row-card bank-pending-row" data-bank-index="${index}">
+      <div class="grow col">
+        <div class="title">${esc(item.counterparty || (item.type === 'income' ? 'Поступление из банка' : 'Списание из банка'))}</div>
+        <div class="sub">${fmtDate(item.date)} · ${esc(method)}${item.comment ? ' · ' + esc(item.comment) : ''}</div>
+      </div>
+      <span class="badge amber dot">Ждёт назначения</span>
+      <div class="amount ${item.type === 'income' ? 'green' : 'red'}">${item.type === 'income' ? '+' : '−'}${money(item.amount)}</div>
+      <button class="btn small primary" type="button" data-process-bank-index="${index}">Назначить</button>
+    </div>`;
+  };
+
+  $('#view').innerHTML = `
+    ${tabsHtml}
+    <div class="finance-context" aria-label="Контекст необработанных банковских операций">
+      <div class="finance-context-icon">🏦</div>
+      <div class="finance-context-copy">
+        <span>Очередь до назначения бизнеса</span>
+        <strong>Все бизнесы <i>·</i> ${esc(periodName)} <i>·</i> до проведения не входит в доходы и расходы</strong>
+      </div>
+    </div>
+    <div class="searchbar">
+      ${period === 'month' ? `
+      <button class="btn small" id="bank-m-prev" aria-label="Предыдущий месяц">←</button>
+      <span class="btn small ghost nowrap" style="cursor:default">${monthName}</span>
+      <button class="btn small" id="bank-m-next" aria-label="Следующий месяц">→</button>` : ''}
+      <button class="btn small ${period === 'all' ? 'primary' : ''}" id="bank-period-toggle">${period === 'all' ? '📅 по месяцам' : '∑ за всё время'}</button>
+      <div class="grow"></div>
+      <span class="badge amber">${list.length} ${list.length === 1 ? 'операция' : 'операций'}</span>
+    </div>
+    <div class="banner">Новые операции банка не влияют на доходы и расходы, пока вы не назначите бизнес и категорию.</div>
+    <div class="list">${list.length ? list.map(row).join('') : `<div class="card empty"><div class="big">✓</div>Необработанных операций за ${esc(periodName)} нет</div>`}</div>`;
+
+  const shift = (direction) => {
+    const date = new Date(S.finMonth + '-01');
+    date.setMonth(date.getMonth() + direction);
+    S.finMonth = date.toISOString().slice(0, 7);
+    render();
+  };
+  $('#bank-m-prev')?.addEventListener('click', () => shift(-1));
+  $('#bank-m-next')?.addEventListener('click', () => shift(1));
+  $('#bank-period-toggle').addEventListener('click', () => { S.finPeriod = period === 'all' ? 'month' : 'all'; render(); });
+  $('#view').querySelectorAll('[data-process-bank-index]').forEach((button) => button.addEventListener('click', (event) => {
+    event.stopPropagation();
+    openBankTransaction(list[Number(button.dataset.processBankIndex)]?.id);
+  }));
+  $('#view').querySelectorAll('[data-bank-index]').forEach((card) => card.addEventListener('click', () => openBankTransaction(list[Number(card.dataset.bankIndex)]?.id)));
+}
+
+function openBankTransaction(id) {
+  const transaction = (S.data.bankTransactions || []).find((item) => item.id === id);
+  if (!transaction) return;
+  const defaultBusinessId = S.unit !== 'all' && myUnits().includes(S.unit) ? S.unit : myUnits()[0];
+  const method = FIN_METHODS.find((item) => item.id === transaction.method)?.name || 'Счёт';
+  openModal(`
+    <h2>Провести банковскую операцию</h2>
+    <div class="bank-pending-summary">
+      <div><span>Дата</span><strong>${fmtDate(transaction.date)}</strong></div>
+      <div><span>Тип</span><strong>${transaction.type === 'income' ? 'Поступление' : 'Списание'}</strong></div>
+      <div><span>Сумма</span><strong class="${transaction.type === 'income' ? 'green' : 'red'}">${money(transaction.amount)}</strong></div>
+      <div><span>Способ</span><strong>${esc(method)}</strong></div>
+    </div>
+    <div class="banner">${esc(transaction.counterparty || 'Контрагент не указан')}${transaction.comment ? '<br><span class="small">' + esc(transaction.comment) + '</span>' : ''}</div>
+    <form id="bank-process-form">
+      <label class="field"><span>Бизнес</span>
+        <select name="businessId" required>
+          ${myUnits().map((businessId) => `<option value="${esc(businessId)}" ${businessId === defaultBusinessId ? 'selected' : ''}>${esc(businessEmoji(businessId))} ${esc(businessName(businessId))}</option>`).join('')}
+        </select>
+      </label>
+      <label class="field"><span>Категория</span>
+        <select name="category" required>
+          <option value="" selected disabled>— выберите категорию —</option>
+          ${FIN_CATEGORIES.map((category) => `<option value="${esc(category)}">${esc(category)}</option>`).join('')}
+        </select>
+      </label>
+      <p class="muted small">После проведения операция появится во вкладке «Операции» и начнёт участвовать в финансовых итогах.</p>
+      <div class="actions">
+        <button type="button" class="btn" id="modal-cancel">Отмена</button>
+        <button type="submit" class="btn primary">Провести операцию</button>
+      </div>
+    </form>
+  `, (root) => {
+    $('#modal-cancel', root).addEventListener('click', closeModal);
+    $('#bank-process-form', root).addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const values = Object.fromEntries(new FormData(event.target).entries());
+      const submit = event.target.querySelector('[type="submit"]');
+      submit.disabled = true;
+      const result = await S.store.processBankTransaction(S.token, transaction.id, values.businessId, values.category);
+      submit.disabled = false;
+      if (!result.ok) { toast(result.error || 'Не удалось провести операцию', true); return; }
+      S.data.bankTransactions = (S.data.bankTransactions || []).filter((item) => item.id !== transaction.id);
+      const alreadyShown = (S.data.finance || []).some((item) => item.id === result.item?.id || (item.bankId && item.bankId === result.item?.bankId));
+      if (result.item && !alreadyShown) S.data.finance.push(result.item);
+      closeModal();
+      toast('Операция проведена');
+      render();
+    });
+  });
 }
 
 function renderFinOps(tabsHtml) {

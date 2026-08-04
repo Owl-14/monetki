@@ -30,7 +30,7 @@ import {
   readStockData,
 } from "./stock.ts";
 import { ensureCoreData } from "./auth/access.ts";
-import { deleteRow, insertRow, kvGet, kvSet, readAll, readOne, writeRow } from "./db/repositories.ts";
+import { callRpc, deleteRow, insertRow, kvGet, kvSet, readAll, readOne, writeRow } from "./db/repositories.ts";
 import { newId } from "./types.ts";
 import type { Rec } from "./types.ts";
 
@@ -63,6 +63,36 @@ export async function bootstrap(u: Rec) {
       admin ? await kvGet("BANK_BALANCE") : null,
     ),
   };
+}
+
+export async function processBankTransaction(u: Rec, id: unknown, businessId: unknown, category: unknown) {
+  if (!isAdmin(u)) return { ok: false, error: "Только для админа" };
+
+  const queueId = String(id || "").trim();
+  const targetBusinessId = String(businessId || "").trim();
+  const targetCategory = String(category || "").trim();
+  if (!queueId) return { ok: false, error: "Не указана банковская операция" };
+  if (!targetBusinessId) return { ok: false, error: "Не указан бизнес" };
+  if (!targetCategory || targetCategory.length > 120) return { ok: false, error: "Не указана категория" };
+
+  const [businesses, memberships] = await Promise.all([
+    readAll("businesses"),
+    readAll("memberships"),
+  ]);
+  const targetDeny = scopeWriteError(
+    accessSet(memberships, u.id),
+    { id: "bank-target", businessId: targetBusinessId, unit: targetBusinessId },
+    businesses,
+  );
+  if (targetDeny) return { ok: false, error: targetDeny };
+
+  const { data, error } = await callRpc("process_bank_transaction", {
+    p_queue_id: queueId,
+    p_business_id: targetBusinessId,
+    p_category: targetCategory,
+  });
+  if (error) return { ok: false, error: "Не удалось безопасно провести банковскую операцию" };
+  return data as Rec;
 }
 
 async function coreValidationError(entity: string, item: Rec, ignoreId = "") {

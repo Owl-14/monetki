@@ -9,10 +9,14 @@ import {
 } from "./rules.js";
 import { remindDeadlines } from "./actions.ts";
 import { callRpc, kvSet, readAll, writeRow } from "./db/repositories.ts";
-import { newId } from "./types.ts";
 import type { Rec } from "./types.ts";
 
 const TOCHKA = "https://enter.tochka.com/uapi";
+
+async function bankQueueRecordId(bankId: string) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(bankId));
+  return `bankq:${[...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+}
 
 async function tochkaFetch(path: string, init?: RequestInit) {
   const token = Deno.env.get("TOCHKA_TOKEN");
@@ -22,7 +26,7 @@ async function tochkaFetch(path: string, init?: RequestInit) {
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
   });
   const body = await resp.text();
-  if (!resp.ok) throw new Error(`Точка API ${resp.status}: ${body.slice(0, 300)}`);
+  if (!resp.ok) throw new Error(`Точка API ${resp.status}`);
   return JSON.parse(body);
 }
 
@@ -104,11 +108,6 @@ async function fetchTochkaStatement(
 }
 
 async function tochkaSync(days = 30, deadline = Date.now() + TOCHKA_SYNC_DEADLINE_MS) {
-  const unit = Deno.env.get("TOCHKA_UNIT") || "padel";
-  const syncBusiness = (await readAll("businesses")).find((business) => business.id === unit);
-  if (!syncBusiness || syncBusiness.active === false) {
-    return { ok: false, error: "Бизнес для банковской синхронизации недоступен", outcome: "archived_business" };
-  }
   if (Date.now() >= deadline) throw new Error("Истёк безопасный срок синхронизации");
   const accountsRes = await tochkaFetch("/open-banking/v1.0/accounts", {
     signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())),
@@ -146,8 +145,8 @@ async function tochkaSync(days = 30, deadline = Date.now() + TOCHKA_SYNC_DEADLIN
   const start = new Date(end.getTime() - days * 864e5);
   const fmt = (d: Date) => d.toISOString().slice(0, 10);
 
-  const existing = await readAll("finance");
-  const known = new Set(existing.map((f) => f.bankId).filter(Boolean));
+  const [existing, queued] = await Promise.all([readAll("finance"), readAll("bankTransactions")]);
+  const known = new Set([...existing, ...queued].map((f) => f.bankId).filter(Boolean));
   const syncSeenIds = new Set<string>();
   let added = 0;
   let deadlineStopped = false;
@@ -257,14 +256,13 @@ async function tochkaSync(days = 30, deadline = Date.now() + TOCHKA_SYNC_DEADLIN
       const cp = isIncome
         ? ((t.DebtorParty as Rec)?.name || "")
         : ((t.CreditorParty as Rec)?.name || "");
-      await writeRow("finance", {
-        id: newId(), businessId: unit, unit,
+      await writeRow("bankTransactions", {
+        id: await bankQueueRecordId(bankId),
         date: String(t.documentProcessDate || fmt(new Date())).slice(0, 10),
         type: isIncome ? "income" : "expense",
         amount,
         method: classifyMethod(t),
         source: "bank",
-        category: isIncome ? "Оплата клиента" : "Прочее",
         counterparty: cp,
         comment: String(t.description || "").slice(0, 300),
         bankId, created: Date.now(), updated: Date.now(),

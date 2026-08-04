@@ -67,5 +67,5 @@ test("RPC закрыты от клиентских ролей и миграци�
   assert.match(sql, /from public, anon, authenticated/);
   assert.match(sql, /notify pgrst, 'reload schema'/);
   assert.ok(workflow.indexOf("004_atomic_stock_operations.sql") < workflow.indexOf("Deploy api function"));
-  assert.match(workflow, /Применить атомарные складские операции/);
+  assert.match(workflow, /Применить серверные миграции/);
 });
