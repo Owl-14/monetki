@@ -173,7 +173,8 @@ test("сервер применяет складские операции тол
   assert.match(actions, /Движения склада нельзя удалять/);
   assert.match(stock, /stockRpc\("stock_apply_movement", \{ p_item: item \}\)/);
   assert.match(stock, /stockRpc\("stock_apply_reservation", \{ p_before: before, p_after: after \}\)/);
-  assert.match(stock, /stockRpc\("stock_complete_inventory", \{ p_inventory: inventory, p_allow_create: allowCreate \}\)/);
+  assert.match(stock, /stockRpc\("stock_complete_inventory", \{[\s\S]*p_inventory: inventory, p_allow_create: allowCreate, p_expected: expected/);
+  assert.match(stock, /stockRpc\("stock_save_inventory", \{ p_before: before, p_after: after \}\)/);
   assert.match(stock, /stockRpc\("stock_delete_catalog", \{ p_entity: entity, p_item: item \}\)/);
   assert.doesNotMatch(stock, /writeRows|writeRow\("stockBalances"/);
 });

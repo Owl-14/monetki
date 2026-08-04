@@ -128,7 +128,11 @@ begin
   return jsonb_build_object('ok', true, 'item', p_item);
 end $$;
 
-create or replace function stock_complete_inventory(p_inventory jsonb, p_allow_create boolean default false)
+create or replace function stock_complete_inventory(
+  p_inventory jsonb,
+  p_allow_create boolean default false,
+  p_expected jsonb default null
+)
 returns jsonb language plpgsql set search_path = public as $$
 declare
   v_id text := coalesce(p_inventory->>'id', '');
@@ -169,6 +173,9 @@ begin
   end if;
   if v_existing->>'status' = 'completed' then
     return jsonb_build_object('ok', true, 'item', v_existing, 'alreadyCompleted', true);
+  end if;
+  if p_expected is not null and v_existing is distinct from p_expected then
+    raise exception using errcode = 'P0001', message = 'Инвентаризация уже изменена другим запросом';
   end if;
   if v_existing->>'status' <> 'draft' or p_inventory->>'status' <> 'completed' then
     raise exception using errcode = 'P0001', message = 'Завершить можно только черновик инвентаризации';
@@ -280,6 +287,65 @@ begin
   v_completed := p_inventory || jsonb_build_object('status', 'completed', 'completedAt', v_now, 'updated', v_now);
   update records set data = v_completed where entity = 'inventories' and id = v_id;
   return jsonb_build_object('ok', true, 'item', v_completed);
+end $$;
+
+create or replace function stock_save_inventory(p_before jsonb, p_after jsonb)
+returns jsonb language plpgsql set search_path = public as $$
+declare
+  v_id text := coalesce(p_before->>'id', '');
+  v_existing jsonb;
+  v_business text;
+  v_warehouse text;
+begin
+  if v_id = '' then
+    raise exception using errcode = 'P0001', message = 'Не указан ID инвентаризации';
+  end if;
+  select data into v_existing from records
+  where entity = 'inventories' and id = v_id for update;
+  if not found then
+    raise exception using errcode = 'P0001', message = 'Инвентаризация не найдена';
+  end if;
+  if v_existing is distinct from p_before then
+    raise exception using errcode = 'P0001', message = 'Инвентаризация уже изменена другим запросом';
+  end if;
+  if v_existing->>'status' <> 'draft' then
+    raise exception using errcode = 'P0001', message = 'Завершённую инвентаризацию нельзя изменять или удалять';
+  end if;
+  if p_after is null then
+    delete from records where entity = 'inventories' and id = v_id;
+    return jsonb_build_object('ok', true);
+  end if;
+
+  v_business := coalesce(v_existing->>'businessId', v_existing->>'unit', '');
+  v_warehouse := coalesce(p_after->>'warehouseId', '');
+  if p_after->>'id' is distinct from v_id
+      or p_after->>'businessId' is distinct from v_business
+      or p_after->>'unit' is distinct from v_business
+      or p_after->>'status' <> 'draft' then
+    raise exception using errcode = 'P0001', message = 'Нельзя перенести или завершить инвентаризацию этим действием';
+  end if;
+  perform 1 from records
+  where (entity = 'warehouses' and id = v_warehouse)
+     or (entity = 'stockItems' and id in (
+       select line->>'stockItemId' from jsonb_array_elements(coalesce(p_after->'items', '[]'::jsonb)) line
+     ))
+  order by entity, id for share;
+  if not exists (
+    select 1 from records where entity = 'warehouses' and id = v_warehouse
+      and coalesce(data->>'businessId', data->>'unit') = v_business
+      and data->>'active' is distinct from 'false'
+  ) or exists (
+    select 1 from jsonb_array_elements(coalesce(p_after->'items', '[]'::jsonb)) line
+    where not exists (
+      select 1 from records where entity = 'stockItems' and id = line->>'stockItemId'
+        and coalesce(data->>'businessId', data->>'unit') = v_business
+        and data->>'active' is distinct from 'false'
+    )
+  ) then
+    raise exception using errcode = 'P0001', message = 'Склад или позиция не найдены в этом бизнесе';
+  end if;
+  update records set data = p_after where entity = 'inventories' and id = v_id;
+  return jsonb_build_object('ok', true, 'item', p_after);
 end $$;
 
 create or replace function stock_delete_catalog(p_entity text, p_item jsonb)
@@ -465,11 +531,13 @@ end $$;
 
 revoke all on function stock_apply_movement(jsonb) from public, anon, authenticated;
 revoke all on function stock_apply_reservation(jsonb, jsonb) from public, anon, authenticated;
-revoke all on function stock_complete_inventory(jsonb, boolean) from public, anon, authenticated;
+revoke all on function stock_complete_inventory(jsonb, boolean, jsonb) from public, anon, authenticated;
+revoke all on function stock_save_inventory(jsonb, jsonb) from public, anon, authenticated;
 revoke all on function stock_delete_catalog(text, jsonb) from public, anon, authenticated;
 grant execute on function stock_apply_movement(jsonb) to service_role;
 grant execute on function stock_apply_reservation(jsonb, jsonb) to service_role;
-grant execute on function stock_complete_inventory(jsonb, boolean) to service_role;
+grant execute on function stock_complete_inventory(jsonb, boolean, jsonb) to service_role;
+grant execute on function stock_save_inventory(jsonb, jsonb) to service_role;
 grant execute on function stock_delete_catalog(text, jsonb) to service_role;
 
 notify pgrst, 'reload schema';

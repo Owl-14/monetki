@@ -28,6 +28,7 @@ import {
   createStockMovement,
   deleteStockCatalog,
   readStockData,
+  saveInventory,
 } from "./stock.ts";
 import { ensureCoreData } from "./auth/access.ts";
 import { callRpc, deleteRow, insertRow, kvGet, kvSet, readAll, readOne, writeRow } from "./db/repositories.ts";
@@ -327,7 +328,10 @@ export async function updateItem(u: Rec, entity: string, item: Rec) {
   if (entity === "reservations") {
     return await applyReservationChange(before, merged);
   }
-  if (entity === "inventories" && merged.status === "completed") return await completeInventory(merged);
+  if (entity === "inventories") {
+    if (merged.status === "completed") return await completeInventory(merged, false, before);
+    return await saveInventory(before, merged);
+  }
   if (entity === "tasks") {
     if (before.status !== merged.status && merged.authorId && merged.authorId !== u.id) {
       const names: Record<string, string> = { new: "Не видел", progress: "В работе", question: "Есть вопросы", done: "Выполнена" };
@@ -368,6 +372,9 @@ export async function deleteItem(u: Rec, entity: string, id: string) {
   }
   if (entity === "reservations") {
     return await applyReservationChange(before, null);
+  }
+  if (entity === "inventories") {
+    return await saveInventory(before, null);
   }
   if (entity === "businesses" && !hasBusinessAccess(access, before.id)) return { ok: false, error: "Нет доступа к этому бизнесу" };
   if (entity === "staffExpenses" && !isAdmin(u) && (before.employeeId !== u.id || before.status !== "pending")) {
