@@ -67,6 +67,11 @@ test("cron проходит только с отдельным совпадаю�
 test("банковская синхронизация обнаруживает возможное усечение и ограничивает разбиение", async () => {
   const apiSource = await readFile(new URL("../supabase/functions/api/index.ts", import.meta.url), "utf8");
 
+  const syncStart = apiSource.indexOf("async function tochkaSync");
+  const accountsAt = apiSource.indexOf('tochkaFetch("/open-banking/v1.0/accounts"', syncStart);
+  const archivedAt = apiSource.indexOf('outcome: "archived_business"', syncStart);
+  assert.ok(syncStart >= 0 && archivedAt > syncStart && archivedAt < accountsAt);
+
   assert.match(apiSource, /TOCHKA_STATEMENT_REQUEST_LIMIT\s*=\s*32/);
   assert.match(apiSource, /TOCHKA_STATEMENT_SPLIT_DEPTH\s*=\s*8/);
   assert.match(apiSource, /TOCHKA_SYNC_DEADLINE_MS\s*=\s*150_000/);

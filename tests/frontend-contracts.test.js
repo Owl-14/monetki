@@ -14,7 +14,7 @@ test('app.js остаётся единственным entrypoint и подкл�
   assert.match(app, /init\(\);\s*$/);
 });
 
-test('nav сохраняет проверки модулей и бизнес-ограничения разделов', async () => {
+test('nav строится по модулям без ограничений только на padel/dev', async () => {
   const app = await read('../js/app.js');
   const navStart = app.indexOf('function navItems()');
   const navEnd = app.indexOf('function unreadCount()', navStart);
@@ -25,8 +25,9 @@ test('nav сохраняет проверки модулей и бизнес-о�
   for (const moduleId of ['dashboard', 'tasks', 'money', 'clients', 'venues', 'players', 'finance', 'team']) {
     assert.match(nav, new RegExp(`hasModule\\('${moduleId}'\\)`));
   }
-  assert.match(nav, /units\.includes\('dev'\).*hasModule\('clients'\)/);
-  assert.match(nav, /units\.includes\('padel'\).*hasModule\('venues'\).*hasModule\('players'\)/s);
+  assert.doesNotMatch(nav, /units\.includes\('(?:dev|padel)'\)/);
+  assert.match(nav, /if \(hasModule\('clients'\)\)/);
+  assert.match(nav, /if \(hasModule\('venues'\) \|\| hasModule\('players'\)\)/);
   assert.match(nav, /if \(isAdmin\(\)\).*hasModule\('finance'\).*hasModule\('team'\)/s);
 });
 
@@ -38,17 +39,22 @@ test('business admin остаётся в app.js и привязан к наст�
   assert.match(app, /\$\{isAdmin\(\) \? businessAdminHtml\(\) : ''\}/);
   assert.match(app, /if \(isAdmin\(\)\) bindBusinessAdmin\(\);/);
   assert.match(app, /option value="manager"[^>]*membership\?\.role === 'manager'/);
+  assert.match(app, /id="create-business">\+ Создать бизнес/);
+  assert.match(app, /function openBusinessCreateForm\(\)/);
+  assert.match(app, /data-business-active="\$\{archived \? 'true' : 'false'\}"/);
+  assert.match(app, /Восстановить/);
+  assert.doesNotMatch(app, /карточки двух текущих бизнесов|ID <b>padel<\/b> и <b>dev<\/b> не меняются/);
 });
 
-test('PWA v19 кэширует entrypoint и оба новых модуля', async () => {
+test('PWA v20 кэширует entrypoint и оба новых модуля', async () => {
   const sw = await read('../sw.js');
 
-  assert.match(sw, /const CACHE = 'monetki-v19'/);
+  assert.match(sw, /const CACHE = 'monetki-v20'/);
   for (const path of ['./js/app.js', './js/app-state.js', './js/store.js', './js/ui.js']) {
     assert.match(sw, new RegExp(`['"]${path.replaceAll('.', '\\.')}['"]`));
   }
 });
 
 test('текущий релиз получает patch-версию config', async () => {
-  assert.match(await read('../config.js'), /version:\s*"0\.4\.2"/);
+  assert.match(await read('../config.js'), /version:\s*"0\.4\.3"/);
 });

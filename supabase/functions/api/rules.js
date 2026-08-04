@@ -92,14 +92,21 @@ export function visibleBootstrapData(user, data, bankBalance = null) {
   const admin = isAdmin(user);
   const memberships = data.memberships || [];
   const access = accessSet(memberships, user.id);
-  const scopedItems = (items) => (items || []).filter((item) => canSeeItem(access, item));
+  const activeBusinessIds = new Set((data.businesses || [])
+    .filter((business) => business.active !== false)
+    .map((business) => business.id));
+  const scopedItems = (items) => (items || []).filter((item) =>
+    activeBusinessIds.has(businessIdOf(item)) && canSeeItem(access, item)
+  );
   const sharesBusiness = (leftId, rightId) => {
     const left = accessSet(memberships, leftId);
     return activeMemberships(memberships, rightId).some((membership) => left.has(businessIdOf(membership)));
   };
 
   return {
-    businesses: (data.businesses || []).filter((business) => business.active !== false && access.has(business.id)),
+    businesses: (data.businesses || []).filter((business) =>
+      access.has(business.id) && (admin || business.active !== false)
+    ),
     memberships: admin ? memberships : memberships.filter((membership) => membership.employeeId === user.id),
     businessOwners: admin ? (data.businessOwners || []) : [],
     employees: admin
@@ -134,22 +141,25 @@ export function baseWriteError(user, entity) {
   return null;
 }
 
-export function scopeWriteError(access, item) {
+export function scopeWriteError(access, item, businesses = null) {
   if (scopeMismatch(item)) return "businessId и unit должны совпадать";
   const businessId = businessIdOf(item);
   if (!businessId) return "Не указан бизнес";
   if (!hasBusinessAccess(access, businessId)) return "Нет доступа к этому бизнесу";
+  if (Array.isArray(businesses) && !businesses.some((business) => business.id === businessId && business.active !== false)) {
+    return "Бизнес в архиве";
+  }
   return null;
 }
 
-export function checkWriteAccess(user, entity, item, memberships = []) {
+export function checkWriteAccess(user, entity, item, memberships = [], businesses = null) {
   const baseError = baseWriteError(user, entity);
   if (baseError) return baseError;
   if (!BUSINESS_SCOPED_ENTITIES.includes(entity) && entity !== "memberships" && entity !== "businessOwners") return null;
   const fallbackMemberships = memberships.length
     ? memberships
     : legacyBusinessIds(user).map((businessId) => ({ employeeId: user.id, businessId, active: true }));
-  return scopeWriteError(accessSet(fallbackMemberships, user.id), item);
+  return scopeWriteError(accessSet(fallbackMemberships, user.id), item, businesses);
 }
 
 export function validateCoreEntity(entity, item, data, ignoreId = "") {
@@ -161,6 +171,9 @@ export function validateCoreEntity(entity, item, data, ignoreId = "") {
     if ((data.businesses || []).some((business) => business.id === id && business.id !== ignoreId)) {
       return "Бизнес с таким ID уже существует";
     }
+    if (!String(item?.name || "").trim()) return "Не указано название бизнеса";
+    if (!Array.isArray(item?.modules)) return "Модули бизнеса должны быть списком";
+    if (typeof item?.active !== "boolean") return "Статус бизнеса должен быть логическим";
   }
 
   if (entity === "memberships") {

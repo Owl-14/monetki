@@ -65,6 +65,13 @@ async function writeRow(entity: string, item: Rec) {
   if (error) throw new Error(error.message);
 }
 
+async function insertRow(entity: string, item: Rec) {
+  const { error } = await db.from("records").insert({ entity, id: item.id, data: item });
+  if (error?.code === "23505") return false;
+  if (error) throw new Error(error.message);
+  return true;
+}
+
 async function deleteRow(entity: string, id: string) {
   const { error } = await db.from("records").delete().eq("entity", entity).eq("id", id);
   if (error) throw new Error(error.message);
@@ -199,13 +206,13 @@ async function createItem(u: Rec, entity: string, item: Rec) {
   if (entity === "businessOwners") item.ownerId = String(item.ownerId || "").trim();
   const coreDeny = await coreValidationError(entity, item);
   if (coreDeny) return { ok: false, error: coreDeny };
-  const memberships = await readAll("memberships");
+  const [memberships, businesses] = await Promise.all([readAll("memberships"), readAll("businesses")]);
   const access = accessSet(memberships, u.id);
   if (entity === "staffExpenses" && !isAdmin(u) && !businessIdOf(item)) {
     item = normalizeScope(item, String(u.unit || "")) as Rec;
   }
   if (BUSINESS_SCOPED_ENTITIES.includes(entity) || entity === "memberships" || entity === "businessOwners") {
-    const scopeDeny = scopeWriteError(access, item);
+    const scopeDeny = scopeWriteError(access, item, businesses);
     if (scopeDeny) return { ok: false, error: scopeDeny };
     item = normalizeScope(item) as Rec;
   }
@@ -243,12 +250,19 @@ async function createItem(u: Rec, entity: string, item: Rec) {
     offsets = await applySalaryOffsets(item);
     if (offsets.error) return { ok: false, error: offsets.error };
   }
-  await writeRow(entity, item);
   if (entity === "businesses") {
-    await writeRow("memberships", {
-      id: `membership-${item.id}-${u.id}`, businessId: item.id, unit: item.id,
-      employeeId: u.id, role: "owner", active: true, created: Date.now(), updated: Date.now(),
-    });
+    if (!await insertRow(entity, item)) return { ok: false, error: "Бизнес с таким ID уже существует" };
+    try {
+      await writeRow("memberships", {
+        id: `membership-${item.id}-${u.id}`, businessId: item.id, unit: item.id,
+        employeeId: u.id, role: "owner", active: true, created: Date.now(), updated: Date.now(),
+      });
+    } catch (error) {
+      await deleteRow(entity, item.id);
+      throw error;
+    }
+  } else {
+    await writeRow(entity, item);
   }
   if (entity === "employees" || entity === "businesses") await ensureCoreData();
   if (offsets.sum) {
@@ -274,14 +288,14 @@ async function updateItem(u: Rec, entity: string, item: Rec) {
   if (deny) return { ok: false, error: deny };
   const before = (await readAll(entity)).find((x) => x.id === item.id);
   if (!before) return { ok: false, error: "Не найдено" };
-  const memberships = await readAll("memberships");
+  const [memberships, businesses] = await Promise.all([readAll("memberships"), readAll("businesses")]);
   const access = accessSet(memberships, u.id);
   if (BUSINESS_SCOPED_ENTITIES.includes(entity) || entity === "memberships" || entity === "businessOwners") {
-    const sourceDeny = scopeWriteError(access, before);
+    const sourceDeny = scopeWriteError(access, before, businesses);
     if (sourceDeny) return { ok: false, error: sourceDeny };
     if (scopeMismatch(item)) return { ok: false, error: "businessId и unit должны совпадать" };
     const targetBusinessId = String(item.businessId || item.unit || businessIdOf(before));
-    const targetDeny = scopeWriteError(access, { id: "target", businessId: targetBusinessId, unit: targetBusinessId });
+    const targetDeny = scopeWriteError(access, { id: "target", businessId: targetBusinessId, unit: targetBusinessId }, businesses);
     if (targetDeny) return { ok: false, error: targetDeny };
     item = { ...item, businessId: targetBusinessId, unit: targetBusinessId };
   }
@@ -318,10 +332,10 @@ async function deleteItem(u: Rec, entity: string, id: string) {
   if (baseDeny) return { ok: false, error: baseDeny };
   const before = (await readAll(entity)).find((x) => x.id === id);
   if (!before) return { ok: false, error: "Не найдено" };
-  const memberships = await readAll("memberships");
+  const [memberships, businesses] = await Promise.all([readAll("memberships"), readAll("businesses")]);
   const access = accessSet(memberships, u.id);
   if (BUSINESS_SCOPED_ENTITIES.includes(entity) || entity === "memberships" || entity === "businessOwners") {
-    const sourceDeny = scopeWriteError(access, before);
+    const sourceDeny = scopeWriteError(access, before, businesses);
     if (sourceDeny) return { ok: false, error: sourceDeny };
   }
   if (entity === "businesses" && !hasBusinessAccess(access, before.id)) return { ok: false, error: "Нет доступа к этому бизнесу" };
@@ -333,6 +347,11 @@ async function deleteItem(u: Rec, entity: string, id: string) {
   }
   if (entity === "tasks" && before.assigneeId && before.assigneeId !== u.id && before.status !== "done") {
     await notify(before.assigneeId, `Задача удалена: ${before.title}`);
+  }
+  if (entity === "businesses") {
+    const archived = { ...before, active: false, updated: Date.now() } as Rec;
+    await writeRow(entity, archived);
+    return { ok: true, item: archived };
   }
   await deleteRow(entity, id);
   return { ok: true };
@@ -364,8 +383,11 @@ async function remindDeadlines() {
 async function addComment(u: Rec, taskId: string, text: string) {
   const task = (await readAll("tasks")).find((t) => t.id === taskId);
   if (!task) return { ok: false, error: "Задача не найдена" };
-  const access = accessSet(await readAll("memberships"), u.id);
+  const [memberships, businesses] = await Promise.all([readAll("memberships"), readAll("businesses")]);
+  const access = accessSet(memberships, u.id);
   if (!canSeeItem(access, task) || (!isAdmin(u) && task.assigneeId !== u.id)) return { ok: false, error: "Нет доступа" };
+  const scopeDeny = scopeWriteError(access, task, businesses);
+  if (scopeDeny) return { ok: false, error: scopeDeny };
   const comments = (task.comments as Rec[]) || [];
   comments.push({ authorId: u.id, text: String(text).slice(0, 2000), ts: Date.now() } as Rec);
   task.comments = comments;
@@ -378,8 +400,12 @@ async function addComment(u: Rec, taskId: string, text: string) {
 }
 
 async function importPlayers(u: Rec, rows: Rec[]) {
-  const access = accessSet(await readAll("memberships"), u.id);
+  const [memberships, businesses] = await Promise.all([readAll("memberships"), readAll("businesses")]);
+  const access = accessSet(memberships, u.id);
   if (!hasBusinessAccess(access, "padel")) return { ok: false, error: "Нет доступа" };
+  if (!businesses.some((business) => business.id === "padel" && business.active !== false)) {
+    return { ok: false, error: "Бизнес в архиве" };
+  }
   const existing = await readAll("players");
   let added = 0;
   for (const r of rows || []) {
@@ -414,8 +440,9 @@ async function resolveExpense(u: Rec, id: string, how: string) {
   if (!isAdmin(u)) return { ok: false, error: "Только для админа" };
   const ex = (await readAll("staffExpenses")).find((x) => x.id === id);
   if (!ex) return { ok: false, error: "Не найдено" };
-  const access = accessSet(await readAll("memberships"), u.id);
-  const scopeDeny = scopeWriteError(access, ex);
+  const [memberships, businesses] = await Promise.all([readAll("memberships"), readAll("businesses")]);
+  const access = accessSet(memberships, u.id);
+  const scopeDeny = scopeWriteError(access, ex, businesses);
   if (scopeDeny) return { ok: false, error: scopeDeny };
   if (ex.status !== "pending") return { ok: false, error: "Уже возвращено" };
   const cashOwner = String(how).startsWith("cash:") ? String(how).slice(5) : null;
@@ -597,6 +624,10 @@ async function fetchTochkaStatement(
 
 async function tochkaSync(days = 30, deadline = Date.now() + TOCHKA_SYNC_DEADLINE_MS) {
   const unit = Deno.env.get("TOCHKA_UNIT") || "padel";
+  const syncBusiness = (await readAll("businesses")).find((business) => business.id === unit);
+  if (!syncBusiness || syncBusiness.active === false) {
+    return { ok: false, error: "Бизнес для банковской синхронизации недоступен", outcome: "archived_business" };
+  }
   if (Date.now() >= deadline) throw new Error("Истёк безопасный срок синхронизации");
   const accountsRes = await tochkaFetch("/open-banking/v1.0/accounts", {
     signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())),

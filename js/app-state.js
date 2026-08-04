@@ -11,6 +11,34 @@ const SCOPED_ENTITIES = [
   'businessOwners',
 ];
 
+const CYRILLIC_SLUG = {
+  а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ё: 'e', ж: 'zh', з: 'z', и: 'i', й: 'y',
+  к: 'k', л: 'l', м: 'm', н: 'n', о: 'o', п: 'p', р: 'r', с: 's', т: 't', у: 'u', ф: 'f', х: 'h',
+  ц: 'ts', ч: 'ch', ш: 'sh', щ: 'sch', ъ: '', ы: 'y', ь: '', э: 'e', ю: 'yu', я: 'ya',
+};
+
+export function businessIdFromName(name, existingIds = []) {
+  const transliterated = [...String(name || '').trim().toLowerCase()]
+    .map((letter) => CYRILLIC_SLUG[letter] ?? letter)
+    .join('');
+  const base = transliterated
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 55)
+    .replace(/-+$/g, '') || 'business';
+  const used = new Set(existingIds.map(String));
+  const reserved = new Set(['all', 'personal', 'total']);
+  let id = base;
+  let suffix = 2;
+  while (reserved.has(id) || used.has(id)) {
+    id = `${base.slice(0, 55 - String(suffix).length)}-${suffix}`;
+    suffix += 1;
+  }
+  return id;
+}
+
 export function createAppState(store, storage = localStorage) {
   return {
     store,

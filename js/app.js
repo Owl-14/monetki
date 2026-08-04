@@ -1,16 +1,20 @@
 // ============ Монетки: приложение ============
 import { makeStore, UNITS, BUSINESS_MODULES, CLIENT_STATUSES, TASK_STATUSES, FIN_METHODS, FIN_CATEGORIES, OWNERS, ownerBalances, canUseExpenses, ownerLabel, businessIdOf } from './store.js';
 import { $, closeModal, esc, fmtDate, fmtDT, money, openModal, telHref, toast, today } from './ui.js';
-import { createAppState, createCrudHelpers } from './app-state.js';
+import { businessIdFromName, createAppState, createCrudHelpers } from './app-state.js';
 
 // ---------- Состояние ----------
 const S = createAppState(makeStore());
 
 function isAdmin() { return S.profile && S.profile.role === 'admin'; }
-function businesses() { return (S.data?.businesses || []).filter((b) => b.active !== false); }
-function business(id) { return businesses().find((b) => b.id === id) || UNITS[id] || { id, name: id, emoji: '🏢', modules: [] }; }
+function allBusinesses() { return S.data?.businesses || []; }
+function businesses() { return allBusinesses().filter((b) => b.active !== false); }
+function business(id) { return allBusinesses().find((b) => b.id === id) || UNITS[id] || { id, name: id, emoji: '🏢', modules: [] }; }
 function businessName(id) { return business(id).name || id; }
 function businessEmoji(id) { return business(id).emoji || '🏢'; }
+function businessHasModule(item, moduleId) {
+  return !Array.isArray(item?.modules) || item.modules.includes(moduleId);
+}
 function myUnits() {
   if (!S.profile) return [];
   const ids = businesses().map((b) => b.id);
@@ -23,10 +27,16 @@ function activeUnits() {
   return myUnits().includes(S.unit) ? [S.unit] : myUnits();
 }
 function hasModule(moduleId) {
-  return activeUnits().some((id) => {
-    const modules = business(id).modules;
-    return !Array.isArray(modules) || modules.includes(moduleId);
-  });
+  return activeUnits().some((id) => businessHasModule(business(id), moduleId));
+}
+function moduleBusinessId(moduleId, item) {
+  const current = businessIdOf(item);
+  if (current) return current;
+  if (S.unit !== 'all' && businessHasModule(business(S.unit), moduleId)) return S.unit;
+  return myUnits().find((id) => businessHasModule(business(id), moduleId)) || myUnits()[0] || '';
+}
+function inActiveBusiness(item) {
+  return activeUnits().includes(businessIdOf(item));
 }
 function empName(id) {
   const e = (S.data?.employees || []).find((x) => x.id === id);
@@ -96,8 +106,8 @@ function navItems() {
   if (hasModule('dashboard')) items.push({ r: 'dashboard', ico: '🏠', label: 'Дашборд' });
   if (hasModule('tasks')) items.push({ r: 'tasks', ico: '✅', label: 'Задачи', badge: (S.data?.tasks || []).filter((t) => t.assigneeId === S.profile.id && t.status !== 'done').length || '' });
   if (!isAdmin() && hasModule('money')) items.push({ r: 'money', ico: '💰', label: 'Деньги' });
-  if (units.includes('dev') && hasModule('clients')) items.push({ r: 'clients', ico: '🤝', label: 'Клиенты' });
-  if (units.includes('padel') && (hasModule('venues') || hasModule('players'))) {
+  if (hasModule('clients')) items.push({ r: 'clients', ico: '🤝', label: 'Клиенты' });
+  if (hasModule('venues') || hasModule('players')) {
     if (hasModule('venues')) {
     items.push({ r: 'venues', ico: '🏟️', label: 'Площадки' });
     }
@@ -257,13 +267,14 @@ function viewDashboard() {
   const expense = fin.filter((f) => f.type === 'expense').reduce((s, f) => s + Number(f.amount || 0), 0);
 
   let clientsStat = '';
-  if (units.includes('dev')) {
-    const cl = (S.data.clients || []).filter((c) => c.status === 'work' || c.status === 'talks');
-    clientsStat = `<div class="card stat"><div class="label">Клиенты в работе</div><div class="value">${cl.length}</div><div class="hint">разработка</div></div>`;
+  if (hasModule('clients')) {
+    const cl = (S.data.clients || []).filter((c) => units.includes(businessIdOf(c)) && (c.status === 'work' || c.status === 'talks'));
+    clientsStat = `<div class="card stat"><div class="label">Клиенты в работе</div><div class="value">${cl.length}</div><div class="hint">${esc(units.map(businessName).join(', '))}</div></div>`;
   }
   let padelStat = '';
-  if (units.includes('padel')) {
-    padelStat = `<div class="card stat"><div class="label">Игроков в базе</div><div class="value">${(S.data.players || []).length}</div><div class="hint">падел</div></div>`;
+  if (hasModule('players')) {
+    const players = (S.data.players || []).filter((p) => units.includes(businessIdOf(p)));
+    padelStat = `<div class="card stat"><div class="label">Игроков в базе</div><div class="value">${players.length}</div><div class="hint">${esc(units.map(businessName).join(', '))}</div></div>`;
   }
 
   const staffPaid = !isAdmin() ? [...(S.data.finance || []), ...(S.data.cash || [])].filter((f) => (f.date || '').startsWith(month)).reduce((s, f) => s + Number(f.amount || 0), 0) : 0;
@@ -439,15 +450,16 @@ function openTaskForm(task) {
 function viewClients() {
   setTitle('Клиенты');
   const statuses = CLIENT_STATUSES.dev;
+  const scopedClients = (S.data.clients || []).filter(inActiveBusiness);
   const q = (S.search.clients || '').toLowerCase();
   const active = S.clientStatus || 'all';
-  let list = (S.data.clients || []).filter((c) => (active === 'all' || c.status === active)
+  let list = scopedClients.filter((c) => (active === 'all' || c.status === active)
     && (!q || (c.name + ' ' + (c.company || '') + ' ' + (c.phone || '') + ' ' + empName(c.ownerId)).toLowerCase().includes(q)));
   list.sort((a, b) => statuses.findIndex((s) => s.id === a.status) - statuses.findIndex((s) => s.id === b.status));
 
   // счётчики по каждому статусу воронки
   const counts = {};
-  (S.data.clients || []).forEach((c) => { counts[c.status] = (counts[c.status] || 0) + 1; });
+  scopedClients.forEach((c) => { counts[c.status] = (counts[c.status] || 0) + 1; });
 
   $('#view').innerHTML = `
     <div class="searchbar">
@@ -455,7 +467,7 @@ function viewClients() {
       <button class="btn primary" id="add-client">+ Клиент</button>
     </div>
     <div class="chip-row">
-      <button class="chip ${active === 'all' ? 'active' : ''}" data-cstatus="all">Все · ${(S.data.clients || []).length}</button>
+      <button class="chip ${active === 'all' ? 'active' : ''}" data-cstatus="all">Все · ${scopedClients.length}</button>
       ${statuses.map((s) => `<button class="chip ${active === s.id ? 'active' : ''}" data-cstatus="${s.id}">${s.name}${counts[s.id] ? ' · ' + counts[s.id] : ''}</button>`).join('')}
     </div>
     <div class="list">
@@ -480,6 +492,7 @@ function viewClients() {
 
 function openClientForm(c) {
   const isNew = !c;
+  const targetBusinessId = moduleBusinessId('clients', c);
   openModal(`
     <h2>${isNew ? 'Новый клиент' : esc(c.name)}</h2>
     <form id="ent-form">
@@ -499,7 +512,7 @@ function openClientForm(c) {
         <label class="field"><span>Кто ведёт</span>
           <select name="ownerId">
             <option value="">— не назначен —</option>
-            ${(S.data.employees || []).filter((e) => e.active !== false && employeeBusinessIds(e).includes('dev')).map((e) => `<option value="${e.id}" ${c?.ownerId === e.id ? 'selected' : ''}>${esc(e.name)}</option>`).join('')}
+            ${(S.data.employees || []).filter((e) => e.active !== false && employeeBusinessIds(e).includes(targetBusinessId)).map((e) => `<option value="${e.id}" ${c?.ownerId === e.id ? 'selected' : ''}>${esc(e.name)}</option>`).join('')}
           </select>
         </label>
       </div>
@@ -511,13 +524,13 @@ function openClientForm(c) {
         <button type="submit" class="btn primary">${isNew ? 'Добавить' : 'Сохранить'}</button>
       </div>
     </form>
-  `, (root) => bindEntityForm(root, 'clients', c, { unit: 'dev' }));
+  `, (root) => bindEntityForm(root, 'clients', c, { unit: targetBusinessId }));
 }
 
 // ---------- Площадки (падел) ----------
 function viewVenues() {
   setTitle('Площадки');
-  const list = S.data.venues || [];
+  const list = (S.data.venues || []).filter(inActiveBusiness);
   $('#view').innerHTML = `
     <div class="searchbar"><div class="grow"></div><button class="btn primary" id="add-venue">+ Площадка</button></div>
     <div class="list">
@@ -538,6 +551,7 @@ function viewVenues() {
 
 function openVenueForm(v) {
   const isNew = !v;
+  const targetBusinessId = moduleBusinessId('venues', v);
   openModal(`
     <h2>${isNew ? 'Новая площадка' : esc(v.name)}</h2>
     <form id="ent-form">
@@ -563,7 +577,7 @@ function openVenueForm(v) {
       </div>
     </form>
   `, (root) => {
-    bindEntityForm(root, 'venues', v, { unit: 'padel' });
+    bindEntityForm(root, 'venues', v, { unit: targetBusinessId });
     $('#open-courts', root)?.addEventListener('click', () => openCourts(v.id, 0));
   });
 }
@@ -672,14 +686,15 @@ function openSlotEditor(venueId, week, key) {
 function viewPlayers() {
   setTitle('Игроки');
   const q = (S.search.players || '').toLowerCase();
-  const list = (S.data.players || []).filter((p) => !q || (p.name + ' ' + (p.phone || '')).toLowerCase().includes(q));
+  const scopedPlayers = (S.data.players || []).filter(inActiveBusiness);
+  const list = scopedPlayers.filter((p) => !q || (p.name + ' ' + (p.phone || '')).toLowerCase().includes(q));
   $('#view').innerHTML = `
     <div class="searchbar">
       <input type="search" id="pl-search" placeholder="Поиск игрока" value="${esc(S.search.players || '')}">
-      <button class="btn" id="import-players">📥 Импорт</button>
+      ${activeUnits().includes('padel') ? '<button class="btn" id="import-players">📥 Импорт в «Падел»</button>' : ''}
       <button class="btn primary" id="add-player">+ Игрок</button>
     </div>
-    <div class="muted small" style="margin-bottom:10px">Всего: ${(S.data.players || []).length}</div>
+    <div class="muted small" style="margin-bottom:10px">Всего: ${scopedPlayers.length}</div>
     <div class="list">
       ${list.length ? list.map((p) => `
         <div class="row-card" data-player="${p.id}">
@@ -692,12 +707,13 @@ function viewPlayers() {
     </div>`;
   $('#pl-search').addEventListener('input', (e) => { S.search.players = e.target.value; viewPlayers(); });
   $('#add-player').addEventListener('click', () => openPlayerForm());
-  $('#import-players').addEventListener('click', openImportPlayers);
+  $('#import-players')?.addEventListener('click', openImportPlayers);
   $('#view').querySelectorAll('[data-player]').forEach((el) => el.addEventListener('click', () => openPlayerForm((S.data.players || []).find((p) => p.id === el.dataset.player))));
 }
 
 function openPlayerForm(p) {
   const isNew = !p;
+  const targetBusinessId = moduleBusinessId('players', p);
   openModal(`
     <h2>${isNew ? 'Новый игрок' : esc(p.name)}</h2>
     <form id="ent-form">
@@ -714,7 +730,7 @@ function openPlayerForm(p) {
         <button type="submit" class="btn primary">${isNew ? 'Добавить' : 'Сохранить'}</button>
       </div>
     </form>
-  `, (root) => bindEntityForm(root, 'players', p, { unit: 'padel' }));
+  `, (root) => bindEntityForm(root, 'players', p, { unit: targetBusinessId }));
 }
 
 function openImportPlayers() {
@@ -755,7 +771,11 @@ function finRow(f) {
   const m = FIN_METHODS.find((x) => x.id === f.method);
   const financeBusinessId = businessIdOf(f);
   const unitTag = activeUnits().length > 1 ? `${esc(businessEmoji(financeBusinessId))} ` : '';
-  const other = financeBusinessId === 'padel' ? 'dev' : 'padel';
+  const transferTargets = myUnits().filter((id) => id !== financeBusinessId);
+  const legacyOther = financeBusinessId === 'padel' ? 'dev' : financeBusinessId === 'dev' ? 'padel' : '';
+  const other = legacyOther && transferTargets.includes(legacyOther)
+    ? legacyOther
+    : transferTargets.length === 1 ? transferTargets[0] : '';
   return `
     <div class="row-card" data-fin="${f.id}">
       <div class="grow col">
@@ -764,7 +784,7 @@ function finRow(f) {
       </div>
       <span class="badge ${f.source === 'bank' ? 'blue' : ''}">${f.source === 'bank' ? '🏦 банк' : '✍️ вручную'}${m ? ' · ' + m.name : ''}</span>
       <div class="amount ${f.type === 'income' ? 'green' : 'red'}">${f.type === 'income' ? '+' : '−'}${money(f.amount)}</div>
-      <button class="btn small" data-flip="${f.id}" title="Перекинуть в «${esc(businessName(other))}»">${esc(businessEmoji(other))}</button>
+      ${other ? `<button class="btn small" data-flip="${f.id}" data-flip-business="${esc(other)}" title="Перекинуть в «${esc(businessName(other))}»">${esc(businessEmoji(other))}</button>` : ''}
     </div>`;
 }
 
@@ -774,7 +794,8 @@ function bindFinRows(root) {
     e.stopPropagation();
     const f = (S.data.finance || []).find((x) => x.id === el.dataset.flip);
     if (!f) return;
-    const other = businessIdOf(f) === 'padel' ? 'dev' : 'padel';
+    const other = el.dataset.flipBusiness;
+    if (!other) return;
     await doUpdate('finance', { ...f, businessId: other, unit: other }, `Перенесено в «${businessName(other)}»`);
   }));
 }
@@ -1377,26 +1398,33 @@ function businessAdminHtml() {
   const memberships = S.data.memberships || [];
   const owners = S.data.businessOwners || [];
   const employees = S.data.employees || [];
+  const orderedBusinesses = [...allBusinesses()].sort((left, right) => Number(left.active === false) - Number(right.active === false));
   return `
     <div class="card business-admin" style="margin-bottom:12px">
-      <div class="section-title" style="margin-top:0">🏢 Бизнесы, роли и доступы</div>
-      <p class="small muted">Здесь настраиваются карточки двух текущих бизнесов, видимые разделы, доли участников и доступ сотрудников. ID <b>padel</b> и <b>dev</b> не меняются.</p>
+      <div class="business-admin-head">
+        <div>
+          <div class="section-title" style="margin-top:0">🏢 Бизнесы, роли и доступы</div>
+          <p class="small muted">Создавайте новые бизнесы, выбирайте им разделы и настраивайте доступы. Архив скрывает бизнес из переключателя, но сохраняет его данные.</p>
+        </div>
+        <button class="btn primary create-business" type="button" id="create-business">+ Создать бизнес</button>
+      </div>
       <div class="business-grid">
-        ${businesses().map((b) => {
+        ${orderedBusinesses.map((b) => {
           const businessOwners = owners.filter((o) => businessIdOf(o) === b.id && o.active !== false);
           const totalShare = businessOwners.reduce((sum, o) => sum + Number(o.share || 0), 0) * 100;
-          return `<form class="business-card" data-business-form="${esc(b.id)}">
-            <div class="business-card-title"><span>${esc(b.emoji || '🏢')}</span><b>${esc(b.name)}</b><code>${esc(b.id)}</code></div>
+          const archived = b.active === false;
+          return `<form class="business-card ${archived ? 'archived' : ''}" data-business-form="${esc(b.id)}">
+            <div class="business-card-title"><span>${esc(b.emoji || '🏢')}</span><b>${esc(b.name)}</b>${archived ? '<span class="badge">в архиве</span>' : ''}<code>${esc(b.id)}</code></div>
             <div class="form-row">
-              <label class="field"><span>Название</span><input name="name" required value="${esc(b.name)}"></label>
-              <label class="field compact-field"><span>Значок</span><input name="emoji" maxlength="8" value="${esc(b.emoji || '🏢')}"></label>
+              <label class="field"><span>Название</span><input name="name" required value="${esc(b.name)}" ${archived ? 'disabled' : ''}></label>
+              <label class="field compact-field"><span>Значок</span><input name="emoji" maxlength="8" value="${esc(b.emoji || '🏢')}" ${archived ? 'disabled' : ''}></label>
             </div>
             <div class="field"><span>Модули</span><div class="check-grid">
-              ${Object.entries(BUSINESS_MODULES).map(([id, name]) => `<label class="checkline"><input type="checkbox" name="module" value="${id}" ${(b.modules || []).includes(id) ? 'checked' : ''}><span>${esc(name)}</span></label>`).join('')}
+              ${Object.entries(BUSINESS_MODULES).map(([id, name]) => `<label class="checkline"><input type="checkbox" name="module" value="${id}" ${(b.modules || []).includes(id) ? 'checked' : ''} ${archived ? 'disabled' : ''}><span>${esc(name)}</span></label>`).join('')}
             </div></div>
             <div class="section-title">Участники и доли <span class="muted small">сумма: ${totalShare.toLocaleString('ru-RU')}%</span></div>
             <div class="owner-grid">
-              ${businessOwners.map((o) => `<label class="field owner-share"><span>${esc(o.name || ownerLabel(o.ownerId) || o.ownerId)}</span><div class="suffix-input"><input type="number" min="0" max="100" step="0.01" data-owner-share="${esc(o.id)}" value="${Number(o.share || 0) * 100}"><span>%</span></div></label>`).join('')}
+              ${businessOwners.map((o) => `<label class="field owner-share"><span>${esc(o.name || ownerLabel(o.ownerId) || o.ownerId)}</span><div class="suffix-input"><input type="number" min="0" max="100" step="0.01" data-owner-share="${esc(o.id)}" value="${Number(o.share || 0) * 100}" ${archived ? 'disabled' : ''}><span>%</span></div></label>`).join('')}
             </div>
             <div class="section-title">Доступ сотрудников</div>
             <div class="access-list">
@@ -1404,19 +1432,75 @@ function businessAdminHtml() {
                 const membership = memberships.find((m) => m.employeeId === employee.id && businessIdOf(m) === b.id);
                 const self = employee.id === S.profile.id;
                 return `<div class="access-row" data-access-row="${esc(employee.id)}" data-membership-id="${esc(membership?.id || '')}">
-                  <label class="checkline grow"><input type="checkbox" data-access ${membership?.active !== false && !!membership ? 'checked' : ''} ${self ? 'disabled' : ''}><span>${esc(employee.name)}</span></label>
-                  <select data-access-role ${self ? 'disabled' : ''}><option value="staff" ${!['owner', 'manager'].includes(membership?.role) ? 'selected' : ''}>сотрудник</option><option value="manager" ${membership?.role === 'manager' ? 'selected' : ''}>менеджер</option><option value="owner" ${membership?.role === 'owner' ? 'selected' : ''}>владелец</option></select>
+                  <label class="checkline grow"><input type="checkbox" data-access ${membership?.active !== false && !!membership ? 'checked' : ''} ${self || archived ? 'disabled' : ''}><span>${esc(employee.name)}</span></label>
+                  <select data-access-role ${self || archived ? 'disabled' : ''}><option value="staff" ${!['owner', 'manager'].includes(membership?.role) ? 'selected' : ''}>сотрудник</option><option value="manager" ${membership?.role === 'manager' ? 'selected' : ''}>менеджер</option><option value="owner" ${membership?.role === 'owner' ? 'selected' : ''}>владелец</option></select>
                 </div>`;
               }).join('')}
             </div>
-            <div class="actions"><button class="btn primary" type="submit">Сохранить бизнес</button></div>
+            <div class="actions">
+              <button class="btn ${archived ? 'primary' : 'danger ghost'} left" type="button" data-business-active="${archived ? 'true' : 'false'}">${archived ? 'Восстановить' : 'В архив'}</button>
+              ${archived ? '' : '<button class="btn primary" type="submit">Сохранить бизнес</button>'}
+            </div>
           </form>`;
         }).join('')}
       </div>
     </div>`;
 }
 
+function openBusinessCreateForm() {
+  openModal(`
+    <h2>Создать бизнес</h2>
+    <form id="business-create-form">
+      <div class="form-row">
+        <label class="field"><span>Название</span><input type="text" name="name" required autofocus placeholder="Например, События"></label>
+        <label class="field compact-field"><span>Значок</span><input type="text" name="emoji" maxlength="8" value="🏢"></label>
+      </div>
+      <div class="field"><span>Модули</span><div class="check-grid">
+        ${Object.entries(BUSINESS_MODULES).map(([id, name]) => `<label class="checkline"><input type="checkbox" name="module" value="${id}" ${['dashboard', 'tasks'].includes(id) ? 'checked' : ''}><span>${esc(name)}</span></label>`).join('')}
+      </div></div>
+      <p class="small muted">После создания вы станете владельцем бизнеса. Доступ другим людям можно выдать в его карточке.</p>
+      <div class="actions">
+        <button class="btn" type="button" id="modal-cancel">Отмена</button>
+        <button class="btn primary" type="submit">Создать</button>
+      </div>
+    </form>
+  `, (root) => {
+    $('#modal-cancel', root).addEventListener('click', closeModal);
+    $('#business-create-form', root).addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const name = form.elements.name.value.trim();
+      if (!name) { toast('Введите название бизнеса', true); return; }
+      const id = businessIdFromName(name, allBusinesses().map((item) => item.id));
+      const modules = [...form.querySelectorAll('[name=module]:checked')].map((input) => input.value);
+      const submit = form.querySelector('[type=submit]');
+      submit.disabled = true;
+      const result = await doCreate('businesses', {
+        id, name, emoji: form.elements.emoji.value.trim() || '🏢', modules, active: true,
+      }, 'Бизнес создан');
+      if (!result) { submit.disabled = false; return; }
+      closeModal();
+      await refresh(true);
+      S.unit = id;
+      localStorage.setItem('monetki_unit', id);
+      render();
+    });
+  });
+}
+
 function bindBusinessAdmin() {
+  $('#create-business')?.addEventListener('click', openBusinessCreateForm);
+  $('#view').querySelectorAll('[data-business-active]').forEach((button) => button.addEventListener('click', async () => {
+    const form = button.closest('[data-business-form]');
+    const current = allBusinesses().find((item) => item.id === form?.dataset.businessForm);
+    if (!current) return;
+    button.disabled = true;
+    const active = button.dataset.businessActive === 'true';
+    const result = await S.store.update(S.token, 'businesses', { ...current, active });
+    if (!result.ok) toast(result.error || 'Не удалось изменить статус бизнеса', true);
+    else toast(active ? 'Бизнес восстановлен' : 'Бизнес перемещён в архив');
+    await refresh(true);
+  }));
   $('#view').querySelectorAll('[data-business-form]').forEach((form) => form.addEventListener('submit', async (event) => {
     event.preventDefault();
     const businessId = form.dataset.businessForm;
@@ -1424,7 +1508,7 @@ function bindBusinessAdmin() {
     if (!current) return;
     const ownerInputs = [...form.querySelectorAll('[data-owner-share]')];
     const totalShare = ownerInputs.reduce((sum, input) => sum + Number(input.value || 0), 0);
-    if (Math.abs(totalShare - 100) > 0.01) { toast('Доли участников должны в сумме давать 100%', true); return; }
+    if (ownerInputs.length && Math.abs(totalShare - 100) > 0.01) { toast('Доли участников должны в сумме давать 100%', true); return; }
     const submit = form.querySelector('[type=submit]');
     submit.disabled = true;
     const modules = [...form.querySelectorAll('[name=module]:checked')].map((input) => input.value);

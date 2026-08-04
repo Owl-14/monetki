@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   applyLocal,
+  businessIdFromName,
   createAppState,
   createCrudHelpers,
   normalizeItemScope,
@@ -31,6 +32,13 @@ test('normalizeItemScope синхронизирует businessId и unit тол�
 
   const employee = { id: 'employee', unit: 'dev' };
   assert.equal(normalizeItemScope('employees', employee), employee);
+});
+
+test('businessIdFromName создаёт безопасный уникальный ID без отдельного поля в форме', () => {
+  assert.equal(businessIdFromName('События и праздники'), 'sobytiya-i-prazdniki');
+  assert.equal(businessIdFromName('События', ['sobytiya']), 'sobytiya-2');
+  assert.equal(businessIdFromName('all'), 'all-2');
+  assert.equal(businessIdFromName('🏢'), 'business');
 });
 
 test('applyLocal механически применяет create, update и delete', () => {
