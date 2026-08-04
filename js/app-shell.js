@@ -13,6 +13,7 @@ export const PAGE_META = {
   clients: { group: 'Продажи', subtitle: 'Сделки, компании, контакты и входящие лиды' },
   venues: { group: 'Ресурсы', subtitle: 'Площадки, расписание и занятость' },
   players: { group: 'События', subtitle: 'База игроков и история участия' },
+  events: { group: 'События', subtitle: 'Календарь, участники и экономика мероприятий' },
   stock: { group: 'Операции', subtitle: 'Номенклатура, остатки и движения по складам' },
   finance: { group: 'Финансы', subtitle: 'Операции, остатки и взаиморасчёты' },
   money: { group: 'Финансы', subtitle: 'Личные выплаты и рабочие траты' },
@@ -27,6 +28,30 @@ export const CRM_TABS = [
   { id: 'leads', label: 'Лиды' },
 ];
 
+export const EVENT_TABS = [
+  { id: 'overview', label: 'Обзор' },
+  { id: 'participants', label: 'Участники' },
+  { id: 'economy', label: 'Экономика' },
+  { id: 'history', label: 'История' },
+];
+
+function hashParams(hash = '') {
+  return new URLSearchParams(String(hash).split('?')[1] || '');
+}
+
+export function eventViewFromHash(hash = '') {
+  return hashParams(hash).get('view') === 'calendar' ? 'calendar' : 'list';
+}
+
+export function eventTabFromHash(hash = '') {
+  const requested = hashParams(hash).get('tab');
+  return EVENT_TABS.some((tab) => tab.id === requested) ? requested : EVENT_TABS[0].id;
+}
+
+export function eventIdFromHash(hash = '') {
+  return hashParams(hash).get('id') || '';
+}
+
 export function crmTabFromHash(hash = '') {
   const query = String(hash).split('?')[1] || '';
   const requested = new URLSearchParams(query).get('tab');
@@ -39,6 +64,7 @@ export const NAV_ICONS = {
   clients: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2m7-10a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm13 10v-2a4 4 0 0 0-3-3.87m-2-11.96a4 4 0 0 1 0 7.75"/></svg>',
   venues: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 10c0 5-8 11-8 11S4 15 4 10a8 8 0 1 1 16 0Zm-8 3a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z"/></svg>',
   players: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M5.6 5.6c3.5 1.3 5.5 3.3 6.4 6.4.9 3.1 2.9 5.1 6.4 6.4M18.4 5.6c-3.5 1.3-5.5 3.3-6.4 6.4-.9 3.1-2.9 5.1-6.4 6.4"/></svg>',
+  events: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M16 3v4M8 3v4M3 10h18M8 14h.01M12 14h.01M16 14h.01M8 18h.01M12 18h.01"/></svg>',
   stock: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 7 9-4 9 4-9 4-9-4Zm0 0v10l9 4 9-4V7M12 11v10"/></svg>',
   finance: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h18v12H3V7Zm3-3h12M7 13h4m6 0h.01"/></svg>',
   money: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h18v12H3V7Zm3-3h12M7 13h4m6 0h.01"/></svg>',
@@ -55,7 +81,7 @@ export function groupNavItems(items) {
 
 export function pickBottomNavItems(items, isAdmin) {
   const routes = new Set(items.map((item) => item.r));
-  const businessRoute = ['stock', 'clients', 'venues', 'players'].find((route) => routes.has(route));
+  const businessRoute = ['events', 'stock', 'clients', 'venues', 'players'].find((route) => routes.has(route));
   const wanted = ['dashboard', 'tasks', isAdmin ? 'finance' : 'money', businessRoute, 'settings'].filter(Boolean);
   return wanted.map((route) => items.find((item) => item.r === route)).filter(Boolean);
 }

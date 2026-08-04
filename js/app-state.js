@@ -20,6 +20,11 @@ const SCOPED_ENTITIES = [
   'stockBalances',
   'reservations',
   'inventories',
+  'eventTypes',
+  'events',
+  'eventRegistrations',
+  'eventBudgetLines',
+  'eventFinanceAllocations',
   'memberships',
   'businessOwners',
 ];
@@ -63,6 +68,9 @@ export function createAppState(store, storage = localStorage) {
     taskFilter: { who: 'mine', status: 'active' },
     crmPipelineId: '',
     finMonth: today().slice(0, 7),
+    eventMonth: today().slice(0, 7),
+    eventFilter: { status: 'all', typeId: '' },
+    eventSearch: '',
     search: {},
   };
 }

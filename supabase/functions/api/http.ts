@@ -3,7 +3,9 @@ import { ensureCoreData, findUser } from "./auth/access.ts";
 import {
   addComment,
   bootstrap,
+  closeEventSettlement,
   createItem,
+  createEventFinanceAllocation,
   deleteItem,
   getFile,
   importPlayers,
@@ -70,6 +72,8 @@ export async function handleRequest(req: Request) {
       case "mark_read": return json(await markRead(user, body.ids));
       case "resolve_expense": return json(await resolveExpense(user, body.id, body.how));
       case "process_bank_transaction": return json(await processBankTransaction(user, body.id, body.businessId, body.category));
+      case "allocate_event_finance": return json(await createEventFinanceAllocation(user, body.item));
+      case "close_event_settlement": return json(await closeEventSettlement(user, body.id));
       case "upload_file": return json(await uploadFile(user, body.b64));
       case "get_file": return json(await getFile(user, body.id));
       default: return json({ ok: false, error: "Неизвестное действие" });

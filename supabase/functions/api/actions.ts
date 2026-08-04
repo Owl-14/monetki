@@ -23,6 +23,12 @@ import {
 } from "./rules.js";
 import { stockModuleWriteError, stockRecordError } from "./stock-rules.js";
 import {
+  EVENT_ENTITIES,
+  eventDeleteError,
+  eventModuleWriteError,
+  eventRecordError,
+} from "./event-rules.js";
+import {
   applyReservationChange,
   completeInventory,
   createStockMovement,
@@ -30,6 +36,12 @@ import {
   readStockData,
   saveInventory,
 } from "./stock.ts";
+import {
+  allocateEventFinance,
+  closeEventSettlement as closeEventSettlementRpc,
+  readEventData,
+  restoreEventChild,
+} from "./events.ts";
 import { ensureCoreData } from "./auth/access.ts";
 import { callRpc, deleteRow, insertRow, kvGet, kvSet, readAll, readOne, writeRow } from "./db/repositories.ts";
 import { newId } from "./types.ts";
@@ -132,6 +144,48 @@ async function crmUpdateValidationError(entity: string, before: Rec, after: Rec)
   }
   return null;
 }
+
+function normalizeEventRecord(entity: string, source: Rec) {
+  const item = { ...source } as Rec;
+  if (entity === "eventTypes") {
+    item.active = item.active !== false;
+    item.defaultFee = Number(item.defaultFee || 0);
+    item.staffRate = Number(item.staffRate || 0);
+    item.ownerShares = Array.isArray(item.ownerShares) ? item.ownerShares : [];
+  }
+  if (entity === "events") {
+    item.status = item.status || "planned";
+    item.settlementStatus = item.settlementStatus || "open";
+    item.defaultFee = Number(item.defaultFee || 0);
+    item.capacity = Number(item.capacity || 0);
+  }
+  if (entity === "eventRegistrations") {
+    item.status = item.status || "registered";
+    item.chargeAmount = Number(item.chargeAmount || 0);
+  }
+  if (entity === "eventBudgetLines") item.plannedAmount = Number(item.plannedAmount || 0);
+  if (entity === "eventFinanceAllocations") item.amount = Number(item.amount || 0);
+  return item;
+}
+
+async function eventValidationError(entity: string, item: Rec, ignoreId = "") {
+  if (!EVENT_ENTITIES.includes(entity)) return null;
+  return eventRecordError(entity, item, await readEventData(), ignoreId);
+}
+
+function appendEventHistory(before: Rec | null, item: Rec, userId: string) {
+  const at = Date.now();
+  const history = Array.isArray(before?.history) ? [...before.history] : [];
+  const changed = before
+    ? Object.keys(item).filter((key) => !["history", "updated", "created"].includes(key)
+      && JSON.stringify(before[key]) !== JSON.stringify(item[key]))
+    : [];
+  history.push({
+    id: newId(), at, byId: userId, action: before ? "updated" : "created",
+    fromStatus: before?.status || null, toStatus: item.status || null, changed,
+  });
+  return history;
+}
 // Зарплата с зачётом трат сотрудника: уменьшаем сумму, помечаем траты погашенными
 async function applySalaryOffsets(item: Rec): Promise<{ error?: string; sum?: number; titles?: string }> {
   const ids = (item.offsetIds as string[]) || [];
@@ -165,6 +219,13 @@ export async function createItem(u: Rec, entity: string, item: Rec) {
   }
   if (entity === "reservations") item.status = item.status || "active";
   if (entity === "inventories") item.status = item.status || "draft";
+  if (EVENT_ENTITIES.includes(entity)) item = normalizeEventRecord(entity, item);
+  if (entity === "events") {
+    item.settlementStatus = "open";
+    delete item.settlement;
+    delete item.settlementClosedAt;
+    delete item.completedAt;
+  }
   const coreDeny = await coreValidationError(entity, item);
   if (coreDeny) return { ok: false, error: coreDeny };
   const [memberships, businesses] = await Promise.all([readAll("memberships"), readAll("businesses")]);
@@ -184,11 +245,18 @@ export async function createItem(u: Rec, entity: string, item: Rec) {
     const moduleDeny = stockModuleWriteError(businesses, item);
     if (moduleDeny) return { ok: false, error: moduleDeny };
   }
+  if (EVENT_ENTITIES.includes(entity)) {
+    const moduleDeny = eventModuleWriteError(businesses, item);
+    if (moduleDeny) return { ok: false, error: moduleDeny };
+    const eventDeny = await eventValidationError(entity, item);
+    if (eventDeny) return { ok: false, error: eventDeny };
+  }
   // id всегда генерируем на сервере: иначе, прислав чужой id, можно было бы
   // перезаписать (upsert) существующую запись в своём направлении.
   item.id = entity === "businesses" && item.id ? item.id : newId();
   item.created = Date.now();
   item.updated = Date.now();
+  if (entity === "events") item.history = appendEventHistory(null, item, String(u.id));
   if (STOCK_ENTITIES.includes(entity) && entity !== "stockMovements") {
     const stockDeny = stockRecordError(entity, item, await readStockData());
     if (stockDeny) return { ok: false, error: stockDeny };
@@ -238,12 +306,19 @@ export async function createItem(u: Rec, entity: string, item: Rec) {
   }
   if (entity === "businesses") {
     if (!await insertRow(entity, item)) return { ok: false, error: "Бизнес с таким ID уже существует" };
+    const membershipId = `membership-${item.id}-${u.id}`;
+    const ownerRecordId = `business-owner-${item.id}-${u.id}`;
     try {
       await writeRow("memberships", {
-        id: `membership-${item.id}-${u.id}`, businessId: item.id, unit: item.id,
+        id: membershipId, businessId: item.id, unit: item.id,
         employeeId: u.id, role: "owner", active: true, created: Date.now(), updated: Date.now(),
       });
+      await writeRow("businessOwners", {
+        id: ownerRecordId, businessId: item.id, unit: item.id, ownerId: u.id,
+        name: u.name, share: 1, active: true, created: Date.now(), updated: Date.now(),
+      });
     } catch (error) {
+      await deleteRow("memberships", membershipId);
       await deleteRow(entity, item.id);
       throw error;
     }
@@ -285,8 +360,8 @@ export async function updateItem(u: Rec, entity: string, item: Rec) {
     if (sourceDeny) return { ok: false, error: sourceDeny };
     if (scopeMismatch(item)) return { ok: false, error: "businessId и unit должны совпадать" };
     const targetBusinessId = String(item.businessId || item.unit || businessIdOf(before));
-    if (STOCK_ENTITIES.includes(entity) && targetBusinessId !== businessIdOf(before)) {
-      return { ok: false, error: "Нельзя перенести складскую запись в другой бизнес" };
+    if ((STOCK_ENTITIES.includes(entity) || EVENT_ENTITIES.includes(entity)) && targetBusinessId !== businessIdOf(before)) {
+      return { ok: false, error: `Нельзя перенести ${STOCK_ENTITIES.includes(entity) ? "складскую" : "событийную"} запись в другой бизнес` };
     }
     const targetDeny = scopeWriteError(access, { id: "target", businessId: targetBusinessId, unit: targetBusinessId }, businesses);
     if (targetDeny) return { ok: false, error: targetDeny };
@@ -294,6 +369,10 @@ export async function updateItem(u: Rec, entity: string, item: Rec) {
   }
   if (STOCK_ENTITIES.includes(entity)) {
     const moduleDeny = stockModuleWriteError(businesses, before);
+    if (moduleDeny) return { ok: false, error: moduleDeny };
+  }
+  if (EVENT_ENTITIES.includes(entity)) {
+    const moduleDeny = eventModuleWriteError(businesses, before);
     if (moduleDeny) return { ok: false, error: moduleDeny };
   }
   if (entity === "businesses" && !hasBusinessAccess(access, before.id)) return { ok: false, error: "Нет доступа к этому бизнесу" };
@@ -310,7 +389,27 @@ export async function updateItem(u: Rec, entity: string, item: Rec) {
     if (before.assigneeId !== u.id) return { ok: false, error: "Нет доступа" };
     item = { id: before.id, status: item.status } as Rec;
   }
-  const merged = normalizeCrmRecord(entity, { ...before, ...item, updated: Date.now() }) as Rec;
+  if (entity === "events" && before.settlementStatus === "closed") {
+    return { ok: false, error: "Закрытый расчёт события нельзя изменять" };
+  }
+  if (entity === "events" && item.settlementStatus && item.settlementStatus !== before.settlementStatus) {
+    return { ok: false, error: "Расчёт события закрывается отдельным безопасным действием" };
+  }
+  if (entity === "events" && ["settlement", "settlementClosedAt", "completedAt"].some((key) =>
+    key in item && JSON.stringify(item[key]) !== JSON.stringify(before[key])
+  )) return { ok: false, error: "Системные итоги события нельзя изменять вручную" };
+  if (entity === "finance") {
+    const allocations = await readAll("eventFinanceAllocations");
+    const financeAfter = { ...before, ...item } as Rec;
+    if (allocations.some((allocation) => allocation.financeId === before.id)
+      && (businessIdOf(before) !== businessIdOf(financeAfter) || before.type !== financeAfter.type || Number(before.amount) !== Number(financeAfter.amount))) {
+      return { ok: false, error: "Нельзя изменить сумму, тип или бизнес связанной финансовой операции" };
+    }
+  }
+  const normalizedMerged = EVENT_ENTITIES.includes(entity)
+    ? normalizeEventRecord(entity, { ...before, ...item, updated: Date.now() } as Rec)
+    : { ...before, ...item, updated: Date.now() } as Rec;
+  const merged = normalizeCrmRecord(entity, normalizedMerged) as Rec;
   const crmUpdateDeny = await crmUpdateValidationError(entity, before, merged);
   if (crmUpdateDeny) return { ok: false, error: crmUpdateDeny };
   const crmDeny = await crmValidationError(entity, merged);
@@ -324,6 +423,10 @@ export async function updateItem(u: Rec, entity: string, item: Rec) {
   if (STOCK_ENTITIES.includes(entity)) {
     const stockDeny = stockRecordError(entity, merged, await readStockData(), before.id);
     if (stockDeny) return { ok: false, error: stockDeny };
+  }
+  if (EVENT_ENTITIES.includes(entity)) {
+    const eventDeny = await eventValidationError(entity, merged, before.id);
+    if (eventDeny) return { ok: false, error: eventDeny };
   }
   if (entity === "reservations") {
     return await applyReservationChange(before, merged);
@@ -340,6 +443,10 @@ export async function updateItem(u: Rec, entity: string, item: Rec) {
     if (before.assigneeId !== merged.assigneeId && merged.assigneeId && merged.assigneeId !== u.id) {
       await notify(merged.assigneeId, `Вам передали задачу: ${merged.title}`);
     }
+  }
+  if (entity === "events") {
+    merged.history = appendEventHistory(before, merged, String(u.id));
+    if (before.status !== "completed" && merged.status === "completed") merged.completedAt = Date.now();
   }
   await writeRow(entity, merged);
   return { ok: true, item: merged };
@@ -362,6 +469,15 @@ export async function deleteItem(u: Rec, entity: string, id: string) {
   if (STOCK_ENTITIES.includes(entity)) {
     const moduleDeny = stockModuleWriteError(businesses, before);
     if (moduleDeny) return { ok: false, error: moduleDeny };
+  }
+  if (EVENT_ENTITIES.includes(entity)) {
+    const moduleDeny = eventModuleWriteError(businesses, before);
+    if (moduleDeny) return { ok: false, error: moduleDeny };
+    const eventDeny = eventDeleteError(entity, before, await readEventData());
+    if (eventDeny) return { ok: false, error: eventDeny };
+  }
+  if (entity === "finance" && (await readAll("eventFinanceAllocations")).some((allocation) => allocation.financeId === before.id)) {
+    return { ok: false, error: "Связанную финансовую операцию нельзя удалить" };
   }
   if (entity === "stockMovements") return { ok: false, error: "Движения склада нельзя удалять" };
   if (entity === "inventories" && before.status === "completed") {
@@ -395,6 +511,50 @@ export async function deleteItem(u: Rec, entity: string, id: string) {
   }
   await deleteRow(entity, id);
   return { ok: true };
+}
+
+export async function createEventFinanceAllocation(u: Rec, source: Rec) {
+  if (!isAdmin(u)) return { ok: false, error: "Только для админа" };
+  let item = normalizeEventRecord("eventFinanceAllocations", { ...source } as Rec);
+  const data = await readEventData();
+  const memberships = data.memberships || [];
+  const businesses = data.businesses || [];
+  const scopeDeny = scopeWriteError(accessSet(memberships, u.id), item, businesses);
+  if (scopeDeny) return { ok: false, error: scopeDeny };
+  item = normalizeScope(item) as Rec;
+  const moduleDeny = eventModuleWriteError(businesses, item);
+  if (moduleDeny) return { ok: false, error: moduleDeny };
+  const existing = (data.eventFinanceAllocations || []).find((allocation) =>
+    allocation.idempotencyKey === item.idempotencyKey && businessIdOf(allocation) === businessIdOf(item)
+  );
+  if (existing) {
+    const keys = ["eventId", "financeId", "registrationId", "budgetLineId", "purpose", "amount"];
+    if (keys.some((key) => String(existing[key] ?? "") !== String(item[key] ?? ""))) {
+      return { ok: false, error: "Ключ повторяемости уже использован для другого распределения" };
+    }
+    return { ok: true, item: existing, alreadyAllocated: true };
+  }
+  const validationDeny = eventRecordError("eventFinanceAllocations", item, data);
+  if (validationDeny) return { ok: false, error: validationDeny };
+  const now = Date.now();
+  item = { ...item, id: newId(), createdBy: u.id, created: now, updated: now };
+  return await allocateEventFinance(item);
+}
+
+export async function closeEventSettlement(u: Rec, id: unknown) {
+  if (!isAdmin(u)) return { ok: false, error: "Только для админа" };
+  const eventId = String(id || "").trim();
+  const data = await readEventData();
+  const event = (data.events || []).find((candidate) => candidate.id === eventId);
+  if (!event) return { ok: false, error: "Событие не найдено" };
+  const scopeDeny = scopeWriteError(accessSet(data.memberships || [], u.id), event, data.businesses || []);
+  if (scopeDeny) return { ok: false, error: scopeDeny };
+  const moduleDeny = eventModuleWriteError(data.businesses || [], event);
+  if (moduleDeny) return { ok: false, error: moduleDeny };
+  if (!["completed", "cancelled"].includes(String(event.status || ""))) {
+    return { ok: false, error: "Сначала завершите или отмените событие" };
+  }
+  return await closeEventSettlementRpc(event, String(u.id));
 }
 
 /**
@@ -561,7 +721,15 @@ export async function migrateImport(u: Rec | null, payload: Record<string, Rec[]
   for (const entity of ENTITIES) {
     for (const item of payload?.[entity] || []) {
       if (!item || !item.id) continue;
-      await writeRow(entity, item);
+      if (["eventRegistrations", "eventBudgetLines"].includes(entity)) {
+        const restored = await restoreEventChild(entity, item);
+        if (!restored.ok) return { ok: false, error: restored.error || "Не удалось восстановить данные события" };
+      } else if (entity === "eventFinanceAllocations") {
+        const restored = await allocateEventFinance(item, true);
+        if (!restored.ok) return { ok: false, error: restored.error || "Не удалось восстановить финансовую связь события" };
+      } else {
+        await writeRow(entity, item);
+      }
       total++;
     }
   }

@@ -4,6 +4,14 @@
 //  - LocalStore: демо-режим, данные лежат в localStorage этого браузера
 // Оба реализуют один и тот же набор методов, чтобы приложение не знало разницы.
 
+import {
+  EVENT_ENTITIES,
+  eventDeleteError,
+  eventModuleWriteError,
+  eventRecordError,
+  eventSettlementSnapshot,
+} from './event-rules.js';
+
 export const UNITS = {
   padel: { id: 'padel', name: 'Падел', emoji: '🎾' },
   dev: { id: 'dev', name: 'Разработка', emoji: '💻' }
@@ -11,11 +19,11 @@ export const UNITS = {
 
 export const BUSINESS_MODULES = {
   dashboard: 'Дашборд', tasks: 'Задачи', clients: 'Клиенты', venues: 'Площадки',
-  players: 'Игроки', stock: 'Склад', finance: 'Финансы', money: 'Деньги сотрудника', team: 'Команда'
+  events: 'События', players: 'Игроки', stock: 'Склад', finance: 'Финансы', money: 'Деньги сотрудника', team: 'Команда'
 };
 
 export const DEFAULT_BUSINESSES = [
-  { id: 'padel', name: 'Падел', emoji: '🎾', modules: ['dashboard', 'tasks', 'venues', 'players', 'stock', 'finance', 'money', 'team'], active: true },
+  { id: 'padel', name: 'Падел', emoji: '🎾', modules: ['dashboard', 'tasks', 'events', 'venues', 'players', 'stock', 'finance', 'money', 'team'], active: true },
   { id: 'dev', name: 'Разработка', emoji: '💻', modules: ['dashboard', 'tasks', 'clients', 'finance', 'money', 'team'], active: true }
 ];
 
@@ -89,7 +97,7 @@ function ensureCoreData(db) {
   let changed = false;
   [
     'businesses', 'memberships', 'businessOwners', 'staffExpenses', 'cash', 'files', 'bankTransactions', ...CRM_ENTITIES,
-    'warehouses', 'stockItems', 'stockMovements', 'stockBalances', 'reservations', 'inventories'
+    'warehouses', 'stockItems', 'stockMovements', 'stockBalances', 'reservations', 'inventories', ...EVENT_ENTITIES
   ].forEach((key) => {
     if (!Array.isArray(db[key])) { db[key] = []; changed = true; }
   });
@@ -149,7 +157,7 @@ function ensureCoreData(db) {
   });
   [
     'clients', 'venues', 'players', 'tasks', 'finance', 'staffExpenses', ...CRM_ENTITIES,
-    'warehouses', 'stockItems', 'stockMovements', 'stockBalances', 'reservations', 'inventories'
+    'warehouses', 'stockItems', 'stockMovements', 'stockBalances', 'reservations', 'inventories', ...EVENT_ENTITIES
   ].forEach((entity) => {
     (db[entity] || []).forEach((item) => {
       const beforeBusinessId = item.businessId;
@@ -287,6 +295,12 @@ function seedData() {
       { id: uid(), unit: 'padel', name: 'Мария Ким', phone: '+7 905 222-22-22', level: 'B', city: '', notes: '', created: now },
       { id: uid(), unit: 'padel', name: 'Пётр Волков', phone: '+7 905 333-33-33', level: 'D', city: '', notes: 'Новичок, был на 1 турнире.', created: now }
     ],
+    // События начинаются пустыми: исторический импорт MON-003 выполняется отдельной задачей.
+    eventTypes: [],
+    events: [],
+    eventRegistrations: [],
+    eventBudgetLines: [],
+    eventFinanceAllocations: [],
     tasks: [
       { id: uid(), unit: 'padel', title: 'Подтвердить корты на субботу', desc: 'Позвонить в Padel Arena, забронировать 4 корта на 12:00–16:00.', assigneeId: 'u-oleg', authorId: 'u-admin', status: 'progress', priority: 'high', due: d(1), created: now, updated: now, comments: [{ authorId: 'u-oleg', text: 'Позвонил, ждут предоплату до пятницы', ts: now }] },
       { id: uid(), unit: 'padel', title: 'Собрать список игроков на турнир', desc: 'Обзвонить базу, цель — 16 участников.', assigneeId: 'u-oleg', authorId: 'u-admin', status: 'new', priority: 'normal', due: d(3), created: now, updated: now, comments: [] },
@@ -330,7 +344,7 @@ function seedData() {
 const LS_KEY = 'monetki_demo_db';
 const CORE_ENTITIES = ['businesses', 'memberships', 'businessOwners'];
 const STOCK_ENTITIES = ['warehouses', 'stockItems', 'stockMovements', 'stockBalances', 'reservations', 'inventories'];
-const BUSINESS_SCOPED_ENTITIES = ['clients', 'venues', 'players', 'tasks', 'finance', 'staffExpenses', ...CRM_ENTITIES, ...STOCK_ENTITIES];
+const BUSINESS_SCOPED_ENTITIES = ['clients', 'venues', 'players', 'tasks', 'finance', 'staffExpenses', ...CRM_ENTITIES, ...STOCK_ENTITIES, ...EVENT_ENTITIES];
 const LOCAL_ENTITIES = [
   ...CORE_ENTITIES, 'employees', ...BUSINESS_SCOPED_ENTITIES, 'bankTransactions', 'cash', 'files', 'notifications'
 ];
@@ -616,6 +630,40 @@ function stockValidationError(db, entity, item, ignoreId = '') {
   return null;
 }
 
+function normalizeEventRecord(entity, source) {
+  const item = { ...source };
+  if (entity === 'eventTypes') {
+    item.active = item.active !== false;
+    item.defaultFee = Number(item.defaultFee || 0);
+    item.staffRate = Number(item.staffRate || 0);
+    item.ownerShares = Array.isArray(item.ownerShares) ? item.ownerShares : [];
+  }
+  if (entity === 'events') {
+    item.status = item.status || 'planned';
+    item.settlementStatus = item.settlementStatus || 'open';
+    item.defaultFee = Number(item.defaultFee || 0);
+    item.capacity = Number(item.capacity || 0);
+  }
+  if (entity === 'eventRegistrations') {
+    item.status = item.status || 'registered';
+    item.chargeAmount = Number(item.chargeAmount || 0);
+  }
+  if (entity === 'eventBudgetLines') item.plannedAmount = Number(item.plannedAmount || 0);
+  if (entity === 'eventFinanceAllocations') item.amount = Number(item.amount || 0);
+  return item;
+}
+
+function appendEventHistory(before, item, userId, action = '') {
+  const history = Array.isArray(before?.history) ? [...before.history] : [];
+  const changed = before ? Object.keys(item).filter((key) => !['history', 'updated', 'created'].includes(key)
+    && JSON.stringify(before[key]) !== JSON.stringify(item[key])) : [];
+  history.push({
+    id: uid(), at: Date.now(), byId: userId, action: action || (before ? 'updated' : 'created'),
+    fromStatus: before?.status || null, toStatus: item.status || null, changed,
+  });
+  return history;
+}
+
 export class LocalStore {
   constructor() { this.demo = true; }
   _db() {
@@ -659,6 +707,8 @@ export class LocalStore {
       .map(legacyCompany);
     const canSeeStock = (item) => !scopeError(item) && canSee(item)
       && db.businesses.some((business) => business.id === businessIdOf(item) && Array.isArray(business.modules) && business.modules.includes('stock'));
+    const canSeeEvent = (item) => !scopeError(item) && canSee(item)
+      && db.businesses.some((business) => business.id === businessIdOf(item) && Array.isArray(business.modules) && business.modules.includes('events'));
     return {
       ok: true,
       profile: this._profile(db, u),
@@ -680,6 +730,15 @@ export class LocalStore {
         dealItems: db.dealItems.filter(canSee),
         venues: db.venues.filter(canSee),
         players: db.players.filter(canSee),
+        eventTypes: isAdmin
+          ? db.eventTypes.filter(canSeeEvent)
+          : db.eventTypes.filter(canSeeEvent).map(({ ownerShares: _ownerShares, ...item }) => item),
+        events: isAdmin
+          ? db.events.filter(canSeeEvent)
+          : db.events.filter(canSeeEvent).map(({ settlement: _settlement, ...item }) => item),
+        eventRegistrations: db.eventRegistrations.filter(canSeeEvent),
+        eventBudgetLines: isAdmin ? db.eventBudgetLines.filter(canSeeEvent) : [],
+        eventFinanceAllocations: isAdmin ? db.eventFinanceAllocations.filter(canSeeEvent) : [],
         tasks: db.tasks.filter((t) => canSee(t) && (isAdmin || t.assigneeId === u.id)),
         finance: db.finance.filter((f) => canSee(f) && (isAdmin || f.employeeId === u.id)),
         bankTransactions: isAdmin ? db.bankTransactions : [],
@@ -700,9 +759,10 @@ export class LocalStore {
   _baseWriteError(u, entity) {
     if (!LOCAL_ENTITIES.includes(entity) || entity === 'files') return 'Неизвестная сущность';
     if (entity === 'bankTransactions') return 'Банковскую операцию можно только провести';
+    if (entity === 'eventFinanceAllocations') return 'Финансовое распределение создаётся отдельным безопасным действием';
     if (entity === 'notifications') return 'Нельзя';
     if (entity === 'stockBalances') return 'Остатки меняются только складскими операциями';
-    if ([...CORE_ENTITIES, 'employees', 'finance', 'bankTransactions', 'cash'].includes(entity) && u.role !== 'admin') return 'Только для админа';
+    if ([...CORE_ENTITIES, 'employees', 'finance', 'bankTransactions', 'cash', 'eventTypes', 'eventBudgetLines'].includes(entity) && u.role !== 'admin') return 'Только для админа';
     return null;
   }
 
@@ -832,6 +892,13 @@ export class LocalStore {
     const baseError = this._baseWriteError(u, entity);
     if (baseError) return { ok: false, error: baseError };
     item = CRM_ENTITIES.includes(entity) ? crmDefaults(entity, item) : { ...item };
+    if (EVENT_ENTITIES.includes(entity)) item = normalizeEventRecord(entity, item);
+    if (entity === 'events') {
+      item.settlementStatus = 'open';
+      delete item.settlement;
+      delete item.settlementClosedAt;
+      delete item.completedAt;
+    }
     if (entity === 'stockMovements' && item.type === 'inventory') return { ok: false, error: 'Движение инвентаризации создаётся только при её завершении' };
     if (entity === 'businesses') item.id = String(item.id || '').trim();
     if (entity === 'businessOwners') item.ownerId = String(item.ownerId || '').trim();
@@ -859,8 +926,15 @@ export class LocalStore {
     if (crmError) return { ok: false, error: crmError };
     const stockError = STOCK_ENTITIES.includes(entity) ? stockValidationError(db, entity, item) : null;
     if (stockError) return { ok: false, error: stockError };
+    if (EVENT_ENTITIES.includes(entity)) {
+      const moduleError = eventModuleWriteError(db.businesses, item);
+      if (moduleError) return { ok: false, error: moduleError };
+      const eventError = eventRecordError(entity, item, db);
+      if (eventError) return { ok: false, error: eventError };
+    }
     // id всегда серверный — нельзя перезаписать чужую запись, прислав её id
     item = { ...item, id: entity === 'businesses' && item.id ? item.id : uid(), created: Date.now(), updated: Date.now() };
+    if (entity === 'events') item.history = appendEventHistory(null, item, u.id);
     if (entity === 'employees' && !item.code) item.code = String(Math.floor(100000 + Math.random() * 900000));
     if (entity === 'tasks' && u.role !== 'admin') item.assigneeId = u.id; // п.3: сотрудник ставит задачи только себе
     if (entity === 'staffExpenses') {
@@ -899,6 +973,10 @@ export class LocalStore {
       db.memberships.push({
         id: `membership-${item.id}-${u.id}`, businessId: item.id, unit: item.id,
         employeeId: u.id, role: 'owner', active: true, created: Date.now(), updated: Date.now()
+      });
+      db.businessOwners.push({
+        id: `business-owner-${item.id}-${u.id}`, businessId: item.id, unit: item.id,
+        ownerId: u.id, name: u.name, share: 1, active: true, created: Date.now(), updated: Date.now()
       });
     }
     if (entity === 'employees' || entity === 'businesses') ensureCoreData(db);
@@ -940,8 +1018,8 @@ export class LocalStore {
       const mismatch = scopeError(item);
       if (mismatch) return { ok: false, error: mismatch };
       const targetBusinessId = item.businessId || item.unit || businessIdOf(before);
-      if (STOCK_ENTITIES.includes(entity) && targetBusinessId !== businessIdOf(before)) {
-        return { ok: false, error: 'Нельзя перенести складскую запись в другой бизнес' };
+      if ((STOCK_ENTITIES.includes(entity) || EVENT_ENTITIES.includes(entity)) && targetBusinessId !== businessIdOf(before)) {
+        return { ok: false, error: `Нельзя перенести ${STOCK_ENTITIES.includes(entity) ? 'складскую' : 'событийную'} запись в другой бизнес` };
       }
       const target = { businessId: targetBusinessId, unit: targetBusinessId };
       const targetError = STOCK_ENTITIES.includes(entity) ? this._stockWriteError(db, u, target) : this._scopeWriteError(db, u, target);
@@ -963,7 +1041,24 @@ export class LocalStore {
       if (before.assigneeId !== u.id) return { ok: false, error: 'Нет доступа' };
       item = { id: before.id, status: item.status };
     }
-    let next = { ...before, ...item };
+    if (EVENT_ENTITIES.includes(entity)) {
+      const moduleError = eventModuleWriteError(db.businesses, before);
+      if (moduleError) return { ok: false, error: moduleError };
+    }
+    if (entity === 'events' && before.settlementStatus === 'closed') return { ok: false, error: 'Закрытый расчёт события нельзя изменять' };
+    if (entity === 'events' && item.settlementStatus && item.settlementStatus !== before.settlementStatus) {
+      return { ok: false, error: 'Расчёт события закрывается отдельным безопасным действием' };
+    }
+    if (entity === 'events' && ['settlement', 'settlementClosedAt', 'completedAt'].some((key) =>
+      key in item && JSON.stringify(item[key]) !== JSON.stringify(before[key])
+    )) return { ok: false, error: 'Системные итоги события нельзя изменять вручную' };
+    if (entity === 'finance' && db.eventFinanceAllocations.some((allocation) => allocation.financeId === before.id)) {
+      const financeAfter = { ...before, ...item };
+      if (businessIdOf(before) !== businessIdOf(financeAfter) || before.type !== financeAfter.type || Number(before.amount) !== Number(financeAfter.amount)) {
+        return { ok: false, error: 'Нельзя изменить сумму, тип или бизнес связанной финансовой операции' };
+      }
+    }
+    let next = EVENT_ENTITIES.includes(entity) ? normalizeEventRecord(entity, { ...before, ...item }) : { ...before, ...item };
     if (entity === 'stockItems') next = { ...next, costPrice: Number(next.costPrice), minStock: Number(next.minStock) };
     if (entity === 'reservations') next = { ...next, quantity: Number(next.quantity) };
     if (entity === 'inventories') next = { ...next, items: (next.items || []).map((row) => ({ ...row, actualQuantity: Number(row.actualQuantity) })) };
@@ -972,6 +1067,10 @@ export class LocalStore {
     }
     const stockError = STOCK_ENTITIES.includes(entity) ? stockValidationError(db, entity, next, before.id) : null;
     if (stockError) return { ok: false, error: stockError };
+    if (EVENT_ENTITIES.includes(entity)) {
+      const eventError = eventRecordError(entity, next, db, before.id);
+      if (eventError) return { ok: false, error: eventError };
+    }
     if (entity === 'reservations') {
       const reservationError = this._changeReservation(db, before, next);
       if (reservationError) return { ok: false, error: reservationError };
@@ -980,6 +1079,10 @@ export class LocalStore {
       next.completedAt = Date.now();
       const inventoryError = this._completeInventory(db, next, u.id);
       if (inventoryError) return { ok: false, error: inventoryError };
+    }
+    if (entity === 'events') {
+      next.history = appendEventHistory(before, next, u.id);
+      if (before.status !== 'completed' && next.status === 'completed') next.completedAt = Date.now();
     }
     db[entity][i] = { ...next, updated: Date.now() };
     if (entity === 'businesses') ensureCoreData(db);
@@ -1034,6 +1137,15 @@ export class LocalStore {
       const sourceError = STOCK_ENTITIES.includes(entity) ? this._stockWriteError(db, u, before) : this._scopeWriteError(db, u, before);
       if (sourceError) return { ok: false, error: sourceError };
     }
+    if (EVENT_ENTITIES.includes(entity)) {
+      const moduleError = eventModuleWriteError(db.businesses, before);
+      if (moduleError) return { ok: false, error: moduleError };
+      const eventError = eventDeleteError(entity, before, db);
+      if (eventError) return { ok: false, error: eventError };
+    }
+    if (entity === 'finance' && db.eventFinanceAllocations.some((allocation) => allocation.financeId === before.id)) {
+      return { ok: false, error: 'Связанную финансовую операцию нельзя удалить' };
+    }
     if (entity === 'warehouses') {
       const linked = db.stockBalances.some((x) => x.warehouseId === id)
         || db.stockMovements.some((x) => x.warehouseId === id || x.fromWarehouseId === id || x.toWarehouseId === id)
@@ -1065,6 +1177,58 @@ export class LocalStore {
     db[entity] = db[entity].filter((x) => x.id !== id);
     this._save(db);
     return { ok: true };
+  }
+
+  async allocateEventFinance(token, source) {
+    const u = this._user(token); if (!u) return { ok: false, error: 'auth' };
+    if (u.role !== 'admin') return { ok: false, error: 'Только для админа' };
+    const db = this._db();
+    let item = normalizeEventRecord('eventFinanceAllocations', { ...source });
+    const scopeErrorText = this._scopeWriteError(db, u, item);
+    if (scopeErrorText) return { ok: false, error: scopeErrorText };
+    scopedItem(item);
+    const moduleError = eventModuleWriteError(db.businesses, item);
+    if (moduleError) return { ok: false, error: moduleError };
+    const existing = db.eventFinanceAllocations.find((allocation) =>
+      allocation.idempotencyKey === item.idempotencyKey && businessIdOf(allocation) === businessIdOf(item)
+    );
+    if (existing) {
+      const keys = ['eventId', 'financeId', 'registrationId', 'budgetLineId', 'purpose', 'amount'];
+      if (keys.some((key) => String(existing[key] ?? '') !== String(item[key] ?? ''))) {
+        return { ok: false, error: 'Ключ повторяемости уже использован для другого распределения' };
+      }
+      return { ok: true, item: existing, alreadyAllocated: true };
+    }
+    const eventError = eventRecordError('eventFinanceAllocations', item, db);
+    if (eventError) return { ok: false, error: eventError };
+    item = { ...item, id: uid(), createdBy: u.id, created: Date.now(), updated: Date.now() };
+    db.eventFinanceAllocations.push(item);
+    this._save(db);
+    return { ok: true, item };
+  }
+
+  async closeEventSettlement(token, id) {
+    const u = this._user(token); if (!u) return { ok: false, error: 'auth' };
+    if (u.role !== 'admin') return { ok: false, error: 'Только для админа' };
+    const db = this._db();
+    const index = db.events.findIndex((event) => event.id === id);
+    if (index < 0) return { ok: false, error: 'Событие не найдено' };
+    const event = db.events[index];
+    const accessError = this._scopeWriteError(db, u, event);
+    if (accessError) return { ok: false, error: accessError };
+    const moduleError = eventModuleWriteError(db.businesses, event);
+    if (moduleError) return { ok: false, error: moduleError };
+    if (event.settlementStatus === 'closed') return { ok: true, item: event, alreadyClosed: true };
+    if (!['completed', 'cancelled'].includes(event.status)) return { ok: false, error: 'Сначала завершите или отмените событие' };
+    const now = Date.now();
+    const closed = {
+      ...event, settlementStatus: 'closed', settlement: eventSettlementSnapshot(event, db, now),
+      settlementClosedAt: now, updated: now,
+    };
+    closed.history = appendEventHistory(event, closed, u.id, 'settlement_closed');
+    db.events[index] = closed;
+    this._save(db);
+    return { ok: true, item: closed };
   }
 
   async addComment(token, taskId, text) {
@@ -1249,6 +1413,8 @@ class RemoteStore {
   status() { return this._call({ action: 'status' }); }
   tochkaSync(token, days = 30) { return this._call({ action: 'tochka_sync', token, days }); }
   processBankTransaction(token, id, businessId, category) { return this._call({ action: 'process_bank_transaction', token, id, businessId, category }); }
+  allocateEventFinance(token, item) { return this._call({ action: 'allocate_event_finance', token, item }); }
+  closeEventSettlement(token, id) { return this._call({ action: 'close_event_settlement', token, id }); }
   migrateImport(token, data) { return this._call({ action: 'migrate_import', token, data }); }
   uploadFile(token, b64) { return this._call({ action: 'upload_file', token, b64 }); }
   getFile(token, id) { return this._call({ action: 'get_file', token, id }); }

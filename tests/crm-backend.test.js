@@ -206,5 +206,5 @@ test("серверный bootstrap создаёт только справочн�
   assert.match(actionsSource, /Promise\.all\(ENTITIES\.map\(async \(entity\) => \[entity, await readAll\(entity\)\]/);
   assert.match(actionsSource, /Object\.fromEntries\(entries\)/);
   assert.match(actionsSource, /CRM_ENTITIES\.includes\(entity\)\) item = normalizeCrmRecord\(entity, item\)/);
-  assert.match(actionsSource, /const merged = normalizeCrmRecord\(entity, \{ \.\.\.before, \.\.\.item, updated: Date\.now\(\) \}\)/);
+  assert.match(actionsSource, /const merged = normalizeCrmRecord\(entity, normalizedMerged\)/);
 });
