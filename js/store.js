@@ -509,6 +509,18 @@ function crmDeleteError(db, entity, id) {
   return null;
 }
 
+function crmUpdateError(db, entity, before, after) {
+  if (!CRM_ENTITIES.includes(entity)) return null;
+  if (businessIdOf(before) !== businessIdOf(after)) return 'Нельзя переносить CRM-запись в другой бизнес';
+  if (entity === 'contacts' && before.companyId !== after.companyId && db.deals.some((item) => item.contactId === before.id)) {
+    return 'Контакт используется в сделках';
+  }
+  if (entity === 'stages' && before.pipelineId !== after.pipelineId && db.deals.some((item) => item.stageId === before.id)) {
+    return 'Стадия используется в сделках';
+  }
+  return null;
+}
+
 export class LocalStore {
   constructor() { this.demo = true; }
   _db() {
@@ -707,6 +719,8 @@ export class LocalStore {
     const mergedForValidation = CRM_ENTITIES.includes(entity)
       ? crmDefaults(entity, { ...before, ...item })
       : { ...before, ...item };
+    const crmUpdateDeny = crmUpdateError(db, entity, before, mergedForValidation);
+    if (crmUpdateDeny) return { ok: false, error: crmUpdateDeny };
     const crmError = crmValidationError(db, entity, mergedForValidation, before.id);
     if (crmError) return { ok: false, error: crmError };
     if (CRM_ENTITIES.includes(entity)) item = mergedForValidation;

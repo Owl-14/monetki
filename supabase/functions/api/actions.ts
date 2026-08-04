@@ -81,6 +81,20 @@ async function crmDeleteValidationError(entity: string, item: Rec) {
   const data = Object.fromEntries(CRM_ENTITIES.map((name, index) => [name, records[index]]));
   return crmDeleteError(entity, item, data);
 }
+
+async function crmUpdateValidationError(entity: string, before: Rec, after: Rec) {
+  if (!CRM_ENTITIES.includes(entity)) return null;
+  if (businessIdOf(before) !== businessIdOf(after)) return "Нельзя переносить CRM-запись в другой бизнес";
+  if (entity !== "contacts" && entity !== "stages") return null;
+  const deals = await readAll("deals");
+  if (entity === "contacts" && before.companyId !== after.companyId && deals.some((deal) => deal.contactId === before.id)) {
+    return "Контакт используется в сделках";
+  }
+  if (entity === "stages" && before.pipelineId !== after.pipelineId && deals.some((deal) => deal.stageId === before.id)) {
+    return "Стадия используется в сделках";
+  }
+  return null;
+}
 // Зарплата с зачётом трат сотрудника: уменьшаем сумму, помечаем траты погашенными
 async function applySalaryOffsets(item: Rec): Promise<{ error?: string; sum?: number; titles?: string }> {
   const ids = (item.offsetIds as string[]) || [];
@@ -223,6 +237,8 @@ export async function updateItem(u: Rec, entity: string, item: Rec) {
     item = { id: before.id, status: item.status } as Rec;
   }
   const merged = normalizeCrmRecord(entity, { ...before, ...item, updated: Date.now() }) as Rec;
+  const crmUpdateDeny = await crmUpdateValidationError(entity, before, merged);
+  if (crmUpdateDeny) return { ok: false, error: crmUpdateDeny };
   const crmDeny = await crmValidationError(entity, merged);
   if (crmDeny) return { ok: false, error: crmDeny };
   if (entity === "tasks") {

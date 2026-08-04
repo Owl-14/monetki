@@ -118,6 +118,48 @@ test('все CRM-сущности проходят создание, обнов�
   }
 });
 
+test('CRM не разрывает существующие ссылки при переносе родителей', async () => {
+  const store = freshStore();
+  await store.bootstrap(adminToken);
+  const company = (await store.create(adminToken, 'companies', { businessId: 'dev', name: 'Компания' })).item;
+  const otherCompany = (await store.create(adminToken, 'companies', { businessId: 'dev', name: 'Другая компания' })).item;
+  const contact = (await store.create(adminToken, 'contacts', {
+    businessId: 'dev', companyId: company.id, name: 'Контакт', isPrimary: true,
+  })).item;
+  const pipeline = (await store.create(adminToken, 'pipelines', {
+    businessId: 'dev', name: 'Воронка', isDefault: false, active: true,
+  })).item;
+  const otherPipeline = (await store.create(adminToken, 'pipelines', {
+    businessId: 'dev', name: 'Другая воронка', isDefault: false, active: true,
+  })).item;
+  const stage = (await store.create(adminToken, 'stages', {
+    businessId: 'dev', pipelineId: pipeline.id, name: 'Стадия', order: 10, type: 'open',
+  })).item;
+  const deal = await store.create(adminToken, 'deals', {
+    businessId: 'dev', name: 'Сделка', companyId: company.id, contactId: contact.id,
+    pipelineId: pipeline.id, stageId: stage.id, amount: 1, responsibleId: 'u-admin',
+  });
+  assert.equal(deal.ok, true);
+
+  assert.equal(
+    (await store.update(adminToken, 'companies', { ...company, businessId: 'padel', unit: 'padel' })).error,
+    'Нельзя переносить CRM-запись в другой бизнес',
+  );
+  assert.equal(
+    (await store.update(adminToken, 'contacts', { ...contact, companyId: otherCompany.id })).error,
+    'Контакт используется в сделках',
+  );
+  assert.equal(
+    (await store.update(adminToken, 'stages', { ...stage, pipelineId: otherPipeline.id })).error,
+    'Стадия используется в сделках',
+  );
+
+  const actionsSource = await import('node:fs/promises').then(({ readFile }) =>
+    readFile(new URL('../supabase/functions/api/actions.ts', import.meta.url), 'utf8')
+  );
+  assert.match(actionsSource, /crmUpdateValidationError\(entity, before, merged\)/);
+});
+
 test('CRM отклоняет чужой бизнес, mismatch, архив и неверные связи', async () => {
   const store = freshStore();
   await store.bootstrap(adminToken);
@@ -145,4 +187,3 @@ test('CRM отклоняет чужой бизнес, mismatch, архив и н
   const archived = await store.create(adminToken, 'leads', { businessId: 'dev', name: 'В архиве' });
   assert.equal(archived.error, 'Бизнес в архиве');
 });
-
