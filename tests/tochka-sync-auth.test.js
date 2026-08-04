@@ -71,6 +71,13 @@ test("workflow ротации использует Management API и не сод
   assert.match(workflow, /concurrency:[\s\S]*group: configure-tochka-sync-secret[\s\S]*cancel-in-progress: false/);
   assert.match(workflow, /extensions\.gen_random_bytes\(32\)/);
   assert.match(workflow, /select decrypted_secret from vault\.decrypted_secrets/);
+  const vaultReadBlock = workflow.slice(
+    workflow.indexOf('vault_read_status='),
+    workflow.indexOf('if [[ "${vault_read_status}"', workflow.indexOf('vault_read_status=')),
+  );
+  assert.match(vaultReadBlock, /--url "\$\{database_url\}"/);
+  assert.doesNotMatch(vaultReadBlock, /\/read-only/);
+  assert.doesNotMatch(workflow, /\$\{database_url\}\/read-only/);
   assert.match(workflow, /\/secrets"/);
   assert.match(workflow, /vault\.(create_secret|update_secret)/);
   assert.match(workflow, /002_schedule_tochka_sync\.sql/);
