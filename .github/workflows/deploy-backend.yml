@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - "supabase/functions/**"
+      - "supabase/migrations/003_tochka_sync_lease.sql"
       - "supabase/config.toml"
       - ".github/workflows/deploy-backend.yml"
   workflow_dispatch:
@@ -17,6 +18,31 @@ jobs:
       - uses: supabase/setup-cli@v1
         with:
           version: latest
+      - name: Применить аренду синхронизации Точки
+        shell: bash
+        run: |
+          set -euo pipefail
+          migration_file="supabase/migrations/003_tochka_sync_lease.sql"
+          database_url="https://api.supabase.com/v1/projects/${SUPABASE_PROJECT_ID}/database/query"
+          request_file="${RUNNER_TEMP}/tochka-lease-migration-request.json"
+          response_file="${RUNNER_TEMP}/tochka-lease-migration-response.json"
+          test -s "${migration_file}"
+          jq -n --rawfile query "${migration_file}" '{query: $query}' > "${request_file}"
+          status_code="$(curl --silent --show-error \
+            --output "${response_file}" \
+            --write-out '%{http_code}' \
+            --request POST \
+            --url "${database_url}" \
+            --header "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
+            --header "Content-Type: application/json" \
+            --data-binary "@${request_file}")"
+          if [[ "${status_code}" != "201" ]]; then
+            echo "Не удалось применить аренду синхронизации: Management API вернул HTTP ${status_code}." >&2
+            exit 1
+          fi
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_PROJECT_ID: ${{ secrets.SUPABASE_PROJECT_ID }}
       - name: Deploy api function
         run: supabase functions deploy api --project-ref "$SUPABASE_PROJECT_ID" --no-verify-jwt
         env:

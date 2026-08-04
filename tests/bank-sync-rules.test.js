@@ -6,6 +6,9 @@ import {
   bankSyncResult,
   bankTransactionId,
   classifyMethod,
+  collectStatementTransactions,
+  splitStatementRange,
+  statementRequestBudget,
   sumBankBalances,
 } from "../supabase/functions/api/rules.js";
 
@@ -58,10 +61,206 @@ test("баланс выбирает лучший тип по каждому сч
   assert.equal(total, -15);
 });
 
+test("диапазон выписки делится по календарным дням без пересечения", () => {
+  assert.deepEqual(splitStatementRange("2026-07-01", "2026-07-30"), [
+    { startDate: "2026-07-01", endDate: "2026-07-15" },
+    { startDate: "2026-07-16", endDate: "2026-07-30" },
+  ]);
+  assert.deepEqual(splitStatementRange("2026-07-19", "2026-07-20"), [
+    { startDate: "2026-07-19", endDate: "2026-07-19" },
+    { startDate: "2026-07-20", endDate: "2026-07-20" },
+  ]);
+  assert.equal(splitStatementRange("2026-07-19", "2026-07-19"), null);
+});
+
+test("бюджет счёта резервирует только один root-запрос каждому следующему счёту", () => {
+  assert.equal(statementRequestBudget(32, 0, 2), 31);
+  assert.equal(statementRequestBudget(32, 31, 1), 1);
+  assert.equal(statementRequestBudget(32, 1, 1), 31);
+  assert.equal(statementRequestBudget(32, 32, 1), 0);
+  assert.equal(statementRequestBudget(32, 0, 0), 0);
+});
+
+test("выписка из 100 операций рекурсивно заменяется результатами двух половин", async () => {
+  const calls = [];
+  const root = Array.from({ length: 100 }, (_, index) => ({ transactionId: `root-${index}` }));
+  const result = await collectStatementTransactions({
+    startDate: "2026-07-01",
+    endDate: "2026-07-04",
+    fetchRange: async (startDate, endDate) => {
+      calls.push([startDate, endDate]);
+      if (
+        (startDate === "2026-07-01" && endDate === "2026-07-04") ||
+        (startDate === "2026-07-01" && endDate === "2026-07-02")
+      ) {
+        return { status: "Ready", Transaction: root };
+      }
+      if (startDate === "2026-07-01" && endDate === "2026-07-01") {
+        return { status: "Ready", Transaction: root.slice(0, 50) };
+      }
+      if (startDate === "2026-07-02" && endDate === "2026-07-02") {
+        return { status: "Ready", Transaction: root.slice(50) };
+      }
+      return { status: "Ready", Transaction: [] };
+    },
+  });
+
+  assert.deepEqual(calls, [
+    ["2026-07-01", "2026-07-04"],
+    ["2026-07-01", "2026-07-02"],
+    ["2026-07-03", "2026-07-04"],
+    ["2026-07-01", "2026-07-01"],
+    ["2026-07-02", "2026-07-02"],
+  ]);
+  assert.deepEqual(result.transactions.map((item) => item.transactionId), root.map((item) => item.transactionId));
+  assert.equal(result.diagnostics.requested, 5);
+  assert.equal(result.diagnostics.split, 2);
+  assert.equal(result.diagnostics.truncated, 0);
+  assert.equal(result.diagnostics.inconsistentSplit, 0);
+  assert.equal(result.diagnostics.usable, 5);
+});
+
+test("рассогласование половин не теряет операции родительской выписки и даёт partial", async () => {
+  const root = Array.from({ length: 100 }, (_, index) => ({ transactionId: `fallback-${index}` }));
+  const result = await collectStatementTransactions({
+    startDate: "2026-07-01",
+    endDate: "2026-07-02",
+    fetchRange: async (startDate, endDate) => ({
+      status: "Ready",
+      Transaction: startDate === endDate ? [] : root,
+    }),
+  });
+
+  assert.equal(result.transactions.length, 100);
+  assert.equal(result.diagnostics.inconsistentSplit, 1);
+  assert.equal(result.diagnostics.truncated, 1);
+  assert.equal(result.diagnostics.usable, 3);
+});
+
+test("общий BFS-бюджет возвращает неиспользованные запросы насыщенной правой половине", async () => {
+  const allTransactions = Array.from({ length: 15 * 99 }, (_, index) => ({
+    transactionId: `skew-${index}`,
+    day: 16 + Math.floor(index / 99),
+  }));
+  const result = await collectStatementTransactions({
+    startDate: "2026-07-01",
+    endDate: "2026-07-30",
+    maxRequests: 32,
+    fetchRange: async (startDate, endDate) => {
+      if (endDate <= "2026-07-15") return { status: "Ready", Transaction: [] };
+      const firstDay = Math.max(16, Number(startDate.slice(-2)));
+      const lastDay = Number(endDate.slice(-2));
+      const transactions = allTransactions.filter((item) => item.day >= firstDay && item.day <= lastDay);
+      return { status: "Ready", Transaction: startDate === endDate ? transactions : transactions.slice(0, 100) };
+    },
+  });
+
+  assert.equal(result.diagnostics.requested, 31);
+  assert.equal(result.diagnostics.split, 15);
+  assert.equal(result.diagnostics.truncated, 0);
+  assert.equal(result.diagnostics.requestLimitReached, 0);
+  assert.equal(result.transactions.length, 15 * 99);
+});
+
+test("два счёта динамически делят 32 запроса независимо от порядка плотного счёта", async () => {
+  const allTransactions = Array.from({ length: 15 * 99 }, (_, index) => ({
+    transactionId: `multi-${index}`,
+    day: 16 + Math.floor(index / 99),
+  }));
+  const denseFetch = async (startDate, endDate) => {
+    if (endDate <= "2026-07-15") return { status: "Ready", Transaction: [] };
+    const firstDay = Math.max(16, Number(startDate.slice(-2)));
+    const lastDay = Number(endDate.slice(-2));
+    const transactions = allTransactions.filter((item) => item.day >= firstDay && item.day <= lastDay);
+    return { status: "Ready", Transaction: startDate === endDate ? transactions : transactions.slice(0, 100) };
+  };
+  const emptyFetch = async () => ({ status: "Ready", Transaction: [] });
+
+  async function runAccounts(fetchers) {
+    let requested = 0;
+    const results = [];
+    const limits = [];
+    for (let index = 0; index < fetchers.length; index++) {
+      const limit = statementRequestBudget(32, requested, fetchers.length - index);
+      limits.push(limit);
+      const result = await collectStatementTransactions({
+        startDate: "2026-07-01",
+        endDate: "2026-07-30",
+        maxRequests: limit,
+        fetchRange: fetchers[index],
+      });
+      requested += result.diagnostics.requested;
+      results.push(result);
+    }
+    return { requested, results, limits };
+  }
+
+  const denseFirst = await runAccounts([denseFetch, emptyFetch]);
+  assert.deepEqual(denseFirst.limits, [31, 1]);
+  assert.deepEqual(denseFirst.results.map((result) => result.diagnostics.requested), [31, 1]);
+  assert.equal(denseFirst.requested, 32);
+  assert.equal(denseFirst.results.reduce((sum, result) => sum + result.diagnostics.truncated, 0), 0);
+
+  const emptyFirst = await runAccounts([emptyFetch, denseFetch]);
+  assert.deepEqual(emptyFirst.limits, [31, 31]);
+  assert.deepEqual(emptyFirst.results.map((result) => result.diagnostics.requested), [1, 31]);
+  assert.equal(emptyFirst.requested, 32);
+  assert.equal(emptyFirst.results.reduce((sum, result) => sum + result.diagnostics.truncated, 0), 0);
+});
+
+test("100 операций за один день сохраняются с честной отметкой о неполноте", async () => {
+  const transactions = Array.from({ length: 100 }, (_, index) => ({ transactionId: `day-${index}` }));
+  const result = await collectStatementTransactions({
+    startDate: "2026-07-19",
+    endDate: "2026-07-19",
+    fetchRange: async () => ({ status: "Ready", Transaction: transactions }),
+  });
+
+  assert.equal(result.transactions.length, 100);
+  assert.equal(result.diagnostics.requested, 1);
+  assert.equal(result.diagnostics.split, 0);
+  assert.equal(result.diagnostics.truncated, 1);
+});
+
+test("лимит запросов останавливает дальнейшее деление и помечает partial", async () => {
+  const transactions = Array.from({ length: 100 }, (_, index) => ({ transactionId: `limited-${index}` }));
+  const result = await collectStatementTransactions({
+    startDate: "2026-07-01",
+    endDate: "2026-07-30",
+    maxRequests: 2,
+    fetchRange: async () => ({ status: "Ready", Transaction: transactions }),
+  });
+
+  assert.equal(result.transactions.length, 100);
+  assert.equal(result.diagnostics.requested, 1);
+  assert.equal(result.diagnostics.split, 0);
+  assert.equal(result.diagnostics.truncated, 1);
+  assert.equal(result.diagnostics.requestLimitReached, 1);
+});
+
+test("общий дедлайн прекращает запросы и не маскируется под готовую выписку", async () => {
+  let fetchCalled = false;
+  const result = await collectStatementTransactions({
+    startDate: "2026-07-01",
+    endDate: "2026-07-30",
+    deadline: 0,
+    fetchRange: async () => {
+      fetchCalled = true;
+      return { status: "Ready", Transaction: [] };
+    },
+  });
+
+  assert.equal(fetchCalled, false);
+  assert.equal(result.diagnostics.requested, 0);
+  assert.equal(result.diagnostics.truncated, 1);
+  assert.equal(result.diagnostics.deadlineReached, 1);
+  assert.equal(result.diagnostics.usable, 0);
+});
+
 function diagnostics({ processed = 1, failed = 0, ready = processed, empty = 0, notReady = 0, seen = 0, duplicates = 0, pending = 0, errors = 0 } = {}) {
   return {
-    accounts: { total: processed + failed, processed, failed },
-    statements: { requested: processed + failed, ready, empty, notReady, failed },
+    accounts: { total: processed + failed, processed, partial: 0, failed },
+    statements: { requested: processed + failed, ready, empty, notReady, failed, split: 0, truncated: 0, inconsistent: 0 },
     transactions: { seen, duplicates, pending },
     errors,
   };
@@ -85,6 +284,17 @@ test("ошибка одного счёта даёт частичный успе�
   assert.equal(result.ok, true);
   assert.equal(result.outcome, "partial");
   assert.equal(result.diagnostics.accounts.failed, 1);
+});
+
+test("возможное усечение выписки даёт partial даже при сохранённых операциях", () => {
+  const details = diagnostics({ seen: 100, errors: 1 });
+  details.accounts.partial = 1;
+  details.statements.truncated = 1;
+  const result = bankSyncResult(details, 100);
+
+  assert.equal(result.ok, true);
+  assert.equal(result.outcome, "partial");
+  assert.equal(result.diagnostics.statements.truncated, 1);
 });
 
 test("синхронизация неуспешна, если из-за ошибок не обработан ни один счёт", () => {

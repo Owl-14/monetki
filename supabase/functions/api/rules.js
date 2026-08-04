@@ -226,6 +226,167 @@ export function acceptBankTransaction(transaction, knownBankIds) {
   return { bankId, amount: Number(transaction.Amount?.amount) || 0 };
 }
 
+const UTC_DAY_MS = 864e5;
+
+function utcDateValue(date) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return NaN;
+  return Date.parse(`${date}T00:00:00.000Z`);
+}
+
+function formatUtcDate(value) {
+  return new Date(value).toISOString().slice(0, 10);
+}
+
+// Диапазоны выписки включают обе границы, поэтому правая половина начинается
+// со следующего календарного дня и не повторяет операции из левой половины.
+export function splitStatementRange(startDate, endDate) {
+  const start = utcDateValue(startDate);
+  const end = utcDateValue(endDate);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start >= end) return null;
+
+  const days = Math.round((end - start) / UTC_DAY_MS);
+  const leftEnd = start + Math.floor(days / 2) * UTC_DAY_MS;
+  return [
+    { startDate: formatUtcDate(start), endDate: formatUtcDate(leftEnd) },
+    { startDate: formatUtcDate(leftEnd + UTC_DAY_MS), endDate: formatUtcDate(end) },
+  ];
+}
+
+// Текущий счёт получает весь оставшийся глобальный бюджет кроме одного
+// стартового запроса на каждый следующий счёт. Неиспользованный остаток
+// автоматически становится доступен следующей итерации.
+export function statementRequestBudget(maxRequests, requested, remainingAccounts) {
+  const total = Math.max(0, Math.floor(Number(maxRequests) || 0));
+  const used = Math.max(0, Math.floor(Number(requested) || 0));
+  const accounts = Math.max(0, Math.floor(Number(remainingAccounts) || 0));
+  if (accounts === 0) return 0;
+  return Math.max(0, total - used - (accounts - 1));
+}
+
+// Точка может вернуть ровно 100 операций без признака продолжения. Такой ответ
+// для многодневного периода перепроверяем двумя непересекающимися половинами.
+// Ограничения не дают ошибочному ответу банка породить бесконечное число запросов.
+export async function collectStatementTransactions({
+  startDate,
+  endDate,
+  fetchRange,
+  transactionLimit = 100,
+  maxDepth = 8,
+  maxRequests = 32,
+  deadline = Infinity,
+}) {
+  const transactionsById = new Map();
+  const diagnostics = {
+    requested: 0,
+    ready: 0,
+    empty: 0,
+    notReady: 0,
+    failed: 0,
+    split: 0,
+    truncated: 0,
+    inconsistentSplit: 0,
+    requestLimitReached: 0,
+    depthLimitReached: 0,
+    deadlineReached: 0,
+    usable: 0,
+  };
+
+  const root = { startDate, endDate, depth: 0, ids: new Set(), children: null, complete: false };
+  const queue = [root];
+
+  // Обход по уровням использует единый расходуемый бюджет. Поэтому пустая ветка
+  // не удерживает заранее выделенные запросы, а обе половины развиваются справедливо.
+  while (queue.length) {
+    if (Date.now() >= deadline) {
+      diagnostics.truncated += queue.length;
+      diagnostics.deadlineReached++;
+      break;
+    }
+    if (diagnostics.requested >= maxRequests) {
+      diagnostics.truncated += queue.length;
+      diagnostics.requestLimitReached++;
+      break;
+    }
+
+    const node = queue.shift();
+    diagnostics.requested++;
+    let statement;
+    try {
+      statement = await fetchRange(node.startDate, node.endDate);
+    } catch (_error) {
+      diagnostics.failed++;
+      continue;
+    }
+
+    if (statement?.status === "Deadline") {
+      diagnostics.truncated++;
+      diagnostics.deadlineReached++;
+      continue;
+    }
+    if (!statement || (statement.status !== "Ready" && statement.status !== "Error")) {
+      diagnostics.notReady++;
+      continue;
+    }
+    if (statement.status === "Error") {
+      diagnostics.failed++;
+      continue;
+    }
+
+    diagnostics.ready++;
+    diagnostics.usable++;
+    const rangeTransactions = Array.isArray(statement.Transaction) ? statement.Transaction : [];
+    for (const transaction of rangeTransactions) {
+      const transactionId = bankTransactionId(transaction);
+      node.ids.add(transactionId);
+      // Более узкий диапазон обрабатывается позже и может содержать более свежий
+      // статус той же операции, поэтому заменяет родительскую версию.
+      transactionsById.set(transactionId, transaction);
+    }
+
+    if (rangeTransactions.length >= transactionLimit) {
+      const halves = splitStatementRange(node.startDate, node.endDate);
+      const hasBudgetForBothHalves = diagnostics.requested + queue.length + 2 <= maxRequests;
+      if (halves && node.depth < maxDepth && hasBudgetForBothHalves) {
+        diagnostics.split++;
+        node.children = halves.map((half) => ({
+          ...half,
+          depth: node.depth + 1,
+          ids: new Set(),
+          children: null,
+          complete: false,
+        }));
+        queue.push(...node.children);
+        continue;
+      }
+      if (halves && node.depth >= maxDepth) diagnostics.depthLimitReached++;
+      else if (halves) diagnostics.requestLimitReached++;
+      diagnostics.truncated++;
+      continue;
+    }
+
+    if (!rangeTransactions.length) diagnostics.empty++;
+    node.complete = true;
+  }
+
+  // Проверяем покрытие снизу вверх. Родительские операции уже сохранены в Map,
+  // но несовпадение с полностью готовыми листьями всё равно означает partial.
+  function subtree(node) {
+    if (!node.children) return { complete: node.complete, ids: new Set(node.ids) };
+    const children = node.children.map(subtree);
+    if (!children.every((child) => child.complete)) return { complete: false, ids: new Set(node.ids) };
+    const childIds = new Set(children.flatMap((child) => [...child.ids]));
+    const inconsistent = [...node.ids].some((id) => !childIds.has(id));
+    if (inconsistent) {
+      diagnostics.inconsistentSplit++;
+      diagnostics.truncated++;
+    }
+    return { complete: !inconsistent, ids: childIds };
+  }
+  subtree(root);
+
+  return { transactions: [...transactionsById.values()], diagnostics };
+}
+
 export function bankSyncResult(diagnostics, added) {
   const processed = diagnostics.accounts.processed;
   const errors = diagnostics.errors;

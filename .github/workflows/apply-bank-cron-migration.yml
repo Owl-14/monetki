@@ -28,13 +28,20 @@ jobs:
           : "${SUPABASE_ACCESS_TOKEN:?Не задан SUPABASE_ACCESS_TOKEN}"
           : "${SUPABASE_PROJECT_ID:?Не задан SUPABASE_PROJECT_ID}"
 
-          migration_file="supabase/migrations/002_schedule_tochka_sync.sql"
+          migration_files=(
+            "supabase/migrations/002_schedule_tochka_sync.sql"
+            "supabase/migrations/003_tochka_sync_lease.sql"
+          )
           api_url="https://api.supabase.com/v1/projects/${SUPABASE_PROJECT_ID}/database/query"
           request_file="${RUNNER_TEMP}/migration-request.json"
           response_file="${RUNNER_TEMP}/migration-response.json"
 
-          test -s "${migration_file}"
-          jq -n --rawfile query "${migration_file}" '{query: $query}' > "${request_file}"
+          migration_query=""
+          for migration_file in "${migration_files[@]}"; do
+            test -s "${migration_file}"
+            migration_query+="$(<"${migration_file}")"$'\n'
+          done
+          jq -n --arg query "${migration_query}" '{query: $query}' > "${request_file}"
 
           status_code="$(curl --silent --show-error \
             --output "${response_file}" \
@@ -50,7 +57,7 @@ jobs:
             exit 1
           fi
 
-          verification_query="select count(*) filter (where active)::integer as active_job_count, count(*) filter (where active and schedule = '5 * * * *' and position('vault.decrypted_secrets' in command) > 0 and position('X-Tochka-Sync-Secret' in command) > 0)::integer as scheduled_job_count from cron.job where jobname = 'tochka-sync-hourly';"
+          verification_query="select (select count(*) from pg_proc where proname in ('acquire_tochka_sync_lease', 'release_tochka_sync_lease'))::integer as lease_function_count, count(*) filter (where active)::integer as active_job_count, count(*) filter (where active and schedule = '5 * * * *' and position('vault.decrypted_secrets' in command) > 0 and position('X-Tochka-Sync-Secret' in command) > 0)::integer as scheduled_job_count from cron.job where jobname = 'tochka-sync-hourly';"
           verification_request="${RUNNER_TEMP}/verification-request.json"
           verification_response="${RUNNER_TEMP}/verification-response.json"
 
@@ -60,7 +67,7 @@ jobs:
             --output "${verification_response}" \
             --write-out '%{http_code}' \
             --request POST \
-            --url "${api_url}/read-only" \
+            --url "${api_url}" \
             --header "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
             --header "Content-Type: application/json" \
             --data-binary "@${verification_request}")"
@@ -73,6 +80,7 @@ jobs:
           if ! jq -e '
             type == "array" and
             length == 1 and
+            (.[0].lease_function_count | tonumber) == 2 and
             (.[0].active_job_count | tonumber) == 1 and
             (.[0].scheduled_job_count | tonumber) == 1
           ' "${verification_response}" > /dev/null; then
