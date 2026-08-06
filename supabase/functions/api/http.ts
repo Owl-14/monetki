@@ -107,7 +107,7 @@ export async function handleRequest(req: Request) {
       case "bank_rule_ignore": return json(await ignoreBankTransaction(user, body.transactionId, body.idempotencyKey));
       case "bank_rule_manual": return json(await requireManualBankTransaction(user, body.transactionId, body.idempotencyKey));
       case "bank_rule_reevaluate": return json(await reevaluateBankTransaction(user, body.transactionId, body.idempotencyKey));
-      case "bank_rule_journal": return json(await bankRuleJournal(user, body.limit, body.offset));
+      case "bank_rule_journal": return json(await bankRuleJournal(user, body.limit, body.cursor));
       case "bank_rule_correct": return json(await correctBankRuleApplication(user, body.applicationId, body.patch, body.idempotencyKey));
       case "bank_rule_reverse": return json(await reverseBankRuleApplication(user, body.applicationId, body.idempotencyKey));
       case "allocate_event_finance": return json(await createEventFinanceAllocation(user, body.item));

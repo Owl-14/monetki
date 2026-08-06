@@ -85,9 +85,12 @@ test('auto-правило требует серверный dry-run token, ве�
 test('журнал имеет стабильную пагинацию и безопасную ориентацию без банковских реквизитов', async () => {
   const actions = await read('supabase/functions/api/bank-rule-actions.ts');
   const journal = actions.slice(actions.indexOf('function safeApplication'), actions.indexOf('export async function correctBankRuleApplication'));
-  assert.match(journal, /offset/);
+  assert.match(journal, /decodeJournalCursor/);
+  assert.match(journal, /encodeJournalCursor/);
   assert.match(journal, /hasMore/);
-  assert.match(journal, /nextOffset/);
+  assert.match(journal, /nextCursor/);
+  assert.match(journal, /journalCreated\(item\) < cursor\.created/);
+  assert.doesNotMatch(journal, /offset|10000/);
   for (const field of ['auditRef', 'operationDate', 'businessId', 'category', 'method']) assert.match(journal, new RegExp(field));
   assert.doesNotMatch(journal, /bankId|bankSignals|phone|amountMinor/);
 });

@@ -94,7 +94,8 @@ test('журнал показывает безопасную ориентаци�
   const journal = app.slice(app.indexOf('async function renderBankRuleJournal'), app.indexOf('function openBankCorrection'));
   const correction = app.slice(app.indexOf('function openBankCorrection'), app.indexOf('async function reverseBankApplication'));
   for (const field of ['auditRef', 'operationDate', 'businessId', 'category', 'method']) assert.match(journal, new RegExp(field));
-  assert.match(journal, /nextOffset/);
+  assert.match(journal, /nextCursor/);
+  assert.match(journal, /new Set\(rows\.map\(\(item\) => item\.id\)\)/);
   assert.match(journal, /bank-journal-more/);
   assert.match(correction, /name="clearCounterparty"/);
   assert.match(correction, /name="clearComment"/);

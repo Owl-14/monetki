@@ -2236,12 +2236,12 @@ function openBankRuleForm(rule = null, transaction = null) {
 async function renderBankRuleJournal(tabsHtml, bankTabs) {
   $('#view').innerHTML = `${tabsHtml}${bankTabs}<div class="card empty"><div class="big">⏳</div>Загружаю безопасный журнал…</div>`;
   bindBankSubTabs();
-  const result = await S.store.bankRuleJournal(S.token, 50, 0);
+  const result = await S.store.bankRuleJournal(S.token, 50, '');
   if (currentRoute() !== 'finance' || S.finTab !== 'bank' || S.bankSubTab !== 'journal') return;
   if (!result.ok) { $('#view').insertAdjacentHTML('beforeend', `<div class="banner warn">${esc(result.error || 'Журнал недоступен')}</div>`); return; }
   let rows = result.applications || [];
   let hasMore = result.hasMore === true;
-  let nextOffset = Number(result.nextOffset || rows.length);
+  let nextCursor = String(result.nextCursor || '');
   const paint = () => {
     $('#view').innerHTML = `${tabsHtml}${bankTabs}<div class="banner">Журнал не содержит банковских идентификаторов, реквизитов, имён, телефонов, ИНН и сумм. Для различения записей показаны только дата, бизнес, классификация и короткая ссылка аудита.</div>
       <div class="list">${rows.length ? rows.map((item) => {
@@ -2267,11 +2267,12 @@ async function renderBankRuleJournal(tabsHtml, bankTabs) {
     $('#view').querySelectorAll('[data-correct-bank]').forEach((button) => button.addEventListener('click', () => openBankCorrection(button.dataset.correctBank)));
     $('#bank-journal-more')?.addEventListener('click', async (event) => {
       const button = event.currentTarget; button.disabled = true;
-      const page = await S.store.bankRuleJournal(S.token, 50, nextOffset);
+      const page = await S.store.bankRuleJournal(S.token, 50, nextCursor);
       if (!page.ok) { button.disabled = false; toast(page.error || 'Не удалось загрузить журнал', true); return; }
       if (currentRoute() !== 'finance' || S.finTab !== 'bank' || S.bankSubTab !== 'journal') return;
-      rows = [...rows, ...(page.applications || [])]; hasMore = page.hasMore === true;
-      nextOffset = Number(page.nextOffset || rows.length); paint();
+      const known = new Set(rows.map((item) => item.id));
+      rows = [...rows, ...(page.applications || []).filter((item) => !known.has(item.id))]; hasMore = page.hasMore === true;
+      nextCursor = String(page.nextCursor || ''); paint();
     });
   };
   paint();

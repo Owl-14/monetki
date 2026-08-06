@@ -130,6 +130,7 @@ declare
   v_visible_amount bigint;
   v_direction text;
 begin
+  perform pg_advisory_xact_lock(hashtext('bank_mutation_barrier'));
   if v_id = '' or length(v_id) > 128 or v_bank_id = '' or length(v_bank_id) > 300 then
     raise exception 'Некорректная банковская операция';
   end if;
@@ -203,6 +204,7 @@ declare
   v_run jsonb;
   v_settings jsonb;
 begin
+  perform pg_advisory_xact_lock(hashtext('bank_mutation_barrier'));
   if v_id !~ '^bank-rule:[A-Za-z0-9:_-]{3,150}$' or coalesce(p_rule->>'name', '') = ''
       or coalesce(p_rule->>'decision', '') not in ('suggest', 'auto', 'ignore', 'manual')
       or (p_rule->>'deleted' = 'true' and coalesce(p_rule->>'enabled', 'true') <> 'false') then
@@ -254,6 +256,7 @@ declare
   v_current jsonb;
   v_version integer;
 begin
+  perform pg_advisory_xact_lock(hashtext('bank_mutation_barrier'));
   select data into v_current from public.records
   where entity = 'bankRuleSettings' and id = 'bank-rule-settings' for update;
   if v_current is null or coalesce((v_current->>'settingsVersion')::integer, 0) <> p_expected_version then
@@ -298,6 +301,7 @@ security definer
 set search_path = public, pg_temp
 as $$
 begin
+  perform pg_advisory_xact_lock(hashtext('bank_mutation_barrier'));
   if coalesce(p_run->>'id', '') = '' or jsonb_typeof(p_run->'summary') <> 'object'
       or p_run ? 'bankId' or p_run ? 'bankSignals' or p_run ? 'amount' then raise exception 'Некорректный итог запуска'; end if;
   perform set_config('app.bank_rules_rpc', 'run', true);
@@ -344,6 +348,7 @@ declare
   v_unique_context integer := 0;
   v_duplicate_evidence integer := 0;
 begin
+  perform pg_advisory_xact_lock(hashtext('bank_mutation_barrier'));
   if v_key !~ '^[A-Za-z0-9:_-]{8,160}$' or v_checksum = '' then raise exception 'Некорректный ключ повторяемости'; end if;
   perform pg_advisory_xact_lock(hashtextextended('bank-app:' || v_key, 0));
   select data into v_existing from public.records
@@ -582,8 +587,10 @@ declare
   v_after jsonb;
   v_audit jsonb;
   v_bank_id text;
+  v_lock_key text;
   v_id text := 'bank-application:' || md5(p_idempotency_key);
 begin
+  perform pg_advisory_xact_lock(hashtext('bank_mutation_barrier'));
   if p_idempotency_key !~ '^[A-Za-z0-9:_-]{8,160}$' or jsonb_typeof(p_patch) <> 'object'
       or exists (select 1 from jsonb_object_keys(p_patch) as keys(key) where key not in ('category', 'method', 'owner', 'comment', 'counterparty')) then
     raise exception 'Некорректное исправление';
@@ -608,9 +615,11 @@ begin
   end if;
   select data into v_requested from public.records where entity = 'bankRuleApplications' and id = p_application_id;
   if v_requested is null or v_requested->>'state' not in ('applied', 'corrected') then raise exception 'Применение правила не найдено'; end if;
-  select data->>'bankId' into v_bank_id from public.records where entity = 'finance' and id = v_requested->>'financeId';
-  if coalesce(v_bank_id, '') = '' then raise exception 'Финансовая операция не найдена'; end if;
-  perform pg_advisory_xact_lock(hashtextextended(v_bank_id, 0));
+  select data into v_finance from public.records where entity = 'finance' and id = v_requested->>'financeId';
+  if v_finance is null then raise exception 'Финансовая операция не найдена'; end if;
+  v_bank_id := coalesce(v_finance->>'bankId', '');
+  v_lock_key := case when v_bank_id <> '' then v_bank_id else 'finance:' || v_requested->>'financeId' end;
+  perform pg_advisory_xact_lock(hashtextextended(v_lock_key, 0));
   select data into v_source from public.records where entity = 'bankRuleApplications'
     and data->>'financeId' = v_requested->>'financeId' and data->>'state' in ('applied', 'corrected')
     order by coalesce((data->>'created')::bigint, 0) desc, id desc limit 1;
@@ -659,6 +668,7 @@ declare
   v_bank_id text;
   v_id text := 'bank-application:' || md5(p_idempotency_key);
 begin
+  perform pg_advisory_xact_lock(hashtext('bank_mutation_barrier'));
   if p_idempotency_key !~ '^[A-Za-z0-9:_-]{8,160}$' then raise exception 'Некорректный ключ повторяемости'; end if;
   perform pg_advisory_xact_lock(hashtextextended('bank-app:' || p_idempotency_key, 0));
   select data into v_existing from public.records where entity = 'bankRuleApplications' and data->>'idempotencyKey' = p_idempotency_key;
@@ -729,6 +739,7 @@ declare
   v_amount_minor bigint;
   v_count integer := 0;
 begin
+  perform pg_advisory_xact_lock(hashtext('bank_mutation_barrier'));
   if jsonb_typeof(p_graph) <> 'object' then raise exception 'Некорректная резервная копия правил'; end if;
   perform pg_advisory_xact_lock(hashtext('bank_rule_restore_graph'));
   perform set_config('app.bank_rules_rpc', 'restore', true);
@@ -912,6 +923,7 @@ declare
   v_event_result jsonb;
   v_count integer := 0;
 begin
+  perform pg_advisory_xact_lock(hashtext('bank_mutation_barrier'));
   if jsonb_typeof(p_graph) <> 'object'
       or jsonb_typeof(coalesce(p_graph->'ordinary', '{}'::jsonb)) <> 'object'
       or jsonb_typeof(coalesce(p_graph->'bank', '{}'::jsonb)) <> 'object'

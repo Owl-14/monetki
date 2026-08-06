@@ -503,17 +503,56 @@ function safeApplication(item: Rec, finance?: Rec) {
   };
 }
 
-export async function bankRuleJournal(user: Rec, limit: unknown = 50, offset: unknown = 0) {
+function journalCreated(item: Rec) {
+  const value = Math.floor(Number(item.created || 0));
+  return Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
+function encodeJournalCursor(item: Rec) {
+  const bytes = new TextEncoder().encode(JSON.stringify([journalCreated(item), String(item.id || "")]));
+  let binary = "";
+  bytes.forEach((byte) => { binary += String.fromCharCode(byte); });
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, "");
+}
+
+function decodeJournalCursor(source: unknown) {
+  const cursor = String(source || "").trim();
+  if (!cursor) return null;
+  if (cursor.length > 512 || !/^[A-Za-z0-9_-]+$/u.test(cursor)) throw new Error("invalid_cursor");
+  try {
+    const padded = cursor.replaceAll("-", "+").replaceAll("_", "/") + "=".repeat((4 - cursor.length % 4) % 4);
+    const binary = atob(padded);
+    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+    const parsed = JSON.parse(new TextDecoder().decode(bytes));
+    if (!Array.isArray(parsed) || parsed.length !== 2 || !Number.isSafeInteger(parsed[0]) || parsed[0] < 0
+      || typeof parsed[1] !== "string" || !parsed[1] || parsed[1].length > 200 || /[\u0000-\u001f\u007f]/u.test(parsed[1])) {
+      throw new Error("invalid_cursor");
+    }
+    return { created: parsed[0], id: parsed[1] };
+  } catch (_error) {
+    throw new Error("invalid_cursor");
+  }
+}
+
+export async function bankRuleJournal(user: Rec, limit: unknown = 50, cursorSource: unknown = "") {
   const deny = adminError(user);
   if (deny) return { ok: false, error: deny };
   const count = Math.min(100, Math.max(1, Math.floor(Number(limit || 50))));
-  const start = Math.min(10000, Math.max(0, Math.floor(Number(offset || 0))));
+  let cursor: { created: number; id: string } | null;
+  try { cursor = decodeJournalCursor(cursorSource); } catch (_error) {
+    return { ok: false, error: "Некорректный курсор журнала" };
+  }
   const [allApplications, finance] = await Promise.all([readAll("bankRuleApplications"), readAll("finance")]);
   const financeById = new Map(finance.map((item) => [String(item.id), item]));
-  const ordered = allApplications.sort((a, b) => Number(b.created || 0) - Number(a.created || 0) || String(b.id).localeCompare(String(a.id)));
-  const applications = ordered.slice(start, start + count).map((item) => safeApplication(item, financeById.get(String(item.financeId))));
-  const nextOffset = start + applications.length;
-  return { ok: true, applications, hasMore: nextOffset < ordered.length, nextOffset };
+  const ordered = allApplications.sort((a, b) => journalCreated(b) - journalCreated(a) || String(b.id).localeCompare(String(a.id)));
+  const afterCursor = cursor ? ordered.filter((item) => journalCreated(item) < cursor.created
+    || (journalCreated(item) === cursor.created && String(item.id).localeCompare(cursor.id) < 0)) : ordered;
+  const page = afterCursor.slice(0, count + 1);
+  const hasMore = page.length > count;
+  const pageItems = page.slice(0, count);
+  const applications = pageItems.map((item) => safeApplication(item, financeById.get(String(item.financeId))));
+  const nextCursor = hasMore && pageItems.length ? encodeJournalCursor(pageItems[pageItems.length - 1]) : "";
+  return { ok: true, applications, hasMore, nextCursor };
 }
 
 export async function correctBankRuleApplication(user: Rec, applicationId: unknown, patch: Rec, idempotencyKey: unknown) {

@@ -4,6 +4,8 @@ import { readFile } from 'node:fs/promises';
 
 const migration = await readFile(new URL('../supabase/migrations/009_bank_rules.sql', import.meta.url), 'utf8');
 const stockMigration = await readFile(new URL('../supabase/migrations/004_atomic_stock_operations.sql', import.meta.url), 'utf8');
+const legacyProcessMigration = await readFile(new URL('../supabase/migrations/005_process_bank_transaction.sql', import.meta.url), 'utf8');
+const recoveryMigration = await readFile(new URL('../supabase/migrations/006_recover_hidden_bank_transactions.sql', import.meta.url), 'utf8');
 
 test('DB задаёт уникальность bankId, версий, applications и relations', () => {
   assert.doesNotMatch(migration, /jsonb_object_length/);
@@ -23,6 +25,32 @@ test('enqueue и apply используют один deadlock-safe порядо�
   assert.ok(apply.indexOf('pg_advisory_xact_lock') < apply.indexOf('for update'));
   assert.match(enqueue, /entity = 'finance'[\s\S]*entity = 'bankTransactions'/);
   assert.match(enqueue, /amountMinor[\s\S]*visible_amount[\s\S]*direction/);
+});
+
+test('все банковские мутации берут единый barrier первым, до bankId и row locks', () => {
+  const functionNames = [
+    'bank_enqueue_transaction', 'bank_rule_save', 'bank_rule_settings_save', 'bank_rule_append_run',
+    'apply_bank_rule_transaction', 'correct_bank_rule_transaction', 'reverse_bank_rule_transaction',
+    'bank_rule_restore_graph', 'restore_monetki_backup',
+  ];
+  functionNames.forEach((name, index) => {
+    const start = migration.indexOf(`function public.${name}`);
+    const nextStarts = functionNames.slice(index + 1).map((next) => migration.indexOf(`function public.${next}`)).filter((value) => value > start);
+    const end = nextStarts.length ? Math.min(...nextStarts) : migration.length;
+    const block = migration.slice(start, end);
+    const barrier = block.indexOf("pg_advisory_xact_lock(hashtext('bank_mutation_barrier'))");
+    assert.ok(barrier > 0, name);
+    const laterAdvisory = block.indexOf('pg_advisory_xact_lock', barrier + 1);
+    const rowLock = block.indexOf('for update');
+    if (laterAdvisory >= 0) assert.ok(barrier < laterAdvisory, name);
+    if (rowLock >= 0) assert.ok(barrier < rowLock, name);
+  });
+  for (const [name, source] of [['process_bank_transaction', legacyProcessMigration], ['deploy recovery', recoveryMigration]]) {
+    const barrier = source.indexOf("pg_advisory_xact_lock(hashtext('bank_mutation_barrier'))");
+    assert.ok(barrier > 0 && barrier < source.indexOf('for update'), name);
+  }
+  const fullRestore = migration.slice(migration.indexOf('function public.restore_monetki_backup'));
+  assert.ok(fullRestore.indexOf('bank_mutation_barrier') < fullRestore.indexOf('insert into public.records'));
 });
 
 test('restore восстанавливает правила и очередь одним RPC и сохраняет порядок bankId → finance', () => {
@@ -115,6 +143,10 @@ test('legacy bank finance получает контролируемый ауди
   assert.match(migration, /'canReverse', false/);
   assert.match(migration, /bank-application:legacy:/);
   assert.match(migration, /'auditRef', 'legacy-'/);
+  const correct = migration.slice(migration.indexOf('function public.correct_bank_rule_transaction'), migration.indexOf('function public.reverse_bank_rule_transaction'));
+  assert.match(correct, /v_lock_key := case when v_bank_id <> '' then v_bank_id else 'finance:' \|\| v_requested->>'financeId' end/);
+  assert.match(correct, /select data into v_finance from public\.records where entity = 'finance' and id = v_requested->>'financeId'/);
+  assert.doesNotMatch(correct, /if coalesce\(v_bank_id, ''\) = '' then raise exception 'Финансовая операция не найдена'/);
 });
 
 test('повторный deploy снимает immutable trigger до seed, а legacy сумма имеет безопасный fallback', () => {

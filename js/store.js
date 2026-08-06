@@ -432,6 +432,37 @@ function activationRuleShape(source) {
   return rule;
 }
 
+function bankJournalCreated(item) {
+  const value = Math.floor(Number(item?.created || 0));
+  return Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
+function encodeBankJournalCursor(item) {
+  const bytes = new TextEncoder().encode(JSON.stringify([bankJournalCreated(item), String(item?.id || '')]));
+  let binary = '';
+  bytes.forEach((byte) => { binary += String.fromCharCode(byte); });
+  return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, '');
+}
+
+function decodeBankJournalCursor(source) {
+  const cursor = String(source || '').trim();
+  if (!cursor) return null;
+  if (cursor.length > 512 || !/^[A-Za-z0-9_-]+$/u.test(cursor)) throw new Error('invalid_cursor');
+  try {
+    const padded = cursor.replaceAll('-', '+').replaceAll('_', '/') + '='.repeat((4 - cursor.length % 4) % 4);
+    const binary = atob(padded);
+    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+    const parsed = JSON.parse(new TextDecoder().decode(bytes));
+    if (!Array.isArray(parsed) || parsed.length !== 2 || !Number.isSafeInteger(parsed[0]) || parsed[0] < 0
+      || typeof parsed[1] !== 'string' || !parsed[1] || parsed[1].length > 200 || /[\u0000-\u001f\u007f]/u.test(parsed[1])) {
+      throw new Error('invalid_cursor');
+    }
+    return { created: parsed[0], id: parsed[1] };
+  } catch (_error) {
+    throw new Error('invalid_cursor');
+  }
+}
+
 function bankScopeDiagnostics(db, user) {
   if (user.role !== 'admin') return null;
   const businessById = new Map((db.businesses || []).map((business) => [String(business.id), business]));
@@ -1822,14 +1853,22 @@ export class LocalStore {
   bankRuleManual(token, transactionId, idempotencyKey) { return this._bankQueueState(token, transactionId, idempotencyKey, 'manual', 'manual'); }
   bankRuleReevaluate(token, transactionId, idempotencyKey) { return this._bankQueueState(token, transactionId, idempotencyKey, 'pending', 'reevaluated'); }
 
-  async bankRuleJournal(token, limit = 50, offset = 0) {
+  async bankRuleJournal(token, limit = 50, cursorSource = '') {
     const u = this._user(token);
     if (!u || u.role !== 'admin') return { ok: false, error: 'Только для админа' };
     const db = this._db();
     const count = Math.min(100, Math.max(1, Math.floor(Number(limit || 50))));
-    const start = Math.min(10000, Math.max(0, Math.floor(Number(offset || 0))));
-    const ordered = db.bankRuleApplications.slice().sort((a, b) => Number(b.created || 0) - Number(a.created || 0) || String(b.id).localeCompare(String(a.id)));
-    const applications = ordered.slice(start, start + count).map((item) => {
+    let cursor;
+    try { cursor = decodeBankJournalCursor(cursorSource); } catch (_error) {
+      return { ok: false, error: 'Некорректный курсор журнала' };
+    }
+    const ordered = db.bankRuleApplications.slice().sort((a, b) => bankJournalCreated(b) - bankJournalCreated(a) || String(b.id).localeCompare(String(a.id)));
+    const afterCursor = cursor ? ordered.filter((item) => bankJournalCreated(item) < cursor.created
+      || (bankJournalCreated(item) === cursor.created && String(item.id).localeCompare(cursor.id) < 0)) : ordered;
+    const page = afterCursor.slice(0, count + 1);
+    const hasMore = page.length > count;
+    const pageItems = page.slice(0, count);
+    const applications = pageItems.map((item) => {
       const finance = db.finance.find((entry) => entry.id === item.financeId);
       return {
         id: String(item.id || ''), decision: String(item.decision || ''), state: String(item.state || ''),
@@ -1843,7 +1882,8 @@ export class LocalStore {
         canReverse: item.canReverse !== false && item.operation !== 'legacy_backfill',
       };
     });
-    return { ok: true, applications, hasMore: start + applications.length < ordered.length, nextOffset: start + applications.length };
+    const nextCursor = hasMore && pageItems.length ? encodeBankJournalCursor(pageItems[pageItems.length - 1]) : '';
+    return { ok: true, applications, hasMore, nextCursor };
   }
 
   async bankRuleCorrect(token, applicationId, patch, idempotencyKey) {
@@ -2203,7 +2243,7 @@ class RemoteStore {
   bankRuleIgnore(token, transactionId, idempotencyKey) { return this._call({ action: 'bank_rule_ignore', token, transactionId, idempotencyKey }); }
   bankRuleManual(token, transactionId, idempotencyKey) { return this._call({ action: 'bank_rule_manual', token, transactionId, idempotencyKey }); }
   bankRuleReevaluate(token, transactionId, idempotencyKey) { return this._call({ action: 'bank_rule_reevaluate', token, transactionId, idempotencyKey }); }
-  bankRuleJournal(token, limit = 50, offset = 0) { return this._call({ action: 'bank_rule_journal', token, limit, offset }); }
+  bankRuleJournal(token, limit = 50, cursor = '') { return this._call({ action: 'bank_rule_journal', token, limit, cursor }); }
   bankRuleCorrect(token, applicationId, patch, idempotencyKey) { return this._call({ action: 'bank_rule_correct', token, applicationId, patch, idempotencyKey }); }
   bankRuleReverse(token, applicationId, idempotencyKey) { return this._call({ action: 'bank_rule_reverse', token, applicationId, idempotencyKey }); }
   allocateEventFinance(token, item) { return this._call({ action: 'allocate_event_finance', token, item }); }

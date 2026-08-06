@@ -224,18 +224,18 @@ test('LocalStore создаёт legacy-аудит и позволяет явно
   const { token } = await store.login('111111');
   const db = JSON.parse(storage.getItem('monetki_demo_db'));
   db.finance.push({
-    id: 'legacy-bank-finance', businessId: 'padel', unit: 'padel', source: 'bank', bankId: 'legacy-bank-id',
+    id: 'legacy-bank-finance', businessId: 'padel', unit: 'padel', source: 'bank',
     type: 'expense', amount: 1200, date: '2026-07-19', method: 'account', category: 'Прочее',
     owner: 'savva', counterparty: 'Получатель', comment: 'Старый комментарий', created: 100, updated: 100,
   });
   storage.setItem('monetki_demo_db', JSON.stringify(db));
-  const journal = await store.bankRuleJournal(token, 50, 0);
+  const journal = await store.bankRuleJournal(token, 50, '');
   const legacy = journal.applications.find((item) => item.operation === 'legacy_backfill');
   assert.equal(legacy.operation, 'legacy_backfill');
   assert.equal(legacy.canReverse, false);
   assert.equal(legacy.businessId, 'padel');
   assert.equal(legacy.operationDate, '2026-07-19');
-  assert.doesNotMatch(JSON.stringify(legacy), /legacy-bank-id|1200/);
+  assert.doesNotMatch(JSON.stringify(legacy), /1200/);
   const corrected = await store.bankRuleCorrect(token, legacy.id, {
     owner: null, counterparty: null, comment: null,
   }, 'correct:legacy:clear');
@@ -256,13 +256,21 @@ test('LocalStore выдаёт журнал страницами без повт�
     decision: 'ignored', state: 'ignored', auditRef: `audit-${index}`, created: index + 1,
   }));
   storage.setItem('monetki_demo_db', JSON.stringify(db));
-  const first = await store.bankRuleJournal(token, 50, 0);
-  const second = await store.bankRuleJournal(token, 50, first.nextOffset);
+  const first = await store.bankRuleJournal(token, 50, '');
+  const concurrent = JSON.parse(storage.getItem('monetki_demo_db'));
+  concurrent.bankRuleApplications.push({
+    id: 'journal-concurrent-new', operation: 'queue:ignored:test', decision: 'ignored', state: 'ignored', created: 999,
+  });
+  storage.setItem('monetki_demo_db', JSON.stringify(concurrent));
+  const second = await store.bankRuleJournal(token, 50, first.nextCursor);
   assert.equal(first.applications.length, 50);
   assert.equal(first.hasMore, true);
+  assert.match(first.nextCursor, /^[A-Za-z0-9_-]+$/);
   assert.equal(second.applications.length, 15);
   assert.equal(second.hasMore, false);
   assert.equal(new Set([...first.applications, ...second.applications].map((item) => item.id)).size, 65);
+  assert.equal(second.applications.some((item) => item.id === 'journal-concurrent-new'), false);
+  assert.equal((await store.bankRuleJournal(token, 50, 'not-a-valid-cursor')).ok, false);
 });
 
 test('LocalStore не сохраняет обычные записи при ошибке поздней проверки backup', async () => {
