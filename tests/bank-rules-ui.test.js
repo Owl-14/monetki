@@ -82,6 +82,28 @@ test('поздний ответ журнала не перезаписывает
   assert.match(app, /currentRoute\(\) !== 'finance' \|\| S\.finTab !== 'bank' \|\| S\.bankSubTab !== 'journal'/);
 });
 
+test('включение auto-правила требует dry-run и явного подтверждения именно этого результата', () => {
+  const block = app.slice(app.indexOf('function openBankRuleForm'), app.indexOf('async function renderBankRuleJournal'));
+  assert.match(block, /bankRuleDryRun\(S\.token, next, expectedVersion\)/);
+  assert.match(block, /activationToken/);
+  assert.match(block, /confirm\(/);
+  assert.match(block, /dryRun\.summary/);
+});
+
+test('журнал показывает безопасную ориентацию, загружает следующие страницы и даёт явную очистку полей', () => {
+  const journal = app.slice(app.indexOf('async function renderBankRuleJournal'), app.indexOf('function openBankCorrection'));
+  const correction = app.slice(app.indexOf('function openBankCorrection'), app.indexOf('async function reverseBankApplication'));
+  for (const field of ['auditRef', 'operationDate', 'businessId', 'category', 'method']) assert.match(journal, new RegExp(field));
+  assert.match(journal, /nextOffset/);
+  assert.match(journal, /bank-journal-more/);
+  assert.match(correction, /name="clearCounterparty"/);
+  assert.match(correction, /name="clearComment"/);
+  assert.match(correction, /value="__clear__"/);
+  assert.match(correction, /patch\.owner = null/);
+  assert.match(correction, /patch\.counterparty = null/);
+  assert.match(correction, /patch\.comment = null/);
+});
+
 test('preview показывает только агрегаты, а журнал предупреждает о privacy', () => {
   assert.match(app, /Имена, суммы, телефоны, счета и банковские идентификаторы в результат не включены/);
   assert.match(app, /Журнал не содержит банковских идентификаторов, реквизитов, имён, телефонов, ИНН и сумм/);

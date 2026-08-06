@@ -28,6 +28,12 @@ async function ruleChecksum(rule: unknown) {
   return `r1:${await sha256(canonicalJson(rule || {}))}`;
 }
 
+function activationRuleShape(source: Rec) {
+  const rule = structuredClone(source || {});
+  for (const key of ["activationToken", "activationRunId", "activationFingerprint", "checksum", "updated", "updatedBy"]) delete rule[key];
+  return rule;
+}
+
 function adminError(user: Rec | null) {
   return !user || !isAdmin(user) || user.active === false ? "Только для админа" : null;
 }
@@ -113,7 +119,10 @@ export async function listBankRules(user: Rec) {
 export async function saveBankRule(user: Rec, source: Rec, expectedVersion: unknown) {
   const deny = adminError(user);
   if (deny) return { ok: false, error: deny };
-  const validation = validateBankRule(source);
+  const activationToken = String(source?.activationToken || "");
+  const candidate = { ...(source || {}) };
+  delete candidate.activationToken;
+  const validation = validateBankRule(candidate);
   if (!validation.ok) return { ok: false, error: validation.errors[0], errors: validation.errors };
   const data = await bankData();
   const id = String(validation.rule.id || `bank-rule:${crypto.randomUUID()}`);
@@ -122,8 +131,22 @@ export async function saveBankRule(user: Rec, source: Rec, expectedVersion: unkn
     ? validateActionTargets(user, validation.rule.actions, data, "admin", validation.rule.decision === "auto") : null;
   if (targetDeny) return { ok: false, error: targetDeny };
   const now = Date.now();
+  let activation: Rec = {};
+  if (validation.rule.decision === "auto" && validation.rule.enabled !== false) {
+    const [settings, runs] = await Promise.all([settingsRecord(), readAll("bankRuleRuns")]);
+    const fingerprint = await ruleChecksum(activationRuleShape(validation.rule as Rec));
+    const tokenHash = activationToken ? await sha256(activationToken) : "";
+    const run = runs.find((item) => item.kind === "dry-run" && item.activation?.tokenHash === tokenHash
+      && item.activation?.ruleFingerprint === fingerprint
+      && Number(item.activation?.expectedVersion) === Math.max(0, Math.floor(Number(expectedVersion || 0)))
+      && Number(item.activation?.settingsVersion) === Number(settings.settingsVersion)
+      && item.actor === String(user.id) && Number(item.activation?.expiresAt || 0) >= now);
+    if (!run) return { ok: false, error: "Сначала выполните проверку этого auto-правила и явно подтвердите включение" };
+    activation = { activationRunId: run.id, activationFingerprint: fingerprint };
+  }
   const rule = {
     ...validation.rule,
+    ...activation,
     id,
     enabled: validation.rule.enabled !== false,
     createdBy: current?.createdBy || user.id,
@@ -141,13 +164,13 @@ export async function saveBankRule(user: Rec, source: Rec, expectedVersion: unkn
   return result as Rec;
 }
 
-export async function enableBankRule(user: Rec, id: unknown, enabled: unknown, expectedVersion: unknown) {
+export async function enableBankRule(user: Rec, id: unknown, enabled: unknown, expectedVersion: unknown, activationToken?: unknown) {
   const deny = adminError(user);
   if (deny) return { ok: false, error: deny };
   const current = await readOne("bankRules", String(id || ""));
   if (!current) return { ok: false, error: "Правило не найдено" };
   if (current.deleted === true && enabled === true) return { ok: false, error: "Архивное правило нельзя включить" };
-  return await saveBankRule(user, { ...current, enabled: enabled === true }, expectedVersion);
+  return await saveBankRule(user, { ...current, enabled: enabled === true, activationToken }, expectedVersion);
 }
 
 export async function deleteBankRule(user: Rec, id: unknown, expectedVersion: unknown) {
@@ -201,25 +224,38 @@ export async function previewBankRuleTransaction(user: Rec, transactionId: unkno
   return { ok: true, evaluation: publicBankRuleEvaluation(result as Rec), evaluationToken: bankRuleEvaluationToken(transaction, result) };
 }
 
-export async function dryRunBankRules(user: Rec, draft?: Rec) {
+export async function dryRunBankRules(user: Rec, draft?: Rec, expectedVersion: unknown = 0) {
   const deny = adminError(user);
   if (deny) return { ok: false, error: deny };
   let rules = await readAll("bankRules");
+  let activationToken = "";
+  let activation: Rec | undefined;
   if (draft) {
     const validation = validateBankRule(draft);
     if (!validation.ok) return { ok: false, error: validation.errors[0], errors: validation.errors };
     const id = String(validation.rule.id || "draft");
     rules = [{ ...validation.rule, id, version: validation.rule.version || 0 }, ...rules.filter((rule) => rule.id !== id)];
+    if (validation.rule.decision === "auto" && validation.rule.enabled !== false) {
+      activationToken = `activate:${crypto.randomUUID()}:${crypto.randomUUID()}`;
+      activation = {
+        tokenHash: await sha256(activationToken),
+        ruleFingerprint: await ruleChecksum(activationRuleShape(validation.rule as Rec)),
+        expectedVersion: Math.max(0, Math.floor(Number(expectedVersion || 0))),
+        settingsVersion: (await settingsRecord()).settingsVersion,
+        expiresAt: Date.now() + 15 * 60 * 1000,
+      };
+    }
   }
   const queue = await readAll("bankTransactions");
   const summary = aggregateBankRulePreview(queue, rules, await settingsRecord());
   const run: Rec = {
     id: `bank-rule-run:${crypto.randomUUID()}`, kind: "dry-run", summary,
     engineVersion: BANK_RULE_ENGINE_VERSION, actor: String(user.id), created: Date.now(),
+    ...(activation ? { activation } : {}),
   };
   const { error } = await callRpc("bank_rule_append_run", { p_run: run });
   if (error) return { ok: false, error: "Не удалось сохранить безопасный итог проверки" };
-  return { ok: true, summary };
+  return { ok: true, summary, ...(activationToken ? { activationToken, expiresAt: activation?.expiresAt } : {}) };
 }
 
 async function currentLimitContext(ruleId: string, runId = "") {
@@ -315,8 +351,12 @@ async function applyEvaluated(
       missingSignals: result.missingSignals?.length || 0,
       strongEvidenceCount: result.strongEvidenceCount || 0,
       contextEvidenceCount: result.contextEvidenceCount || 0,
+      duplicateEvidenceCount: result.duplicateEvidenceCount || 0,
     },
     actionSnapshot: actions, financeId, queueFingerprint: fingerprint, amountMinor,
+    operationDate: transaction.date, businessId: actions.businessId,
+    category: actions.category, method: finance.method,
+    auditRef: `audit-${applicationId.slice(-8)}`, canReverse: true,
     actor: actor === "cron" ? "cron" : String(user?.id || ""),
     day: new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Moscow" }).format(new Date()),
     created: now,
@@ -445,32 +485,46 @@ export async function reevaluateBankTransaction(user: Rec, transactionId: unknow
   return await previewBankRuleTransaction(user, transactionId);
 }
 
-function safeApplication(item: Rec) {
-  const {
-    amountMinor: _amount, queueFingerprint: _fingerprint, actionSnapshot: _actions,
-    before: _before, after: _after, financeFingerprint: _financeFingerprint, ...safe
-  } = item;
-  const classification = (value: Rec | undefined) => value ? {
-    category: value.category, method: value.method, owner: value.owner,
-  } : undefined;
-  return { ...safe, ...(item.before ? { before: classification(item.before as Rec) } : {}), ...(item.after ? { after: classification(item.after as Rec) } : {}) };
+function safeApplication(item: Rec, finance?: Rec) {
+  return {
+    id: String(item.id || ""),
+    decision: String(item.decision || ""),
+    state: String(item.state || ""),
+    operation: String(item.operation || ""),
+    appliedRuleId: item.appliedRuleId ? String(item.appliedRuleId) : undefined,
+    appliedRuleVersion: item.appliedRuleVersion === undefined ? undefined : Number(item.appliedRuleVersion),
+    created: Number(item.created || 0),
+    auditRef: String(item.auditRef || `audit-${String(item.id || "").slice(-8)}`),
+    operationDate: item.operationDate || finance?.date,
+    businessId: item.businessId || finance?.businessId || finance?.unit,
+    category: item.category || finance?.category,
+    method: item.method || finance?.method,
+    canReverse: item.canReverse !== false && item.operation !== "legacy_backfill",
+  };
 }
 
-export async function bankRuleJournal(user: Rec, limit: unknown = 100) {
+export async function bankRuleJournal(user: Rec, limit: unknown = 50, offset: unknown = 0) {
   const deny = adminError(user);
   if (deny) return { ok: false, error: deny };
-  const count = Math.min(200, Math.max(1, Math.floor(Number(limit || 100))));
-  const applications = (await readAll("bankRuleApplications"))
-    .sort((a, b) => Number(b.created || 0) - Number(a.created || 0)).slice(0, count).map(safeApplication);
-  return { ok: true, applications };
+  const count = Math.min(100, Math.max(1, Math.floor(Number(limit || 50))));
+  const start = Math.min(10000, Math.max(0, Math.floor(Number(offset || 0))));
+  const [allApplications, finance] = await Promise.all([readAll("bankRuleApplications"), readAll("finance")]);
+  const financeById = new Map(finance.map((item) => [String(item.id), item]));
+  const ordered = allApplications.sort((a, b) => Number(b.created || 0) - Number(a.created || 0) || String(b.id).localeCompare(String(a.id)));
+  const applications = ordered.slice(start, start + count).map((item) => safeApplication(item, financeById.get(String(item.financeId))));
+  const nextOffset = start + applications.length;
+  return { ok: true, applications, hasMore: nextOffset < ordered.length, nextOffset };
 }
 
 export async function correctBankRuleApplication(user: Rec, applicationId: unknown, patch: Rec, idempotencyKey: unknown) {
   const deny = adminError(user);
   if (deny) return { ok: false, error: deny };
   const allowed = ["category", "method", "owner", "comment", "counterparty"];
+  const clearable = new Set(["owner", "comment", "counterparty"]);
   if (Object.keys(patch || {}).some((key) => !allowed.includes(key))) return { ok: false, error: "Можно исправить только классификацию" };
-  if (Object.values(patch || {}).some((value) => typeof value !== "string")) return { ok: false, error: "Поля исправления должны быть строками" };
+  if (Object.entries(patch || {}).some(([key, value]) => typeof value !== "string" && !(value === null && clearable.has(key)))) {
+    return { ok: false, error: "Поля исправления должны быть строками или явным очищением" };
+  }
   if (patch.category !== undefined && (!String(patch.category).trim() || String(patch.category).length > 120)) return { ok: false, error: "Некорректная категория" };
   if (patch.method !== undefined && !["account", "card", "sbp", "cash", "other"].includes(String(patch.method))) return { ok: false, error: "Некорректный способ оплаты" };
   if (patch.owner !== undefined && String(patch.owner).length > 128) return { ok: false, error: "Некорректный владелец" };

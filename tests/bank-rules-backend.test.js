@@ -56,12 +56,40 @@ test('sync сохраняет нормализованный снимок без
   assert.match(bank, /!queuedDuplicate\.bankSignals\?\.schemaVersion/);
 });
 
-test('backup restore новых immutable сущностей идёт отдельным графом', async () => {
+test('backup restore целиком идёт одним атомарным графом без предварительных записей', async () => {
   const actions = await read('supabase/functions/api/actions.ts');
-  assert.match(actions, /!BANK_RULE_ENTITIES\.includes\(entity\)/);
-  assert.match(actions, /callRpc\("bank_rule_restore_graph"/);
+  const restore = actions.slice(actions.indexOf('export async function migrateImport'));
+  assert.match(restore, /!BANK_RULE_ENTITIES\.includes\(entity\)/);
+  assert.match(restore, /callRpc\("restore_monetki_backup"/);
+  assert.match(restore, /bankFinance/);
   assert.match(actions, /bankTransactions: payload\?\.bankTransactions \|\| \[\]/);
-  assert.ok(actions.indexOf('for (const item of payload?.bankTransactions || [])') < actions.indexOf('callRpc("bank_rule_restore_graph"'));
+  assert.doesNotMatch(restore, /writeRow\(/);
+  assert.equal((restore.match(/callRpc\(/g) || []).length, 1);
+});
+
+test('auto-правило требует серверный dry-run token, версию и fingerprint', async () => {
+  const [actions, http] = await Promise.all([
+    read('supabase/functions/api/bank-rule-actions.ts'), read('supabase/functions/api/http.ts'),
+  ]);
+  assert.match(actions, /activationRuleShape/);
+  assert.match(actions, /activationToken = `activate:\$\{crypto\.randomUUID\(\)\}/);
+  assert.match(actions, /activation\?\.tokenHash === tokenHash/);
+  assert.match(actions, /activation\?\.ruleFingerprint === fingerprint/);
+  assert.match(actions, /activation\?\.expectedVersion/);
+  assert.match(actions, /activation\?\.settingsVersion/);
+  assert.match(actions, /activation\?\.expiresAt/);
+  assert.match(http, /dryRunBankRules\(user, body\.draft, body\.expectedVersion\)/);
+  assert.match(http, /enableBankRule\(user, body\.id, body\.enabled, body\.expectedVersion, body\.activationToken\)/);
+});
+
+test('журнал имеет стабильную пагинацию и безопасную ориентацию без банковских реквизитов', async () => {
+  const actions = await read('supabase/functions/api/bank-rule-actions.ts');
+  const journal = actions.slice(actions.indexOf('function safeApplication'), actions.indexOf('export async function correctBankRuleApplication'));
+  assert.match(journal, /offset/);
+  assert.match(journal, /hasMore/);
+  assert.match(journal, /nextOffset/);
+  for (const field of ['auditRef', 'operationDate', 'businessId', 'category', 'method']) assert.match(journal, new RegExp(field));
+  assert.doesNotMatch(journal, /bankId|bankSignals|phone|amountMinor/);
 });
 
 test('generic server CRUD проверяет существующую finance, а не только входной patch', async () => {

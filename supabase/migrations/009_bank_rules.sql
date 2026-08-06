@@ -51,6 +51,32 @@ values ('bankRuleSettingVersions', 'bank-rule-settings:v1', jsonb_build_object(
   'maxTransactionsPerRun', 10, 'maxTransactionsPerDay', 20, 'maxTotalAmountMinorPerDay', 5000000
 )) on conflict (entity, id) do nothing;
 
+-- Старые банковские finance могли быть созданы до появления журнала правил.
+-- Создаём для них безопасную базовую запись аудита, чтобы классификацию можно
+-- было исправлять только специальным RPC, не открывая generic CRUD.
+insert into public.records(entity, id, data)
+select 'bankRuleApplications', 'bank-application:legacy:' || md5(finance.id), jsonb_build_object(
+  'id', 'bank-application:legacy:' || md5(finance.id),
+  'idempotencyKey', 'legacy:' || md5(finance.id),
+  'operation', 'legacy_backfill', 'decision', 'legacy', 'state', 'applied',
+  'financeId', finance.id, 'financeFingerprint', md5(finance.data::text),
+  'operationDate', finance.data->>'date', 'businessId', finance.data->>'businessId',
+  'category', finance.data->>'category', 'method', finance.data->>'method',
+  'auditRef', 'legacy-' || left(md5(finance.id), 8), 'canReverse', false,
+  'actor', 'migration', 'created', case
+    when coalesce(finance.data->>'updated', '') ~ '^[0-9]+$' then (finance.data->>'updated')::bigint
+    when coalesce(finance.data->>'created', '') ~ '^[0-9]+$' then (finance.data->>'created')::bigint
+    else 0 end
+)
+from public.records finance
+where finance.entity = 'finance'
+  and (coalesce(finance.data->>'source', '') = 'bank' or coalesce(finance.data->>'bankId', '') <> '')
+  and not exists (
+    select 1 from public.records application
+    where application.entity = 'bankRuleApplications' and application.data->>'financeId' = finance.id
+  )
+on conflict (entity, id) do nothing;
+
 create or replace function public.bank_rules_protect_records()
 returns trigger
 language plpgsql
@@ -174,6 +200,8 @@ declare
   v_current jsonb;
   v_version integer;
   v_snapshot jsonb;
+  v_run jsonb;
+  v_settings jsonb;
 begin
   if v_id !~ '^bank-rule:[A-Za-z0-9:_-]{3,150}$' or coalesce(p_rule->>'name', '') = ''
       or coalesce(p_rule->>'decision', '') not in ('suggest', 'auto', 'ignore', 'manual')
@@ -184,6 +212,18 @@ begin
   select data into v_current from public.records where entity = 'bankRules' and id = v_id for update;
   if coalesce((v_current->>'version')::integer, 0) <> coalesce(p_expected_version, 0) then
     raise exception 'Правило уже изменено';
+  end if;
+  if p_rule->>'decision' = 'auto' and coalesce((p_rule->>'enabled')::boolean, true) then
+    select data into v_run from public.records where entity = 'bankRuleRuns' and id = p_rule->>'activationRunId';
+    select data into v_settings from public.records where entity = 'bankRuleSettings' and id = 'bank-rule-settings';
+    if v_run is null or v_run->>'kind' is distinct from 'dry-run'
+        or v_run->>'actor' is distinct from p_actor
+        or v_run->'activation'->>'ruleFingerprint' is distinct from p_rule->>'activationFingerprint'
+        or coalesce((v_run->'activation'->>'expectedVersion')::integer, -1) <> coalesce(p_expected_version, 0)
+        or coalesce((v_run->'activation'->>'settingsVersion')::integer, -1) <> coalesce((v_settings->>'settingsVersion')::integer, 0)
+        or coalesce((v_run->'activation'->>'expiresAt')::bigint, 0) < floor(extract(epoch from clock_timestamp()) * 1000) then
+      raise exception 'Auto-правило не подтверждено актуальной проверкой';
+    end if;
   end if;
   if (v_current is null and coalesce(p_rule->>'createdBy', '') <> p_actor)
       or (v_current is not null and (p_rule->>'createdBy' is distinct from v_current->>'createdBy'
@@ -300,6 +340,9 @@ declare
   v_contact_id text;
   v_auto boolean := coalesce((p_payload->>'auto')::boolean, false);
   v_limit_failed boolean := false;
+  v_unique_strong integer := 0;
+  v_unique_context integer := 0;
+  v_duplicate_evidence integer := 0;
 begin
   if v_key !~ '^[A-Za-z0-9:_-]{8,160}$' or v_checksum = '' then raise exception 'Некорректный ключ повторяемости'; end if;
   perform pg_advisory_xact_lock(hashtextextended('bank-app:' || v_key, 0));
@@ -376,6 +419,33 @@ begin
     select data into v_version from public.records where entity = 'bankRuleVersions'
       and data->>'ruleId' = v_application->>'appliedRuleId'
       and (data->>'version')::integer = (v_application->>'appliedRuleVersion')::integer;
+    with conditions as (
+      select value from jsonb_array_elements(coalesce(v_rule->'conditions'->'all', '[]'::jsonb))
+      union all select value from jsonb_array_elements(coalesce(v_rule->'conditions'->'any', '[]'::jsonb))
+      union all select value from jsonb_array_elements(coalesce(v_rule->'conditions'->'none', '[]'::jsonb))
+    ), evidence as (
+      select value->>'field' as field,
+        case
+          when value->>'field' = 'sourceAccountKey' then 'source-account'
+          when value->>'field' like 'sender.%' then 'sender'
+          when value->>'field' like 'recipient.%' then 'recipient'
+          when value->>'field' = 'descriptionNormalized' then 'description'
+          when value->>'field' in ('schemeName', 'transactionTypeCode', 'detectedMethod') then 'payment-method'
+          else value->>'field'
+        end as family,
+        case
+          when value->>'field' in ('sourceAccountKey', 'sender.phoneE164', 'recipient.phoneE164', 'sender.inn', 'recipient.inn', 'sender.accountKey', 'recipient.accountKey')
+            and value->>'op' = 'exact' then 'strong'
+          when value->>'field' in ('sender.nameNormalized', 'recipient.nameNormalized', 'descriptionNormalized', 'schemeName', 'transactionTypeCode', 'currency') then 'context'
+          else 'weak'
+        end as kind
+      from conditions
+    )
+    select count(distinct family) filter (where kind = 'strong'),
+      count(distinct family) filter (where kind = 'context'),
+      count(*) - count(distinct field) filter (where kind <> 'weak')
+    into v_unique_strong, v_unique_context, v_duplicate_evidence
+    from evidence where kind <> 'weak';
     if v_rule is null or v_version is null or v_rule->>'enabled' = 'false'
         or v_rule->>'decision' is distinct from 'auto' or v_version->>'decision' is distinct from 'auto'
         or v_application->>'decision' is distinct from 'auto' or v_application->>'requestedDecision' is distinct from 'auto'
@@ -384,6 +454,10 @@ begin
         or coalesce((v_application->'explanation'->>'amountOnly')::boolean, false)
         or coalesce((v_application->'explanation'->>'conflict')::boolean, false)
         or coalesce((v_application->'explanation'->>'missingSignals')::integer, 0) > 0
+        or coalesce((v_application->'explanation'->>'duplicateEvidenceCount')::integer, 0) > 0
+        or v_duplicate_evidence > 0
+        or coalesce((v_application->'explanation'->>'strongEvidenceCount')::integer, 0) > v_unique_strong
+        or coalesce((v_application->'explanation'->>'contextEvidenceCount')::integer, 0) > v_unique_context
         or (coalesce((v_application->'explanation'->>'strongEvidenceCount')::integer, 0) < 1
           and coalesce((v_application->'explanation'->>'contextEvidenceCount')::integer, 0) < 2) then v_limit_failed := true; end if;
     if not v_limit_failed then
@@ -521,8 +595,9 @@ begin
       or (p_patch ? 'counterparty' and length(coalesce(p_patch->>'counterparty', '')) > 160) then
     raise exception 'Некорректные значения исправления';
   end if;
-  if exists (select 1 from jsonb_each(p_patch) as fields(key, value) where jsonb_typeof(value) <> 'string') then
-    raise exception 'Поля исправления должны быть строками';
+  if exists (select 1 from jsonb_each(p_patch) as fields(key, value)
+    where jsonb_typeof(value) <> 'string' and not (jsonb_typeof(value) = 'null' and key in ('owner', 'comment', 'counterparty'))) then
+    raise exception 'Поля исправления должны быть строками или явным очищением';
   end if;
   perform pg_advisory_xact_lock(hashtextextended('bank-app:' || p_idempotency_key, 0));
   select data into v_existing from public.records where entity = 'bankRuleApplications' and data->>'idempotencyKey' = p_idempotency_key;
@@ -556,6 +631,9 @@ begin
     'sourceApplicationId', p_application_id, 'patchChecksum', md5(p_patch::text),
     'financeId', v_source->>'financeId', 'supersedes', v_source->>'id',
     'before', v_before, 'after', v_after, 'actor', p_actor,
+    'operationDate', v_finance->>'date', 'businessId', v_finance->>'businessId',
+    'category', v_finance->>'category', 'method', v_finance->>'method',
+    'auditRef', 'audit-' || right(md5(v_id), 8), 'canReverse', coalesce((v_source->>'canReverse')::boolean, true),
     'financeFingerprint', md5(v_finance::text), 'created', floor(extract(epoch from clock_timestamp()) * 1000)
   );
   insert into public.records(entity, id, data) values ('bankRuleApplications', v_id, v_audit);
@@ -596,6 +674,9 @@ begin
   select data into v_source from public.records where entity = 'bankRuleApplications'
     and data->>'financeId' = v_requested->>'financeId' and data->>'state' in ('applied', 'corrected')
     order by coalesce((data->>'created')::bigint, 0) desc, id desc limit 1;
+  if coalesce((v_source->>'canReverse')::boolean, true) = false or coalesce(v_source->>'operation', '') = 'legacy_backfill' then
+    raise exception 'Историческую банковскую операцию можно исправить, но нельзя вернуть в очередь';
+  end if;
   select data into v_finance from public.records where entity = 'finance' and id = v_source->>'financeId' for update;
   if v_finance is null or md5(v_finance::text) is distinct from v_source->>'financeFingerprint' then raise exception 'Финансовая операция уже изменилась'; end if;
   if exists (select 1 from public.records where entity = 'financeRelations' and data->>'financeId' = v_source->>'financeId')
@@ -641,14 +722,60 @@ declare
   v_entity text;
   v_item jsonb;
   v_existing jsonb;
+  v_existing_entity text;
   v_finance jsonb;
   v_target jsonb;
   v_relation_entity text;
+  v_amount_minor bigint;
   v_count integer := 0;
 begin
   if jsonb_typeof(p_graph) <> 'object' then raise exception 'Некорректная резервная копия правил'; end if;
   perform pg_advisory_xact_lock(hashtext('bank_rule_restore_graph'));
   perform set_config('app.bank_rules_rpc', 'restore', true);
+  if jsonb_typeof(coalesce(p_graph->'bankFinance', '[]'::jsonb)) <> 'array' then
+    raise exception 'Некорректный раздел банковских финансов';
+  end if;
+  for v_item in select value from jsonb_array_elements(coalesce(p_graph->'bankFinance', '[]'::jsonb)) loop
+    if coalesce(v_item->>'id', '') = '' or coalesce(v_item->>'bankId', '') = ''
+        or v_item->>'source' is distinct from 'bank'
+        or coalesce(v_item->>'businessId', '') = '' or v_item->>'unit' is distinct from v_item->>'businessId'
+        or v_item->>'type' not in ('income', 'expense')
+        or coalesce((v_item->>'amount')::numeric, 0) <= 0 then
+      raise exception 'Некорректная банковская финансовая операция';
+    end if;
+    if coalesce(v_item->'bankSignals', '{}'::jsonb) <> '{}'::jsonb then
+      begin
+        v_amount_minor := (v_item->'bankSignals'->>'amountMinor')::bigint;
+      exception when others then
+        raise exception 'bankSignals финансовой операции не согласован';
+      end;
+      if v_amount_minor <= 0 or v_amount_minor is distinct from round((v_item->>'amount')::numeric * 100)::bigint
+          or v_item->'bankSignals'->>'direction' is distinct from v_item->>'type' then
+        raise exception 'bankSignals финансовой операции не согласован';
+      end if;
+    end if;
+    if not exists (select 1 from public.records where entity = 'businesses' and id = v_item->>'businessId') then
+      raise exception 'Бизнес банковской финансовой операции не найден';
+    end if;
+    if coalesce(v_item->>'owner', '') <> '' and not exists (
+      select 1 from public.records where entity = 'businessOwners'
+      and data->>'businessId' = v_item->>'businessId' and data->>'unit' = v_item->>'businessId'
+      and data->>'ownerId' = v_item->>'owner' and coalesce(data->>'active', 'true') <> 'false'
+    ) then raise exception 'Владелец банковской операции не относится к бизнесу'; end if;
+    perform pg_advisory_xact_lock(hashtextextended(v_item->>'bankId', 0));
+    select entity, data into v_existing_entity, v_existing from public.records
+    where (entity = 'finance' and (id = v_item->>'id' or data->>'bankId' = v_item->>'bankId'))
+       or (entity = 'bankTransactions' and data->>'bankId' = v_item->>'bankId')
+    order by entity, id limit 1 for update;
+    if v_existing is not null then
+      if v_existing_entity <> 'finance' or v_existing is distinct from v_item then
+        raise exception 'Резервная банковская финансовая операция конфликтует с существующей записью';
+      end if;
+    else
+      insert into public.records(entity, id, data) values ('finance', v_item->>'id', v_item);
+    end if;
+    v_count := v_count + 1;
+  end loop;
   foreach v_entity in array array['bankRules', 'bankRuleVersions', 'bankRuleSettingVersions', 'bankRuleApplications', 'bankRuleRuns', 'bankRuleSettings', 'financeRelations'] loop
     if jsonb_typeof(coalesce(p_graph->v_entity, '[]'::jsonb)) <> 'array' then raise exception 'Некорректный раздел правил'; end if;
     for v_item in select value from jsonb_array_elements(coalesce(p_graph->v_entity, '[]'::jsonb)) loop
@@ -723,6 +850,31 @@ begin
       v_count := v_count + 1;
     end loop;
   end loop;
+  for v_item in select value from jsonb_array_elements(coalesce(p_graph->'bankFinance', '[]'::jsonb)) loop
+    if coalesce(v_item->>'applicationId', '') <> '' and not exists (
+      select 1 from public.records where entity = 'bankRuleApplications'
+      and id = v_item->>'applicationId' and data->>'financeId' = v_item->>'id'
+    ) then raise exception 'Применение правила банковской операции не найдено'; end if;
+    if coalesce(v_item->>'applicationId', '') = '' and not exists (
+      select 1 from public.records where entity = 'bankRuleApplications' and data->>'financeId' = v_item->>'id'
+    ) then
+      v_target := jsonb_build_object(
+        'id', 'bank-application:legacy:' || md5(v_item->>'id'),
+        'idempotencyKey', 'legacy:' || md5(v_item->>'id'),
+        'operation', 'legacy_backfill', 'decision', 'legacy', 'state', 'applied',
+        'financeId', v_item->>'id', 'financeFingerprint', md5(v_item::text),
+        'operationDate', v_item->>'date', 'businessId', v_item->>'businessId',
+        'category', v_item->>'category', 'method', v_item->>'method',
+        'auditRef', 'legacy-' || left(md5(v_item->>'id'), 8), 'canReverse', false,
+        'actor', 'restore', 'created', case
+          when coalesce(v_item->>'updated', '') ~ '^[0-9]+$' then (v_item->>'updated')::bigint
+          when coalesce(v_item->>'created', '') ~ '^[0-9]+$' then (v_item->>'created')::bigint
+          else 0 end
+      );
+      insert into public.records(entity, id, data) values ('bankRuleApplications', v_target->>'id', v_target);
+      v_count := v_count + 1;
+    end if;
+  end loop;
   if jsonb_typeof(coalesce(p_graph->'bankTransactions', '[]'::jsonb)) <> 'array' then
     raise exception 'Некорректный раздел банковской очереди';
   end if;
@@ -747,6 +899,56 @@ begin
 end;
 $$;
 
+create or replace function public.restore_monetki_backup(p_graph jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  v_entity text;
+  v_item jsonb;
+  v_bank_result jsonb;
+  v_event_result jsonb;
+  v_count integer := 0;
+begin
+  if jsonb_typeof(p_graph) <> 'object'
+      or jsonb_typeof(coalesce(p_graph->'ordinary', '{}'::jsonb)) <> 'object'
+      or jsonb_typeof(coalesce(p_graph->'bank', '{}'::jsonb)) <> 'object'
+      or jsonb_typeof(coalesce(p_graph->'events', '{}'::jsonb)) <> 'object' then
+    raise exception 'Некорректная резервная копия';
+  end if;
+  perform pg_advisory_xact_lock(hashtext('restore_monetki_backup'));
+  foreach v_entity in array array[
+    'businesses', 'memberships', 'businessOwners', 'employees', 'clients', 'companies', 'contacts', 'leads', 'deals',
+    'pipelines', 'stages', 'dealItems', 'venues', 'players', 'tasks', 'finance', 'staffExpenses', 'cash', 'notifications',
+    'warehouses', 'stockItems', 'stockMovements', 'stockBalances', 'reservations', 'inventories', 'files'
+  ] loop
+    if jsonb_typeof(coalesce(p_graph->'ordinary'->v_entity, '[]'::jsonb)) <> 'array' then
+      raise exception 'Некорректный раздел резервной копии';
+    end if;
+    for v_item in select value from jsonb_array_elements(coalesce(p_graph->'ordinary'->v_entity, '[]'::jsonb)) loop
+      if coalesce(v_item->>'id', '') = '' then raise exception 'У записи резервной копии нет id'; end if;
+      if v_entity = 'finance' and (
+          coalesce(v_item->>'source', '') = 'bank' or coalesce(v_item->>'bankId', '') <> ''
+          or v_item ?| array['bankQueueId', 'bankSignals', 'bankSignalFingerprint', 'bankOriginal', 'appliedRuleId', 'appliedRuleVersion', 'applicationId']
+        ) then raise exception 'Банковская finance должна восстанавливаться банковским графом'; end if;
+      insert into public.records(entity, id, data) values (v_entity, v_item->>'id', v_item)
+      on conflict (entity, id) do update set data = excluded.data;
+      v_count := v_count + 1;
+    end loop;
+  end loop;
+  v_bank_result := public.bank_rule_restore_graph(p_graph->'bank');
+  if coalesce((v_bank_result->>'ok')::boolean, false) = false then raise exception 'Не удалось восстановить банковский граф'; end if;
+  v_event_result := public.event_restore_graph(p_graph->'events');
+  if coalesce((v_event_result->>'ok')::boolean, false) = false then raise exception 'Не удалось восстановить граф событий'; end if;
+  return jsonb_build_object(
+    'ok', true,
+    'restored', v_count + coalesce((v_bank_result->>'restored')::integer, 0) + coalesce((v_event_result->>'restored')::integer, 0)
+  );
+end;
+$$;
+
 revoke all on function public.bank_enqueue_transaction(jsonb) from public, anon, authenticated;
 revoke all on function public.bank_rule_save(jsonb, integer, text) from public, anon, authenticated;
 revoke all on function public.bank_rule_settings_save(jsonb, integer, text) from public, anon, authenticated;
@@ -755,6 +957,7 @@ revoke all on function public.apply_bank_rule_transaction(jsonb) from public, an
 revoke all on function public.correct_bank_rule_transaction(text, jsonb, text, text) from public, anon, authenticated;
 revoke all on function public.reverse_bank_rule_transaction(text, text, text) from public, anon, authenticated;
 revoke all on function public.bank_rule_restore_graph(jsonb) from public, anon, authenticated;
+revoke all on function public.restore_monetki_backup(jsonb) from public, anon, authenticated;
 grant execute on function public.bank_enqueue_transaction(jsonb) to service_role;
 grant execute on function public.bank_rule_save(jsonb, integer, text) to service_role;
 grant execute on function public.bank_rule_settings_save(jsonb, integer, text) to service_role;
@@ -763,5 +966,6 @@ grant execute on function public.apply_bank_rule_transaction(jsonb) to service_r
 grant execute on function public.correct_bank_rule_transaction(text, jsonb, text, text) to service_role;
 grant execute on function public.reverse_bank_rule_transaction(text, text, text) to service_role;
 grant execute on function public.bank_rule_restore_graph(jsonb) to service_role;
+grant execute on function public.restore_monetki_backup(jsonb) to service_role;
 
 notify pgrst, 'reload schema';

@@ -33,6 +33,19 @@ test('restore восстанавливает правила и очередь о
   assert.ok(relation.indexOf('pg_advisory_xact_lock') < relation.lastIndexOf('for update'));
 });
 
+test('полный backup восстанавливается одной транзакцией: обычные записи → bank finance → events', () => {
+  const restore = migration.slice(migration.indexOf('function public.restore_monetki_backup'));
+  assert.match(restore, /p_graph->'ordinary'/);
+  assert.match(restore, /p_graph->'bank'/);
+  assert.match(restore, /p_graph->'events'/);
+  assert.match(migration.slice(migration.indexOf('function public.bank_rule_restore_graph'), migration.indexOf('function public.restore_monetki_backup')), /p_graph->'bankFinance'/);
+  const bankAt = restore.indexOf('bank_rule_restore_graph');
+  const eventAt = restore.indexOf('event_restore_graph');
+  assert.ok(bankAt > 0 && eventAt > bankAt);
+  assert.match(migration, /revoke all on function public\.restore_monetki_backup\(jsonb\) from public, anon, authenticated/);
+  assert.match(migration, /grant execute on function public\.restore_monetki_backup\(jsonb\) to service_role/);
+});
+
 test('складская проводка блокирует связанную finance до создания движения', () => {
   const movement = stockMigration.slice(stockMigration.indexOf('function stock_apply_movement'));
   assert.match(movement, /v_finance jsonb/);
@@ -62,6 +75,10 @@ test('auto off/версии/unknown/conflict/amount-only и лимиты про�
   ]) assert.match(migration, new RegExp(token), token);
   assert.match(migration, /state', 'downgraded'/);
   assert.match(migration, /time zone 'Europe\/Moscow'/);
+  assert.match(migration, /v_unique_strong/);
+  assert.match(migration, /v_unique_context/);
+  assert.match(migration, /v_duplicate_evidence/);
+  assert.match(migration, /duplicateEvidenceCount/);
 });
 
 test('версии, аудит, запуски и relations неизменяемы триггером', () => {
@@ -88,6 +105,16 @@ test('correction сохраняет денежные поля, reverse блок�
   assert.match(correct, /state' in \('applied', 'corrected'\)/);
   assert.match(reverse, /state' in \('applied', 'corrected'\)/);
   assert.match(reverse, /alreadyProcessed/);
+  assert.match(correct, /jsonb_typeof\(value\) = 'null'/);
+  assert.match(correct, /key in \('owner', 'comment', 'counterparty'\)/);
+  assert.match(reverse, /legacy_backfill/);
+});
+
+test('legacy bank finance получает контролируемый аудит и остаётся доступной только для correction', () => {
+  assert.match(migration, /'operation', 'legacy_backfill'/);
+  assert.match(migration, /'canReverse', false/);
+  assert.match(migration, /bank-application:legacy:/);
+  assert.match(migration, /'auditRef', 'legacy-'/);
 });
 
 test('повторный deploy снимает immutable trigger до seed, а legacy сумма имеет безопасный fallback', () => {
@@ -118,6 +145,7 @@ test('каждый RPC закрыт от client roles и разрешён тол
     'bank_rule_settings_save\\(jsonb, integer, text\\)', 'bank_rule_append_run\\(jsonb\\)',
     'apply_bank_rule_transaction\\(jsonb\\)', 'correct_bank_rule_transaction\\(text, jsonb, text, text\\)',
     'reverse_bank_rule_transaction\\(text, text, text\\)', 'bank_rule_restore_graph\\(jsonb\\)',
+    'restore_monetki_backup\\(jsonb\\)',
   ]) {
     assert.match(migration, new RegExp(`revoke all on function public\\.${signature} from public, anon, authenticated`));
     assert.match(migration, new RegExp(`grant execute on function public\\.${signature} to service_role`));

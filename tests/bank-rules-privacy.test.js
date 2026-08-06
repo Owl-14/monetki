@@ -47,9 +47,9 @@ test('нормализатор никогда не копирует произв
 test('server preview/journal удаляют fingerprints, суммы и action snapshot из ответа', async () => {
   const actions = await readFile(new URL('../supabase/functions/api/bank-rule-actions.ts', import.meta.url), 'utf8');
   assert.match(actions, /function safeApplication/);
-  assert.match(actions, /amountMinor: _amount/);
-  assert.match(actions, /queueFingerprint: _fingerprint/);
-  assert.match(actions, /actionSnapshot: _actions/);
+  const safe = actions.slice(actions.indexOf('function safeApplication'), actions.indexOf('export async function bankRuleJournal'));
+  assert.doesNotMatch(safe, /\.\.\.safe|amountMinor|queueFingerprint|actionSnapshot|financeFingerprint|bankId|bankSignals|phone|counterparty|comment|owner/);
+  for (const field of ['auditRef', 'operationDate', 'businessId', 'category', 'method']) assert.match(safe, new RegExp(field));
   const shared = await readFile(new URL('../supabase/functions/api/bank-rules.js', import.meta.url), 'utf8');
   assert.match(shared, /missingSignals: \(result\.missingSignals \|\| \[\]\)\.map\(\(\) => 'missing'\)/);
   assert.match(actions, /publicBankRuleEvaluation\(result as Rec\)/);

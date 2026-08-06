@@ -231,6 +231,7 @@ export function validateBankRule(source) {
   const allowedRuleKeys = new Set([
     'id', 'name', 'enabled', 'priority', 'order', 'decision', 'stopOnMatch', 'conditions', 'actions', 'autoLimits',
     'version', 'checksum', 'createdBy', 'updatedBy', 'created', 'updated', 'deleted', 'deletedAt', 'ruleId',
+    'activationRunId', 'activationFingerprint',
   ]);
   Object.keys(rule).forEach((key) => { if (!allowedRuleKeys.has(key)) errors.push(`Поле правила ${key} не разрешено`); });
   if (typeof rule.name !== 'string' || !text(rule.name, 120) || rule.name.length > 120) errors.push('Не указано название правила');
@@ -335,6 +336,15 @@ function evidenceWeight(condition) {
   return { kind: 'weak', weight: condition.field === 'amountMinor' ? 0.12 : 0.1 };
 }
 
+function evidenceFamily(condition) {
+  if (condition.field === 'sourceAccountKey') return 'source-account';
+  if (condition.field.startsWith('sender.')) return 'sender';
+  if (condition.field.startsWith('recipient.')) return 'recipient';
+  if (condition.field === 'descriptionNormalized') return 'description';
+  if (['schemeName', 'transactionTypeCode', 'detectedMethod'].includes(condition.field)) return 'payment-method';
+  return condition.field;
+}
+
 function evaluateOne(rule, signals) {
   const groups = {};
   const matched = [];
@@ -351,9 +361,11 @@ function evaluateOne(rule, signals) {
   }
   const state = groups.all === 'false' || groups.any === 'false' || groups.none === 'false' ? 'false'
     : groups.all === 'unknown' || groups.any === 'unknown' || groups.none === 'unknown' ? 'unknown' : 'true';
-  const evidence = matched.map(evidenceWeight);
-  const strongCount = evidence.filter((item) => item.kind === 'strong').length;
-  const contextCount = evidence.filter((item) => item.kind === 'context').length;
+  const evidence = matched.map((condition) => ({ condition, family: evidenceFamily(condition), ...evidenceWeight(condition) }));
+  const strongCount = new Set(evidence.filter((item) => item.kind === 'strong').map((item) => item.family)).size;
+  const contextCount = new Set(evidence.filter((item) => item.kind === 'context').map((item) => item.family)).size;
+  const evidenceFields = evidence.filter((item) => item.kind !== 'weak').map((item) => item.condition.field);
+  const duplicateEvidenceCount = evidenceFields.length - new Set(evidenceFields).size;
   const onlyWeak = matched.length > 0 && matched.every((item) => WEAK_FIELDS.has(item.field));
   let confidence = evidence.reduce((sum, item) => sum + item.weight, 0);
   const links = rule.actions?.links || {};
@@ -361,7 +373,7 @@ function evaluateOne(rule, signals) {
   if (links.event?.eventId && links.event?.registrationId) confidence += 0.15;
   confidence = Math.min(1, Math.round(confidence * 100) / 100);
   if (onlyWeak) confidence = Math.min(confidence, 0.6);
-  return { rule, state, matched, unknown: [...new Set(unknown)], confidence, strongCount, contextCount, onlyWeak };
+  return { rule, state, matched, unknown: [...new Set(unknown)], confidence, strongCount, contextCount, duplicateEvidenceCount, onlyWeak };
 }
 
 function sameActions(left, right) {
@@ -406,7 +418,8 @@ export function evaluateBankRules(signals, rules, settings = DEFAULT_BANK_RULE_S
   const complete = selected.unknown.length === 0;
   const autoEligible = selected.rule.decision === 'auto' && settings.autoEnabled === true
     && !conflicting.length && complete && !selected.onlyWeak && selected.confidence >= 0.95
-    && strongEnough && limitOk && !!selected.rule.actions?.businessId && !!selected.rule.actions?.category;
+    && strongEnough && selected.duplicateEvidenceCount === 0 && limitOk
+    && !!selected.rule.actions?.businessId && !!selected.rule.actions?.category;
   return {
     decision: autoEligible ? 'auto' : selected.rule.decision === 'auto' ? 'suggest' : selected.rule.decision,
     requestedDecision: selected.rule.decision,
@@ -417,6 +430,7 @@ export function evaluateBankRules(signals, rules, settings = DEFAULT_BANK_RULE_S
     amountOnly: selected.onlyWeak,
     strongEvidenceCount: selected.strongCount,
     contextEvidenceCount: selected.contextCount,
+    duplicateEvidenceCount: selected.duplicateEvidenceCount,
     limitOk,
     appliedRuleId: selected.rule.id,
     appliedRuleVersion: selected.rule.version,

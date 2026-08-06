@@ -46,7 +46,6 @@ import {
   closeEventSettlement as closeEventSettlementRpc,
   deleteEvent as deleteEventRpc,
   readEventData,
-  restoreEventGraph,
 } from "./events.ts";
 import { ensureCoreData } from "./auth/access.ts";
 import { callRpc, deleteRow, insertRow, kvGet, kvSet, readAll, readOne, writeRow } from "./db/repositories.ts";
@@ -797,21 +796,14 @@ export async function statusInfo(u: Rec | null) {
 export async function migrateImport(u: Rec | null, payload: Record<string, Rec[]>) {
   const empty = (await readAll("employees")).length === 0;
   if (!empty && (!u || !isAdmin(u))) return { ok: false, error: "Только для админа" };
-  let total = 0;
   const ordinaryEntities = BACKUP_ENTITIES.filter((entity) =>
-    !EVENT_ENTITIES.includes(entity) && !BANK_RULE_ENTITIES.includes(entity) && entity !== "employees" && entity !== "bankTransactions"
+    !EVENT_ENTITIES.includes(entity) && !BANK_RULE_ENTITIES.includes(entity) && entity !== "bankTransactions"
   );
-  for (const entity of ordinaryEntities) {
-    for (const item of payload?.[entity] || []) {
-      if (!item || !item.id) continue;
-      await writeRow(entity, item);
-      total++;
-    }
-  }
-  const graph = Object.fromEntries(EVENT_ENTITIES.map((entity) => [entity, payload?.[entity] || []]));
-  const restored = await restoreEventGraph(graph);
-  if (!restored.ok) return { ok: false, error: restored.error || "Не удалось атомарно восстановить данные событий" };
-  total += EVENT_ENTITIES.reduce((sum, entity) => sum + (payload?.[entity] || []).filter((item) => item?.id).length, 0);
+  const bankFinance = (payload?.finance || []).filter(bankManagedFinancePayload);
+  const ordinary = Object.fromEntries(ordinaryEntities.map((entity) => [
+    entity,
+    (payload?.[entity] || []).filter((item) => entity !== "finance" || !bankManagedFinancePayload(item)),
+  ]));
   for (const item of payload?.bankTransactions || []) {
     const amountMinor = Number(item?.bankSignals?.amountMinor);
     const visibleAmountMinor = Math.round(Number(item?.amount) * 100);
@@ -824,20 +816,28 @@ export async function migrateImport(u: Rec | null, payload: Record<string, Rec[]
       return { ok: false, error: "Резервная копия содержит небезопасную банковскую очередь" };
     }
   }
+  for (const item of bankFinance) {
+    const amountMinor = Number(item?.bankSignals?.amountMinor);
+    const hasSignals = Object.keys(item?.bankSignals || {}).length > 0;
+    if (!item?.id || !item?.bankId || item?.source !== "bank" || !isSafeBankSignals(item.bankSignals || {})
+      || ["raw", "payload", "token"].some((key) => item[key] !== undefined)
+      || (hasSignals && (!Number.isSafeInteger(amountMinor) || amountMinor <= 0
+        || amountMinor !== Math.round(Number(item?.amount) * 100)
+        || String(item?.bankSignals?.direction || "") !== String(item?.type || "")))) {
+      return { ok: false, error: "Резервная копия содержит небезопасную банковскую финансовую операцию" };
+    }
+  }
   const bankGraph = {
     ...Object.fromEntries(BANK_RULE_ENTITIES.map((entity) => [entity, payload?.[entity] || []])),
+    bankFinance,
     bankTransactions: payload?.bankTransactions || [],
   };
-  const { data: bankRestored, error: bankRestoreError } = await callRpc("bank_rule_restore_graph", { p_graph: bankGraph });
-  if (bankRestoreError || !(bankRestored as Rec)?.ok) {
-    return { ok: false, error: "Не удалось атомарно восстановить историю банковских правил" };
+  const eventGraph = Object.fromEntries(EVENT_ENTITIES.map((entity) => [entity, payload?.[entity] || []]));
+  const { data: restored, error } = await callRpc("restore_monetki_backup", {
+    p_graph: { ordinary, bank: bankGraph, events: eventGraph },
+  });
+  if (error || !(restored as Rec)?.ok) {
+    return { ok: false, error: "Не удалось атомарно восстановить резервную копию" };
   }
-  total += (payload?.bankTransactions || []).filter((item) => item?.id).length;
-  total += BANK_RULE_ENTITIES.reduce((sum, entity) => sum + (payload?.[entity] || []).filter((item) => item?.id).length, 0);
-  for (const item of payload?.employees || []) {
-    if (!item || !item.id) continue;
-    await writeRow("employees", item);
-    total++;
-  }
-  return { ok: true, imported: total };
+  return { ok: true, imported: Number((restored as Rec).restored || 0) };
 }

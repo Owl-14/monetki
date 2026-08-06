@@ -2213,7 +2213,19 @@ function openBankRuleForm(rule = null, transaction = null) {
         autoLimits: rule?.autoLimits || { maxTransactionsPerDay: 10, maxAmountMinor: 1000000 },
       };
       const submit = form.querySelector('[type=submit]'); submit.disabled = true;
-      const result = await S.store.bankRuleSave(S.token, next, Number(rule?.version || 0));
+      const expectedVersion = Number(rule?.version || 0);
+      if (next.decision === 'auto' && next.enabled) {
+        const dryRun = await S.store.bankRuleDryRun(S.token, next, expectedVersion);
+        if (!dryRun.ok || !dryRun.activationToken) {
+          submit.disabled = false; toast(dryRun.error || 'Не удалось проверить auto-правило', true); return;
+        }
+        const summary = dryRun.summary || {};
+        if (!confirm(`Проверка завершена: совпадений ${Number(summary.matched || 0)}, кандидатов auto ${Number(summary.autoEligible || 0)}, конфликтов ${Number(summary.conflict || 0)}. Включить эту версию правила?`)) {
+          submit.disabled = false; return;
+        }
+        next.activationToken = dryRun.activationToken;
+      }
+      const result = await S.store.bankRuleSave(S.token, next, expectedVersion);
       submit.disabled = false;
       if (!result.ok) { toast(result.error || 'Не удалось сохранить правило', true); return; }
       closeModal(); toast('Новая версия правила сохранена'); await refresh(true); S.bankSubTab = 'settings'; render();
@@ -2224,25 +2236,45 @@ function openBankRuleForm(rule = null, transaction = null) {
 async function renderBankRuleJournal(tabsHtml, bankTabs) {
   $('#view').innerHTML = `${tabsHtml}${bankTabs}<div class="card empty"><div class="big">⏳</div>Загружаю безопасный журнал…</div>`;
   bindBankSubTabs();
-  const result = await S.store.bankRuleJournal(S.token, 100);
+  const result = await S.store.bankRuleJournal(S.token, 50, 0);
   if (currentRoute() !== 'finance' || S.finTab !== 'bank' || S.bankSubTab !== 'journal') return;
   if (!result.ok) { $('#view').insertAdjacentHTML('beforeend', `<div class="banner warn">${esc(result.error || 'Журнал недоступен')}</div>`); return; }
-  const rows = result.applications || [];
-  $('#view').innerHTML = `${tabsHtml}${bankTabs}<div class="banner">Журнал не содержит банковских идентификаторов, реквизитов, имён, телефонов, ИНН и сумм.</div>
-    <div class="list">${rows.length ? rows.map((item) => `<div class="row-card bank-journal-row">
-      <div class="grow col"><div class="title">${esc(item.decision || 'Действие')} · ${esc(item.state || '')}</div><div class="sub">${fmtDT(Number(item.created || 0))}${item.appliedRuleId ? ` · правило ${esc(item.appliedRuleId)} v${Number(item.appliedRuleVersion || 0)}` : ''}</div></div>
-      ${['applied', 'corrected'].includes(item.state) ? `<button class="btn small" data-correct-bank="${esc(item.id)}">Исправить</button><button class="btn small danger ghost" data-reverse-bank="${esc(item.id)}">Безопасно отменить</button>` : ''}
-    </div>`).join('') : '<div class="card empty"><div class="big">📋</div>Журнал пока пуст</div>'}</div>`;
-  bindBankSubTabs();
-  $('#view').querySelectorAll('[data-reverse-bank]').forEach((button) => button.addEventListener('click', async () => {
-    if (!confirm('Вернуть операцию в очередь? Отмена сработает только если финансовая запись и её связи не менялись.')) return;
-    button.disabled = true;
-    const outcome = await S.store.bankRuleReverse(S.token, button.dataset.reverseBank, `reverse:${uid()}`);
-    button.disabled = false;
-    if (!outcome.ok) { toast(outcome.error || 'Безопасная отмена недоступна', true); return; }
-    toast('Операция возвращена в очередь'); await refresh(true); render();
-  }));
-  $('#view').querySelectorAll('[data-correct-bank]').forEach((button) => button.addEventListener('click', () => openBankCorrection(button.dataset.correctBank)));
+  let rows = result.applications || [];
+  let hasMore = result.hasMore === true;
+  let nextOffset = Number(result.nextOffset || rows.length);
+  const paint = () => {
+    $('#view').innerHTML = `${tabsHtml}${bankTabs}<div class="banner">Журнал не содержит банковских идентификаторов, реквизитов, имён, телефонов, ИНН и сумм. Для различения записей показаны только дата, бизнес, классификация и короткая ссылка аудита.</div>
+      <div class="list">${rows.length ? rows.map((item) => {
+        const method = FIN_METHODS.find((entry) => entry.id === item.method)?.name || item.method || '—';
+        const orientation = [item.operationDate ? fmtDate(item.operationDate) : '', item.businessId ? businessName(item.businessId) : '', item.category || '', method]
+          .filter(Boolean).join(' · ');
+        return `<div class="row-card bank-journal-row">
+          <div class="grow col"><div class="title">${esc(item.decision || 'Действие')} · ${esc(item.state || '')} · ${esc(item.auditRef || 'audit')}</div>
+            <div class="sub">${esc(orientation)}${orientation ? ' · ' : ''}${fmtDT(Number(item.created || 0))}${item.appliedRuleId ? ` · правило ${esc(item.appliedRuleId)} v${Number(item.appliedRuleVersion || 0)}` : ''}</div></div>
+          ${['applied', 'corrected'].includes(item.state) ? `<button class="btn small" data-correct-bank="${esc(item.id)}">Исправить</button>${item.canReverse ? `<button class="btn small danger ghost" data-reverse-bank="${esc(item.id)}">Безопасно отменить</button>` : ''}` : ''}
+        </div>`;
+      }).join('') : '<div class="card empty"><div class="big">📋</div>Журнал пока пуст</div>'}</div>
+      ${hasMore ? '<div class="actions"><button class="btn" type="button" id="bank-journal-more">Показать ещё</button></div>' : ''}`;
+    bindBankSubTabs();
+    $('#view').querySelectorAll('[data-reverse-bank]').forEach((button) => button.addEventListener('click', async () => {
+      if (!confirm('Вернуть операцию в очередь? Отмена сработает только если финансовая запись и её связи не менялись.')) return;
+      button.disabled = true;
+      const outcome = await S.store.bankRuleReverse(S.token, button.dataset.reverseBank, `reverse:${uid()}`);
+      button.disabled = false;
+      if (!outcome.ok) { toast(outcome.error || 'Безопасная отмена недоступна', true); return; }
+      toast('Операция возвращена в очередь'); await refresh(true); render();
+    }));
+    $('#view').querySelectorAll('[data-correct-bank]').forEach((button) => button.addEventListener('click', () => openBankCorrection(button.dataset.correctBank)));
+    $('#bank-journal-more')?.addEventListener('click', async (event) => {
+      const button = event.currentTarget; button.disabled = true;
+      const page = await S.store.bankRuleJournal(S.token, 50, nextOffset);
+      if (!page.ok) { button.disabled = false; toast(page.error || 'Не удалось загрузить журнал', true); return; }
+      if (currentRoute() !== 'finance' || S.finTab !== 'bank' || S.bankSubTab !== 'journal') return;
+      rows = [...rows, ...(page.applications || [])]; hasMore = page.hasMore === true;
+      nextOffset = Number(page.nextOffset || rows.length); paint();
+    });
+  };
+  paint();
 }
 
 function openBankCorrection(applicationId) {
@@ -2250,16 +2282,22 @@ function openBankCorrection(applicationId) {
     <form id="bank-correct-form">
       <label class="field"><span>Категория</span><select name="category"><option value="">— не менять —</option>${FIN_CATEGORIES.map((item) => `<option value="${esc(item)}">${esc(item)}</option>`).join('')}</select></label>
       <div class="form-row"><label class="field"><span>Способ оплаты</span><select name="method"><option value="">— не менять —</option>${FIN_METHODS.map((item) => `<option value="${esc(item.id)}">${esc(item.name)}</option>`).join('')}</select></label>
-        <label class="field"><span>Чей личный расход</span><select name="owner"><option value="">— не менять —</option>${(S.data.businessOwners || []).filter((item) => item.active !== false).map((item) => `<option value="${esc(item.ownerId)}">${esc(item.name || ownerLabel(item.ownerId))} · ${esc(businessName(businessIdOf(item)))}</option>`).join('')}</select></label></div>
+        <label class="field"><span>Чей личный расход</span><select name="owner"><option value="">— не менять —</option><option value="__clear__">— очистить владельца —</option>${(S.data.businessOwners || []).filter((item) => item.active !== false).map((item) => `<option value="${esc(item.ownerId)}">${esc(item.name || ownerLabel(item.ownerId))} · ${esc(businessName(businessIdOf(item)))}</option>`).join('')}</select></label></div>
       <label class="field"><span>Контрагент</span><input name="counterparty" maxlength="160" placeholder="Оставьте пустым, чтобы не менять"></label>
+      <label class="checkline"><input type="checkbox" name="clearCounterparty"><span>Очистить контрагента</span></label>
       <label class="field"><span>Комментарий</span><textarea name="comment" maxlength="300" placeholder="Оставьте пустым, чтобы не менять"></textarea></label>
+      <label class="checkline"><input type="checkbox" name="clearComment"><span>Очистить комментарий</span></label>
       <div class="actions"><button class="btn" type="button" id="modal-cancel">Отмена</button><button class="btn primary" type="submit">Записать исправление</button></div>
     </form>`, (root) => {
     $('#modal-cancel', root).addEventListener('click', closeModal);
     $('#bank-correct-form', root).addEventListener('submit', async (event) => {
       event.preventDefault(); const form = event.currentTarget; const submit = form.querySelector('[type=submit]'); submit.disabled = true;
-      const patch = Object.fromEntries(['category', 'method', 'owner', 'counterparty', 'comment']
+      const patch = Object.fromEntries(['category', 'method', 'counterparty', 'comment']
         .map((field) => [field, form.elements[field].value.trim()]).filter(([, value]) => value));
+      if (form.elements.owner.value === '__clear__') patch.owner = null;
+      else if (form.elements.owner.value) patch.owner = form.elements.owner.value;
+      if (form.elements.clearCounterparty.checked) patch.counterparty = null;
+      if (form.elements.clearComment.checked) patch.comment = null;
       if (!Object.keys(patch).length) { submit.disabled = false; toast('Выберите хотя бы одно исправление', true); return; }
       const outcome = await S.store.bankRuleCorrect(S.token, applicationId, patch, `correct:${uid()}`);
       submit.disabled = false;

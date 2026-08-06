@@ -192,3 +192,91 @@ test('LocalStore проверяет связи, stale preview, event allocation 
   const after = JSON.parse(storage.getItem('monetki_demo_db'));
   assert.equal(after.eventFinanceAllocations.some((item) => item.financeId === applied.item.id && item.eventId === 'event-padel'), true);
 });
+
+test('LocalStore включает auto-правило только по свежему dry-run token для той же версии', async () => {
+  install();
+  const store = new LocalStore();
+  const { token } = await store.login('111111');
+  const draft = {
+    name: 'Auto после проверки', enabled: true, priority: 10, order: 1, decision: 'auto', stopOnMatch: false,
+    conditions: { all: [
+      { field: 'direction', op: 'exact', value: 'income' },
+      { field: 'sender.phoneE164', op: 'exact', value: '+79050000000' },
+    ], any: [], none: [] },
+    actions: { businessId: 'padel', category: 'Оплата клиента' },
+  };
+  const denied = await store.bankRuleSave(token, draft, 0);
+  assert.equal(denied.ok, false);
+  assert.match(denied.error, /проверку.*подтвердите/);
+  const dryRun = await store.bankRuleDryRun(token, draft, 0);
+  assert.equal(dryRun.ok, true);
+  assert.match(dryRun.activationToken, /^activate:/);
+  const saved = await store.bankRuleSave(token, { ...draft, activationToken: dryRun.activationToken }, 0);
+  assert.equal(saved.ok, true);
+  assert.equal(saved.rule.activationRunId.startsWith('bank-rule-run:'), true);
+  const stale = await store.bankRuleSave(token, { ...saved.rule, name: 'Изменено', activationToken: dryRun.activationToken }, 1);
+  assert.equal(stale.ok, false);
+});
+
+test('LocalStore создаёт legacy-аудит и позволяет явно очистить поля без небезопасной отмены', async () => {
+  const storage = install();
+  const store = new LocalStore();
+  const { token } = await store.login('111111');
+  const db = JSON.parse(storage.getItem('monetki_demo_db'));
+  db.finance.push({
+    id: 'legacy-bank-finance', businessId: 'padel', unit: 'padel', source: 'bank', bankId: 'legacy-bank-id',
+    type: 'expense', amount: 1200, date: '2026-07-19', method: 'account', category: 'Прочее',
+    owner: 'savva', counterparty: 'Получатель', comment: 'Старый комментарий', created: 100, updated: 100,
+  });
+  storage.setItem('monetki_demo_db', JSON.stringify(db));
+  const journal = await store.bankRuleJournal(token, 50, 0);
+  const legacy = journal.applications.find((item) => item.operation === 'legacy_backfill');
+  assert.equal(legacy.operation, 'legacy_backfill');
+  assert.equal(legacy.canReverse, false);
+  assert.equal(legacy.businessId, 'padel');
+  assert.equal(legacy.operationDate, '2026-07-19');
+  assert.doesNotMatch(JSON.stringify(legacy), /legacy-bank-id|1200/);
+  const corrected = await store.bankRuleCorrect(token, legacy.id, {
+    owner: null, counterparty: null, comment: null,
+  }, 'correct:legacy:clear');
+  assert.equal(corrected.ok, true);
+  assert.equal(corrected.item.owner, null);
+  assert.equal(corrected.item.counterparty, null);
+  assert.equal(corrected.item.comment, null);
+  assert.equal((await store.bankRuleReverse(token, corrected.application.id, 'reverse:legacy:blocked')).ok, false);
+});
+
+test('LocalStore выдаёт журнал страницами без повторов', async () => {
+  const storage = install();
+  const store = new LocalStore();
+  const { token } = await store.login('111111');
+  const db = JSON.parse(storage.getItem('monetki_demo_db'));
+  db.bankRuleApplications = Array.from({ length: 65 }, (_, index) => ({
+    id: `journal-${String(index).padStart(3, '0')}`, operation: 'queue:ignored:test',
+    decision: 'ignored', state: 'ignored', auditRef: `audit-${index}`, created: index + 1,
+  }));
+  storage.setItem('monetki_demo_db', JSON.stringify(db));
+  const first = await store.bankRuleJournal(token, 50, 0);
+  const second = await store.bankRuleJournal(token, 50, first.nextOffset);
+  assert.equal(first.applications.length, 50);
+  assert.equal(first.hasMore, true);
+  assert.equal(second.applications.length, 15);
+  assert.equal(second.hasMore, false);
+  assert.equal(new Set([...first.applications, ...second.applications].map((item) => item.id)).size, 65);
+});
+
+test('LocalStore не сохраняет обычные записи при ошибке поздней проверки backup', async () => {
+  install();
+  const store = new LocalStore();
+  const { token } = await store.login('111111');
+  const backup = await store.backup(token);
+  backup.data.players.push({ id: 'must-not-survive', businessId: 'padel', unit: 'padel', name: 'Временный игрок' });
+  backup.data.events.push({
+    id: 'invalid-late-event', businessId: 'padel', unit: 'padel', eventTypeId: 'missing-type',
+    name: 'Некорректное событие', settlementStatus: 'open',
+  });
+  const restored = await store.migrateImport(token, backup.data);
+  assert.equal(restored.ok, false);
+  const after = await store.backup(token);
+  assert.equal(after.data.players.some((item) => item.id === 'must-not-survive'), false);
+});

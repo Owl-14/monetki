@@ -420,6 +420,18 @@ function bankQueueSignalError(item) {
   return null;
 }
 
+function isBankManagedFinance(item) {
+  return item?.source === 'bank' || String(item?.bankId || '') !== ''
+    || ['bankQueueId', 'bankSignals', 'bankSignalFingerprint', 'bankOriginal', 'appliedRuleId', 'appliedRuleVersion', 'applicationId']
+      .some((key) => item?.[key] !== undefined && item?.[key] !== null && item?.[key] !== '');
+}
+
+function activationRuleShape(source) {
+  const rule = structuredClone(source || {});
+  for (const key of ['activationToken', 'activationRunId', 'activationFingerprint', 'checksum', 'updated', 'updatedBy']) delete rule[key];
+  return rule;
+}
+
 function bankScopeDiagnostics(db, user) {
   if (user.role !== 'admin') return null;
   const businessById = new Map((db.businesses || []).map((business) => [String(business.id), business]));
@@ -765,7 +777,9 @@ export class LocalStore {
     let db;
     if (!raw) { db = seedData(); localStorage.setItem(LS_KEY, JSON.stringify(db)); return db; }
     try { db = JSON.parse(raw); } catch { db = seedData(); localStorage.setItem(LS_KEY, JSON.stringify(db)); }
-    if (ensureCoreData(db)) localStorage.setItem(LS_KEY, JSON.stringify(db));
+    const coreChanged = ensureCoreData(db);
+    const bankAuditChanged = this._ensureLegacyBankApplications(db);
+    if (coreChanged || bankAuditChanged) localStorage.setItem(LS_KEY, JSON.stringify(db));
     return db;
   }
   _save(db) { localStorage.setItem(LS_KEY, JSON.stringify(db)); }
@@ -1475,6 +1489,23 @@ export class LocalStore {
     return `demo:${(hash >>> 0).toString(16).padStart(8, '0')}`;
   }
 
+  _ensureLegacyBankApplications(db) {
+    let changed = false;
+    for (const finance of db.finance || []) {
+      if (!isBankManagedFinance(finance) || (db.bankRuleApplications || []).some((item) => item.financeId === finance.id)) continue;
+      const suffix = this._bankFingerprint(finance).replace('demo:', '');
+      db.bankRuleApplications.push({
+        id: `bank-application:legacy:${suffix}`, idempotencyKey: `legacy:${suffix}`,
+        operation: 'legacy_backfill', decision: 'legacy', state: 'applied', financeId: finance.id,
+        financeFingerprint: this._bankFingerprint(finance), operationDate: finance.date,
+        businessId: businessIdOf(finance), category: finance.category, method: finance.method,
+        auditRef: `legacy-${suffix}`, canReverse: false, actor: 'migration', created: finance.updated || finance.created || 0,
+      });
+      changed = true;
+    }
+    return changed;
+  }
+
   _bankSettings(db) {
     if (!db.bankRuleSettings.length) db.bankRuleSettings.push({ ...DEFAULT_BANK_RULE_SETTINGS, created: Date.now(), updated: Date.now() });
     return safeBankRuleSettings(db.bankRuleSettings[0]);
@@ -1529,7 +1560,9 @@ export class LocalStore {
   async bankRuleSave(token, source, expectedVersion = 0) {
     const u = this._user(token);
     if (!u || u.role !== 'admin') return { ok: false, error: 'Только для админа' };
-    const validation = validateBankRule(source);
+    const activationToken = String(source?.activationToken || '');
+    const candidate = { ...(source || {}) }; delete candidate.activationToken;
+    const validation = validateBankRule(candidate);
     if (!validation.ok) return { ok: false, error: validation.errors[0], errors: validation.errors };
     const db = this._db();
     const id = String(validation.rule.id || `bank-rule:${uid()}`);
@@ -1539,9 +1572,21 @@ export class LocalStore {
       const targetDeny = this._validateBankRuleActions(db, u, validation.rule.actions, validation.rule.decision === 'auto');
       if (targetDeny) return { ok: false, error: targetDeny };
     }
+    let activation = {};
+    if (validation.rule.decision === 'auto' && validation.rule.enabled !== false) {
+      const fingerprint = this._bankFingerprint(activationRuleShape(validation.rule));
+      const run = db.bankRuleRuns.find((item) => item.kind === 'dry-run'
+        && item.activation?.tokenHash === this._bankFingerprint(activationToken)
+        && item.activation?.ruleFingerprint === fingerprint
+        && Number(item.activation?.expectedVersion) === Number(expectedVersion || 0)
+        && Number(item.activation?.settingsVersion) === Number(this._bankSettings(db).settingsVersion)
+        && item.actor === u.id && Number(item.activation?.expiresAt || 0) >= Date.now());
+      if (!run) return { ok: false, error: 'Сначала выполните проверку этого auto-правила и явно подтвердите включение' };
+      activation = { activationRunId: run.id, activationFingerprint: fingerprint };
+    }
     const now = Date.now();
     const rule = {
-      ...validation.rule, id, version: Number(current?.version || 0) + 1,
+      ...validation.rule, ...activation, id, version: Number(current?.version || 0) + 1,
       enabled: validation.rule.enabled !== false,
       createdBy: current?.createdBy || u.id, updatedBy: u.id,
       created: current?.created || now, updated: now,
@@ -1553,14 +1598,14 @@ export class LocalStore {
     return { ok: true, rule };
   }
 
-  async bankRuleEnable(token, id, enabled, expectedVersion) {
+  async bankRuleEnable(token, id, enabled, expectedVersion, activationToken = '') {
     const u = this._user(token);
     if (!u || u.role !== 'admin') return { ok: false, error: 'Только для админа' };
     const db = this._db();
     const current = db.bankRules.find((rule) => rule.id === id);
     if (!current) return { ok: false, error: 'Правило не найдено' };
     if (current.deleted === true && enabled === true) return { ok: false, error: 'Архивное правило нельзя включить' };
-    return this.bankRuleSave(token, { ...current, enabled: enabled === true }, expectedVersion);
+    return this.bankRuleSave(token, { ...current, enabled: enabled === true, activationToken }, expectedVersion);
   }
 
   async bankRuleDelete(token, id, expectedVersion) {
@@ -1611,21 +1656,32 @@ export class LocalStore {
     return { ok: true, evaluation: publicBankRuleEvaluation(evaluation), evaluationToken: bankRuleEvaluationToken(transaction, evaluation) };
   }
 
-  async bankRuleDryRun(token, draft) {
+  async bankRuleDryRun(token, draft, expectedVersion = 0) {
     const u = this._user(token);
     if (!u || u.role !== 'admin') return { ok: false, error: 'Только для админа' };
     const db = this._db();
     let rules = db.bankRules;
+    let activationToken = '';
+    let activation;
     if (draft) {
       const validation = validateBankRule(draft);
       if (!validation.ok) return { ok: false, error: validation.errors[0], errors: validation.errors };
       const id = String(validation.rule.id || 'draft');
       rules = [{ ...validation.rule, id, version: validation.rule.version || 0 }, ...rules.filter((rule) => rule.id !== id)];
+      if (validation.rule.decision === 'auto' && validation.rule.enabled !== false) {
+        activationToken = `activate:${uid()}:${uid()}`;
+        activation = {
+          tokenHash: this._bankFingerprint(activationToken),
+          ruleFingerprint: this._bankFingerprint(activationRuleShape(validation.rule)),
+          expectedVersion: Number(expectedVersion || 0), settingsVersion: this._bankSettings(db).settingsVersion,
+          expiresAt: Date.now() + 15 * 60 * 1000,
+        };
+      }
     }
     const summary = aggregateBankRulePreview(db.bankTransactions, rules, this._bankSettings(db));
-    db.bankRuleRuns.push({ id: `bank-rule-run:${uid()}`, kind: 'dry-run', summary, actor: u.id, engineVersion: BANK_RULE_ENGINE_VERSION, created: Date.now() });
+    db.bankRuleRuns.push({ id: `bank-rule-run:${uid()}`, kind: 'dry-run', summary, actor: u.id, engineVersion: BANK_RULE_ENGINE_VERSION, created: Date.now(), ...(activation ? { activation } : {}) });
     this._save(db);
-    return { ok: true, summary };
+    return { ok: true, summary, ...(activationToken ? { activationToken, expiresAt: activation.expiresAt } : {}) };
   }
 
   _localApplyBankRule(db, u, transaction, evaluation, idempotencyKey, decision = 'suggest') {
@@ -1709,6 +1765,8 @@ export class LocalStore {
       engineVersion: BANK_RULE_ENGINE_VERSION, decision, state: 'applied',
       confidence: evaluation.confidence, financeId,
       financeFingerprint: this._bankFingerprint(item),
+      operationDate: transaction.date, businessId, category: item.category, method: item.method,
+      auditRef: `audit-${applicationId.slice(-8)}`, canReverse: true,
       actor: u.id, day: new Date().toISOString().slice(0, 10), amountMinor, created: now,
     };
     db.bankRuleApplications.push(application);
@@ -1764,17 +1822,28 @@ export class LocalStore {
   bankRuleManual(token, transactionId, idempotencyKey) { return this._bankQueueState(token, transactionId, idempotencyKey, 'manual', 'manual'); }
   bankRuleReevaluate(token, transactionId, idempotencyKey) { return this._bankQueueState(token, transactionId, idempotencyKey, 'pending', 'reevaluated'); }
 
-  async bankRuleJournal(token, limit = 100) {
+  async bankRuleJournal(token, limit = 50, offset = 0) {
     const u = this._user(token);
     if (!u || u.role !== 'admin') return { ok: false, error: 'Только для админа' };
     const db = this._db();
-    const applications = db.bankRuleApplications.slice().sort((a, b) => Number(b.created || 0) - Number(a.created || 0))
-      .slice(0, Math.min(200, Number(limit || 100))).map(({ amountMinor: _amount, financeFingerprint: _fingerprint, before, after, ...safe }) => ({
-        ...safe,
-        ...(before ? { before: { category: before.category, method: before.method, owner: before.owner } } : {}),
-        ...(after ? { after: { category: after.category, method: after.method, owner: after.owner } } : {}),
-      }));
-    return { ok: true, applications };
+    const count = Math.min(100, Math.max(1, Math.floor(Number(limit || 50))));
+    const start = Math.min(10000, Math.max(0, Math.floor(Number(offset || 0))));
+    const ordered = db.bankRuleApplications.slice().sort((a, b) => Number(b.created || 0) - Number(a.created || 0) || String(b.id).localeCompare(String(a.id)));
+    const applications = ordered.slice(start, start + count).map((item) => {
+      const finance = db.finance.find((entry) => entry.id === item.financeId);
+      return {
+        id: String(item.id || ''), decision: String(item.decision || ''), state: String(item.state || ''),
+        operation: String(item.operation || ''),
+        appliedRuleId: item.appliedRuleId ? String(item.appliedRuleId) : undefined,
+        appliedRuleVersion: item.appliedRuleVersion === undefined ? undefined : Number(item.appliedRuleVersion),
+        created: Number(item.created || 0), auditRef: item.auditRef || `audit-${String(item.id || '').slice(-8)}`,
+        operationDate: item.operationDate || finance?.date,
+        businessId: item.businessId || businessIdOf(finance), category: item.category || finance?.category,
+        method: item.method || finance?.method,
+        canReverse: item.canReverse !== false && item.operation !== 'legacy_backfill',
+      };
+    });
+    return { ok: true, applications, hasMore: start + applications.length < ordered.length, nextOffset: start + applications.length };
   }
 
   async bankRuleCorrect(token, applicationId, patch, idempotencyKey) {
@@ -1794,7 +1863,10 @@ export class LocalStore {
     if (!application || !finance || application.financeFingerprint !== this._bankFingerprint(finance)) return { ok: false, error: 'Операция уже изменилась' };
     const allowed = ['category', 'method', 'owner', 'comment', 'counterparty'];
     if (Object.keys(patch || {}).some((key) => !allowed.includes(key))) return { ok: false, error: 'Можно исправить только классификацию' };
-    if (Object.values(patch || {}).some((value) => typeof value !== 'string')) return { ok: false, error: 'Поля исправления должны быть строками' };
+    const clearable = new Set(['owner', 'comment', 'counterparty']);
+    if (Object.entries(patch || {}).some(([key, value]) => typeof value !== 'string' && !(value === null && clearable.has(key)))) {
+      return { ok: false, error: 'Поля исправления должны быть строками или явным очищением' };
+    }
     if (patch.category !== undefined && (!String(patch.category).trim() || String(patch.category).length > 120)) return { ok: false, error: 'Некорректная категория' };
     if (patch.method !== undefined && !FIN_METHODS.some((item) => item.id === patch.method)) return { ok: false, error: 'Некорректный способ оплаты' };
     if (patch.owner && !db.businessOwners.some((item) => businessIdOf(item) === finance.businessId && item.ownerId === patch.owner && item.active !== false)) return { ok: false, error: 'Владелец не относится к бизнесу' };
@@ -1806,6 +1878,8 @@ export class LocalStore {
       sourceApplicationId: applicationId, patchChecksum,
       financeId: finance.id, supersedes: application.id, before, after: Object.fromEntries(allowed.map((key) => [key, finance[key]])),
       actor: u.id, created: Date.now(), financeFingerprint: this._bankFingerprint(finance),
+      operationDate: finance.date, businessId: businessIdOf(finance), category: finance.category, method: finance.method,
+      auditRef: `audit-${this._bankFingerprint(idempotencyKey).slice(-8)}`, canReverse: application.canReverse !== false,
     };
     db.bankRuleApplications.push(audit);
     this._save(db);
@@ -1825,7 +1899,8 @@ export class LocalStore {
     const application = requested && db.bankRuleApplications.filter((item) => item.financeId === requested.financeId && ['applied', 'corrected'].includes(item.state))
       .sort((a, b) => Number(b.created || 0) - Number(a.created || 0) || String(b.id).localeCompare(String(a.id)))[0];
     const finance = db.finance.find((item) => item.id === application?.financeId);
-    if (!application || !finance || application.financeFingerprint !== this._bankFingerprint(finance)
+    if (!application || application.canReverse === false || application.operation === 'legacy_backfill'
+      || !finance || application.financeFingerprint !== this._bankFingerprint(finance)
       || db.financeRelations.some((item) => item.financeId === finance?.id)
       || db.eventFinanceAllocations.some((item) => item.financeId === finance?.id)
       || db.stockMovements.some((item) => item.financeId === finance?.id)) {
@@ -1913,7 +1988,7 @@ export class LocalStore {
     ordinaryEntities.forEach((entity) => {
       (data?.[entity] || []).forEach((source) => {
         const item = structuredClone(source);
-        if (!item?.id) return;
+        if (!item?.id || (entity === 'finance' && isBankManagedFinance(item))) return;
         db[entity] = db[entity] || [];
         const i = db[entity].findIndex((x) => x.id === item.id);
         if (i >= 0) db[entity][i] = item; else db[entity].push(item);
@@ -1943,6 +2018,19 @@ export class LocalStore {
       return item;
     };
     try {
+      for (const source of (data?.finance || []).filter(isBankManagedFinance)) {
+        const item = structuredClone(source);
+        if (!item?.id || !item?.bankId || item.source !== 'bank' || !isSafeBankSignals(item.bankSignals || {})
+          || bankQueueSignalError(item) || scopeError(item) || !businessIdOf(item)
+          || !db.businesses.some((business) => business.id === businessIdOf(item))) {
+          throw new Error('Резервная копия содержит небезопасную банковскую финансовую операцию');
+        }
+        const conflict = db.bankTransactions.some((candidate) => candidate.bankId === item.bankId);
+        const existing = db.finance.find((candidate) => candidate.id === item.id || candidate.bankId === item.bankId);
+        if (conflict || (existing && !exact(existing, item))) throw new Error('Конфликт банковской финансовой операции');
+        if (!existing) db.finance.push(item);
+        imported++;
+      }
       const bankRestoreOrder = ['bankRules', 'bankRuleVersions', 'bankRuleSettingVersions', 'bankRuleApplications', 'bankRuleRuns', 'bankRuleSettings', 'financeRelations'];
       const settingsComparable = (item) => JSON.stringify({
         autoEnabled: item.autoEnabled, allowedDirections: item.allowedDirections, maxAmountMinor: item.maxAmountMinor,
@@ -2040,6 +2128,7 @@ export class LocalStore {
       imported++;
     }
     ensureCoreData(db);
+    this._ensureLegacyBankApplications(db);
     this._save(db);
     return { ok: true, imported };
   }
@@ -2101,12 +2190,12 @@ class RemoteStore {
   processBankTransaction(token, id, businessId, category) { return this._call({ action: 'process_bank_transaction', token, id, businessId, category }); }
   bankRulesList(token) { return this._call({ action: 'bank_rules_list', token }); }
   bankRuleSave(token, rule, expectedVersion) { return this._call({ action: 'bank_rule_save', token, rule, expectedVersion }); }
-  bankRuleEnable(token, id, enabled, expectedVersion) { return this._call({ action: 'bank_rule_enable', token, id, enabled, expectedVersion }); }
+  bankRuleEnable(token, id, enabled, expectedVersion, activationToken = '') { return this._call({ action: 'bank_rule_enable', token, id, enabled, expectedVersion, activationToken }); }
   bankRuleDelete(token, id, expectedVersion) { return this._call({ action: 'bank_rule_delete', token, id, expectedVersion }); }
   bankRuleSettingsGet(token) { return this._call({ action: 'bank_rule_settings_get', token }); }
   bankRuleSettingsUpdate(token, settings, expectedVersion) { return this._call({ action: 'bank_rule_settings_update', token, settings, expectedVersion }); }
   bankRulePreviewTransaction(token, transactionId, draft) { return this._call({ action: 'bank_rule_preview_transaction', token, transactionId, draft }); }
-  bankRuleDryRun(token, draft) { return this._call({ action: 'bank_rule_dry_run', token, draft }); }
+  bankRuleDryRun(token, draft, expectedVersion = 0) { return this._call({ action: 'bank_rule_dry_run', token, draft, expectedVersion }); }
   bankRuleApplySuggestion(token, transactionId, expectedEvaluationToken, idempotencyKey) {
     return this._call({ action: 'bank_rule_apply_suggestion', token, transactionId, expectedEvaluationToken, idempotencyKey });
   }
@@ -2114,7 +2203,7 @@ class RemoteStore {
   bankRuleIgnore(token, transactionId, idempotencyKey) { return this._call({ action: 'bank_rule_ignore', token, transactionId, idempotencyKey }); }
   bankRuleManual(token, transactionId, idempotencyKey) { return this._call({ action: 'bank_rule_manual', token, transactionId, idempotencyKey }); }
   bankRuleReevaluate(token, transactionId, idempotencyKey) { return this._call({ action: 'bank_rule_reevaluate', token, transactionId, idempotencyKey }); }
-  bankRuleJournal(token, limit = 100) { return this._call({ action: 'bank_rule_journal', token, limit }); }
+  bankRuleJournal(token, limit = 50, offset = 0) { return this._call({ action: 'bank_rule_journal', token, limit, offset }); }
   bankRuleCorrect(token, applicationId, patch, idempotencyKey) { return this._call({ action: 'bank_rule_correct', token, applicationId, patch, idempotencyKey }); }
   bankRuleReverse(token, applicationId, idempotencyKey) { return this._call({ action: 'bank_rule_reverse', token, applicationId, idempotencyKey }); }
   allocateEventFinance(token, item) { return this._call({ action: 'allocate_event_finance', token, item }); }

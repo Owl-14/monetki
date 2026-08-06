@@ -175,3 +175,25 @@ test('настройки отбрасывают NaN/Infinity и сохраняю
   assert.equal(settings.maxAmountMinor.expense, 0);
   assert.equal(settings.maxTransactionsPerRun, 0);
 });
+
+test('дубли одного семейства признаков не считаются независимым контекстом для auto', () => {
+  const duplicatedRecipient = rule({
+    decision: 'auto',
+    conditions: { all: [
+      { field: 'direction', op: 'exact', value: 'income' },
+      { field: 'amountMinor', op: 'exact', value: 550000 },
+      { field: 'recipient.nameNormalized', op: 'exact', value: 'иван иванов' },
+      { field: 'recipient.nameNormalized', op: 'contains', value: 'иван' },
+    ], any: [], none: [] },
+    actions: { businessId: 'padel', category: 'Оплата клиента', links: {
+      playerId: 'player-1', event: { eventId: 'event-1', registrationId: 'registration-1', purpose: 'payment' },
+    } },
+  });
+  const result = evaluateBankRules({
+    direction: 'income', amountMinor: 550000, recipient: { nameNormalized: 'иван иванов' },
+  }, [duplicatedRecipient], autoSettings);
+  assert.equal(result.contextEvidenceCount, 1);
+  assert.equal(result.duplicateEvidenceCount, 1);
+  assert.equal(result.autoEligible, false);
+  assert.equal(result.decision, 'suggest');
+});
