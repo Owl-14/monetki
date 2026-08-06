@@ -38,14 +38,16 @@ jobs:
             "supabase/migrations/009_bank_rules.sql"
           )
           database_url="https://api.supabase.com/v1/projects/${SUPABASE_PROJECT_ID}/database/query"
+          migration_query_file="${RUNNER_TEMP}/server-migrations.sql"
           request_file="${RUNNER_TEMP}/tochka-lease-migration-request.json"
           response_file="${RUNNER_TEMP}/tochka-lease-migration-response.json"
-          migration_query=""
+          : > "${migration_query_file}"
           for migration_file in "${migration_files[@]}"; do
             test -s "${migration_file}"
-            migration_query+="$(<"${migration_file}")"$'\n'
+            cat "${migration_file}" >> "${migration_query_file}"
+            printf '\n' >> "${migration_query_file}"
           done
-          jq -n --arg query "${migration_query}" '{query: $query}' > "${request_file}"
+          jq -n --rawfile query "${migration_query_file}" '{query: $query}' > "${request_file}"
           status_code="$(curl --silent --show-error \
             --output "${response_file}" \
             --write-out '%{http_code}' \
