@@ -19,6 +19,7 @@ declare
   v_finance_id text;
   v_now bigint := floor(extract(epoch from clock_timestamp()) * 1000);
 begin
+  perform pg_advisory_xact_lock(hashtext('bank_mutation_barrier'));
   if coalesce(length(trim(p_queue_id)), 0) < 1 or length(p_queue_id) > 128 then
     raise exception 'Некорректная банковская операция';
   end if;

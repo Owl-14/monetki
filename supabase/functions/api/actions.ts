@@ -1,6 +1,7 @@
 import {
   BUSINESS_SCOPED_ENTITIES,
   BACKUP_ENTITIES,
+  BANK_RULE_ENTITIES,
   CORE_ENTITIES,
   CRM_ENTITIES,
   ENTITIES,
@@ -45,12 +46,13 @@ import {
   closeEventSettlement as closeEventSettlementRpc,
   deleteEvent as deleteEventRpc,
   readEventData,
-  restoreEventGraph,
 } from "./events.ts";
 import { ensureCoreData } from "./auth/access.ts";
 import { callRpc, deleteRow, insertRow, kvGet, kvSet, readAll, readOne, writeRow } from "./db/repositories.ts";
 import { newId } from "./types.ts";
 import type { Rec } from "./types.ts";
+import { manualProcessBankTransaction } from "./bank-rule-actions.ts";
+import { isSafeBankSignals } from "./bank-rules.js";
 
 async function notify(toId: unknown, text: string, link = "#/tasks") {
   if (!toId) return;
@@ -85,32 +87,7 @@ export async function bootstrap(u: Rec) {
 
 export async function processBankTransaction(u: Rec, id: unknown, businessId: unknown, category: unknown) {
   if (!isAdmin(u)) return { ok: false, error: "Только для админа" };
-
-  const queueId = String(id || "").trim();
-  const targetBusinessId = String(businessId || "").trim();
-  const targetCategory = String(category || "").trim();
-  if (!queueId) return { ok: false, error: "Не указана банковская операция" };
-  if (!targetBusinessId) return { ok: false, error: "Не указан бизнес" };
-  if (!targetCategory || targetCategory.length > 120) return { ok: false, error: "Не указана категория" };
-
-  const [businesses, memberships] = await Promise.all([
-    readAll("businesses"),
-    readAll("memberships"),
-  ]);
-  const targetDeny = scopeWriteError(
-    accessSet(memberships, u.id),
-    { id: "bank-target", businessId: targetBusinessId, unit: targetBusinessId },
-    businesses,
-  );
-  if (targetDeny) return { ok: false, error: targetDeny };
-
-  const { data, error } = await callRpc("process_bank_transaction", {
-    p_queue_id: queueId,
-    p_business_id: targetBusinessId,
-    p_category: targetCategory,
-  });
-  if (error) return { ok: false, error: "Не удалось безопасно провести банковскую операцию" };
-  return data as Rec;
+  return await manualProcessBankTransaction(u, id, businessId, category);
 }
 
 async function coreValidationError(entity: string, item: Rec, ignoreId = "") {
@@ -239,10 +216,17 @@ async function applySalaryOffsets(item: Rec): Promise<{ error?: string; sum?: nu
   return { sum, titles: exps.map((e) => e.title).join(", ") };
 }
 
+function bankManagedFinancePayload(item: Rec) {
+  return item?.source === "bank" || String(item?.bankId || "") !== ""
+    || ["bankQueueId", "bankSignals", "bankSignalFingerprint", "bankOriginal", "appliedRuleId", "appliedRuleVersion", "applicationId"]
+      .some((key) => item?.[key] !== undefined && item?.[key] !== null && item?.[key] !== "");
+}
+
 export async function createItem(u: Rec, entity: string, item: Rec) {
   const deny = baseWriteError(u, entity);
   if (deny) return { ok: false, error: deny };
   item = { ...item };
+  if (entity === "finance" && bankManagedFinancePayload(item)) return { ok: false, error: "Банковская операция создаётся только из необработанной очереди" };
   delete item.staffAmount;
   if (!isAdmin(u)) item = sanitizeStaffEventPayload(entity, item);
   if (entity === "businesses") item.id = String(item.id || "").trim();
@@ -399,6 +383,7 @@ export async function updateItem(u: Rec, entity: string, item: Rec) {
   const deny = baseWriteError(u, entity);
   if (deny) return { ok: false, error: deny };
   item = { ...item };
+  if (entity === "finance" && bankManagedFinancePayload(item)) return { ok: false, error: "Банковская операция изменяется только специальным действием" };
   delete item.staffAmount;
   if (!isAdmin(u)) item = sanitizeStaffEventPayload(entity, item);
   if (entity === "companies" && String(item?.id || "").startsWith("legacy-client:")) {
@@ -407,6 +392,9 @@ export async function updateItem(u: Rec, entity: string, item: Rec) {
   if (entity === "stockMovements") return { ok: false, error: "Движения склада нельзя изменять" };
   const before = (await readAll(entity)).find((x) => x.id === item.id);
   if (!before) return { ok: false, error: "Не найдено" };
+  if (entity === "finance" && bankManagedFinancePayload(before)) {
+    return { ok: false, error: "Банковская операция изменяется только специальным действием" };
+  }
   const [memberships, businesses] = await Promise.all([readAll("memberships"), readAll("businesses")]);
   const access = accessSet(memberships, u.id);
   if (BUSINESS_SCOPED_ENTITIES.includes(entity) || entity === "memberships" || entity === "businessOwners") {
@@ -537,6 +525,9 @@ export async function deleteItem(u: Rec, entity: string, id: string) {
   }
   const before = (await readAll(entity)).find((x) => x.id === id);
   if (!before) return { ok: false, error: "Не найдено" };
+  if (entity === "finance" && bankManagedFinancePayload(before)) {
+    return { ok: false, error: "Банковская операция удаляется только безопасной отменой из журнала" };
+  }
   const [memberships, businesses] = await Promise.all([readAll("memberships"), readAll("businesses")]);
   const access = accessSet(memberships, u.id);
   if (BUSINESS_SCOPED_ENTITIES.includes(entity) || entity === "memberships" || entity === "businessOwners") {
@@ -805,23 +796,48 @@ export async function statusInfo(u: Rec | null) {
 export async function migrateImport(u: Rec | null, payload: Record<string, Rec[]>) {
   const empty = (await readAll("employees")).length === 0;
   if (!empty && (!u || !isAdmin(u))) return { ok: false, error: "Только для админа" };
-  let total = 0;
-  const ordinaryEntities = BACKUP_ENTITIES.filter((entity) => !EVENT_ENTITIES.includes(entity) && entity !== "employees");
-  for (const entity of ordinaryEntities) {
-    for (const item of payload?.[entity] || []) {
-      if (!item || !item.id) continue;
-      await writeRow(entity, item);
-      total++;
+  const ordinaryEntities = BACKUP_ENTITIES.filter((entity) =>
+    !EVENT_ENTITIES.includes(entity) && !BANK_RULE_ENTITIES.includes(entity) && entity !== "bankTransactions"
+  );
+  const bankFinance = (payload?.finance || []).filter(bankManagedFinancePayload);
+  const ordinary = Object.fromEntries(ordinaryEntities.map((entity) => [
+    entity,
+    (payload?.[entity] || []).filter((item) => entity !== "finance" || !bankManagedFinancePayload(item)),
+  ]));
+  for (const item of payload?.bankTransactions || []) {
+    const amountMinor = Number(item?.bankSignals?.amountMinor);
+    const visibleAmountMinor = Math.round(Number(item?.amount) * 100);
+    const signalDirection = String(item?.bankSignals?.direction || "");
+    const hasSignals = Object.keys(item?.bankSignals || {}).length > 0;
+    if (!item?.id || !item?.bankId || !isSafeBankSignals(item.bankSignals || {})
+      || ["raw", "payload", "token"].some((key) => item[key] !== undefined)
+      || (hasSignals && (!Number.isSafeInteger(amountMinor) || amountMinor <= 0
+        || amountMinor !== visibleAmountMinor || signalDirection !== String(item?.type || "")))) {
+      return { ok: false, error: "Резервная копия содержит небезопасную банковскую очередь" };
     }
   }
-  const graph = Object.fromEntries(EVENT_ENTITIES.map((entity) => [entity, payload?.[entity] || []]));
-  const restored = await restoreEventGraph(graph);
-  if (!restored.ok) return { ok: false, error: restored.error || "Не удалось атомарно восстановить данные событий" };
-  total += EVENT_ENTITIES.reduce((sum, entity) => sum + (payload?.[entity] || []).filter((item) => item?.id).length, 0);
-  for (const item of payload?.employees || []) {
-    if (!item || !item.id) continue;
-    await writeRow("employees", item);
-    total++;
+  for (const item of bankFinance) {
+    const amountMinor = Number(item?.bankSignals?.amountMinor);
+    const hasSignals = Object.keys(item?.bankSignals || {}).length > 0;
+    if (!item?.id || !item?.bankId || item?.source !== "bank" || !isSafeBankSignals(item.bankSignals || {})
+      || ["raw", "payload", "token"].some((key) => item[key] !== undefined)
+      || (hasSignals && (!Number.isSafeInteger(amountMinor) || amountMinor <= 0
+        || amountMinor !== Math.round(Number(item?.amount) * 100)
+        || String(item?.bankSignals?.direction || "") !== String(item?.type || "")))) {
+      return { ok: false, error: "Резервная копия содержит небезопасную банковскую финансовую операцию" };
+    }
   }
-  return { ok: true, imported: total };
+  const bankGraph = {
+    ...Object.fromEntries(BANK_RULE_ENTITIES.map((entity) => [entity, payload?.[entity] || []])),
+    bankFinance,
+    bankTransactions: payload?.bankTransactions || [],
+  };
+  const eventGraph = Object.fromEntries(EVENT_ENTITIES.map((entity) => [entity, payload?.[entity] || []]));
+  const { data: restored, error } = await callRpc("restore_monetki_backup", {
+    p_graph: { ordinary, bank: bankGraph, events: eventGraph },
+  });
+  if (error || !(restored as Rec)?.ok) {
+    return { ok: false, error: "Не удалось атомарно восстановить резервную копию" };
+  }
+  return { ok: true, imported: Number((restored as Rec).restored || 0) };
 }

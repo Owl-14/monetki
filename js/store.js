@@ -14,6 +14,18 @@ import {
   staffEventManageError,
   visibleEventCollections,
 } from './event-rules.js';
+import {
+  BANK_RULE_ENGINE_VERSION,
+  DEFAULT_BANK_RULE_SETTINGS,
+  aggregateBankRulePreview,
+  bankRuleEvaluationToken,
+  canonicalJson,
+  evaluateBankRules,
+  publicBankRuleEvaluation,
+  isSafeBankSignals,
+  safeBankRuleSettings,
+  validateBankRule,
+} from './bank-rules.js';
 
 export const UNITS = {
   padel: { id: 'padel', name: 'Падел', emoji: '🎾' },
@@ -99,7 +111,8 @@ function legacyBusinessIds(employee) {
 function ensureCoreData(db) {
   let changed = false;
   [
-    'businesses', 'memberships', 'businessOwners', 'staffExpenses', 'cash', 'files', 'bankTransactions', ...CRM_ENTITIES,
+    'businesses', 'memberships', 'businessOwners', 'staffExpenses', 'cash', 'files', 'bankTransactions',
+    'bankRules', 'bankRuleVersions', 'bankRuleApplications', 'bankRuleRuns', 'bankRuleSettings', 'bankRuleSettingVersions', 'financeRelations', ...CRM_ENTITIES,
     'warehouses', 'stockItems', 'stockMovements', 'stockBalances', 'reservations', 'inventories', ...EVENT_ENTITIES
   ].forEach((key) => {
     if (!Array.isArray(db[key])) { db[key] = []; changed = true; }
@@ -337,6 +350,13 @@ function seedData() {
       { id: 'bank-demo-income', bankId: 'demo-bank-income', date: d(-1), type: 'income', amount: 42000, method: 'account', source: 'bank', counterparty: 'ООО «Север»', comment: 'Оплата по счёту', created: now, updated: now },
       { id: 'bank-demo-expense', bankId: 'demo-bank-expense', date: d(-2), type: 'expense', amount: 6900, method: 'card', source: 'bank', counterparty: 'Магазин инвентаря', comment: 'Покупка оборудования', created: now, updated: now }
     ],
+    bankRules: [],
+    bankRuleVersions: [],
+    bankRuleApplications: [],
+    bankRuleRuns: [],
+    bankRuleSettings: [{ ...DEFAULT_BANK_RULE_SETTINGS }],
+    bankRuleSettingVersions: [{ ...DEFAULT_BANK_RULE_SETTINGS, id: 'bank-rule-settings:v1', settingsId: 'bank-rule-settings' }],
+    financeRelations: [],
     notifications: [
       { id: uid(), toId: 'u-admin', text: 'Демо-режим: это пример уведомления. Подключите базу — и они станут настоящими.', link: '#/tasks', read: false, created: now }
     ]
@@ -347,10 +367,12 @@ function seedData() {
 const LS_KEY = 'monetki_demo_db';
 const CORE_ENTITIES = ['businesses', 'memberships', 'businessOwners'];
 const STOCK_ENTITIES = ['warehouses', 'stockItems', 'stockMovements', 'stockBalances', 'reservations', 'inventories'];
-const BUSINESS_SCOPED_ENTITIES = ['clients', 'venues', 'players', 'tasks', 'finance', 'staffExpenses', ...CRM_ENTITIES, ...STOCK_ENTITIES, ...EVENT_ENTITIES];
-const LOCAL_ENTITIES = [
-  ...CORE_ENTITIES, 'employees', ...BUSINESS_SCOPED_ENTITIES, 'bankTransactions', 'cash', 'files', 'notifications'
-];
+const BANK_RULE_ENTITIES = ['bankRules', 'bankRuleVersions', 'bankRuleApplications', 'bankRuleRuns', 'bankRuleSettings', 'bankRuleSettingVersions', 'financeRelations'];
+const BUSINESS_SCOPED_ENTITIES = ['clients', 'venues', 'players', 'tasks', 'finance', 'staffExpenses', 'financeRelations', ...CRM_ENTITIES, ...STOCK_ENTITIES, ...EVENT_ENTITIES];
+const LOCAL_ENTITIES = [...new Set([
+  ...CORE_ENTITIES, 'employees', ...BUSINESS_SCOPED_ENTITIES, 'bankTransactions', ...BANK_RULE_ENTITIES,
+  'cash', 'files', 'notifications'
+])];
 
 function membershipsOf(db, employeeId) {
   return (db.memberships || []).filter((x) => x.employeeId === employeeId && x.active !== false);
@@ -384,6 +406,61 @@ function safeBankDateBounds(items) {
     })
     .sort();
   return { count: (items || []).length, earliestDate: dates[0] || null, latestDate: dates.at(-1) || null };
+}
+
+function bankQueueSignalError(item) {
+  const signals = item?.bankSignals || {};
+  if (!Object.keys(signals).length) return null; // Совместимость со старой безопасной очередью без сигналов.
+  const amountMinor = Number(signals.amountMinor);
+  const visibleAmountMinor = Math.round(Number(item?.amount) * 100);
+  if (!isSafeBankSignals(signals) || !Number.isSafeInteger(amountMinor) || amountMinor <= 0
+    || amountMinor !== visibleAmountMinor || String(signals.direction || '') !== String(item?.type || '')) {
+    return 'Банковские сигналы не совпадают с видимой суммой или направлением операции';
+  }
+  return null;
+}
+
+function isBankManagedFinance(item) {
+  return item?.source === 'bank' || String(item?.bankId || '') !== ''
+    || ['bankQueueId', 'bankSignals', 'bankSignalFingerprint', 'bankOriginal', 'appliedRuleId', 'appliedRuleVersion', 'applicationId']
+      .some((key) => item?.[key] !== undefined && item?.[key] !== null && item?.[key] !== '');
+}
+
+function activationRuleShape(source) {
+  const rule = structuredClone(source || {});
+  for (const key of ['activationToken', 'activationRunId', 'activationFingerprint', 'checksum', 'updated', 'updatedBy']) delete rule[key];
+  return rule;
+}
+
+function bankJournalCreated(item) {
+  const value = Math.floor(Number(item?.created || 0));
+  return Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
+function encodeBankJournalCursor(item) {
+  const bytes = new TextEncoder().encode(JSON.stringify([bankJournalCreated(item), String(item?.id || '')]));
+  let binary = '';
+  bytes.forEach((byte) => { binary += String.fromCharCode(byte); });
+  return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, '');
+}
+
+function decodeBankJournalCursor(source) {
+  const cursor = String(source || '').trim();
+  if (!cursor) return null;
+  if (cursor.length > 512 || !/^[A-Za-z0-9_-]+$/u.test(cursor)) throw new Error('invalid_cursor');
+  try {
+    const padded = cursor.replaceAll('-', '+').replaceAll('_', '/') + '='.repeat((4 - cursor.length % 4) % 4);
+    const binary = atob(padded);
+    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+    const parsed = JSON.parse(new TextDecoder().decode(bytes));
+    if (!Array.isArray(parsed) || parsed.length !== 2 || !Number.isSafeInteger(parsed[0]) || parsed[0] < 0
+      || typeof parsed[1] !== 'string' || !parsed[1] || parsed[1].length > 200 || /[\u0000-\u001f\u007f]/u.test(parsed[1])) {
+      throw new Error('invalid_cursor');
+    }
+    return { created: parsed[0], id: parsed[1] };
+  } catch (_error) {
+    throw new Error('invalid_cursor');
+  }
 }
 
 function bankScopeDiagnostics(db, user) {
@@ -731,7 +808,9 @@ export class LocalStore {
     let db;
     if (!raw) { db = seedData(); localStorage.setItem(LS_KEY, JSON.stringify(db)); return db; }
     try { db = JSON.parse(raw); } catch { db = seedData(); localStorage.setItem(LS_KEY, JSON.stringify(db)); }
-    if (ensureCoreData(db)) localStorage.setItem(LS_KEY, JSON.stringify(db));
+    const coreChanged = ensureCoreData(db);
+    const bankAuditChanged = this._ensureLegacyBankApplications(db);
+    if (coreChanged || bankAuditChanged) localStorage.setItem(LS_KEY, JSON.stringify(db));
     return db;
   }
   _save(db) { localStorage.setItem(LS_KEY, JSON.stringify(db)); }
@@ -782,6 +861,12 @@ export class LocalStore {
       eventBudgetLines: db.eventBudgetLines.filter(canSeeEvent),
       eventFinanceAllocations: db.eventFinanceAllocations.filter(canSeeEvent),
     }, isAdmin);
+    const bankSettings = safeBankRuleSettings(db.bankRuleSettings[0] || DEFAULT_BANK_RULE_SETTINGS);
+    const visibleBankTransactions = db.bankTransactions.map((item) => {
+      const evaluation = evaluateBankRules(item.bankSignals || {}, db.bankRules, bankSettings);
+      const { bankSignals: _signals, bankId: _bankId, bankSignalFingerprint: _fingerprint, ...safe } = item;
+      return { ...safe, ruleEvaluation: publicBankRuleEvaluation(evaluation), ruleEvaluationToken: bankRuleEvaluationToken(item, evaluation) };
+    });
     return {
       ok: true,
       profile: this._profile(db, u),
@@ -806,7 +891,14 @@ export class LocalStore {
         ...eventCollections,
         tasks: db.tasks.filter((t) => canSee(t) && (isAdmin || t.assigneeId === u.id)),
         finance: db.finance.filter((f) => canSee(f) && (isAdmin || f.employeeId === u.id)),
-        bankTransactions: isAdmin ? db.bankTransactions : [],
+        bankTransactions: isAdmin ? visibleBankTransactions : [],
+        bankRules: isAdmin ? db.bankRules : [],
+        bankRuleVersions: isAdmin ? db.bankRuleVersions : [],
+        bankRuleApplications: [],
+        bankRuleRuns: [],
+        bankRuleSettings: isAdmin ? db.bankRuleSettings : [],
+        bankRuleSettingVersions: isAdmin ? db.bankRuleSettingVersions : [],
+        financeRelations: isAdmin ? db.financeRelations.filter(canSee) : [],
         bankDiagnostics: isAdmin ? bankScopeDiagnostics(db, u) : null,
         staffExpenses: db.staffExpenses.filter((e) => canSee(e) && (isAdmin || e.employeeId === u.id)),
         warehouses: db.warehouses.filter(canSeeStock),
@@ -825,6 +917,7 @@ export class LocalStore {
   _baseWriteError(u, entity) {
     if (!LOCAL_ENTITIES.includes(entity) || entity === 'files') return 'Неизвестная сущность';
     if (entity === 'bankTransactions') return 'Банковскую операцию можно только провести';
+    if (BANK_RULE_ENTITIES.includes(entity)) return 'Правила банка изменяются только отдельным безопасным действием';
     if (entity === 'eventFinanceAllocations') return 'Финансовое распределение создаётся отдельным безопасным действием';
     if (entity === 'notifications') return 'Нельзя';
     if (entity === 'stockBalances') return 'Остатки меняются только складскими операциями';
@@ -958,6 +1051,11 @@ export class LocalStore {
     const baseError = this._baseWriteError(u, entity);
     if (baseError) return { ok: false, error: baseError };
     item = CRM_ENTITIES.includes(entity) ? crmDefaults(entity, item) : { ...item };
+    if (entity === 'finance' && (item.source === 'bank' || String(item.bankId || '')
+      || ['bankQueueId', 'bankSignals', 'bankSignalFingerprint', 'bankOriginal', 'appliedRuleId', 'appliedRuleVersion', 'applicationId']
+        .some((key) => item[key] !== undefined && item[key] !== null && item[key] !== ''))) {
+      return { ok: false, error: 'Банковская операция создаётся только из необработанной очереди' };
+    }
     delete item.staffAmount;
     if (u.role !== 'admin') item = sanitizeStaffEventPayload(entity, item);
     if (EVENT_ENTITIES.includes(entity)) item = normalizeEventRecord(entity, item);
@@ -1085,6 +1183,11 @@ export class LocalStore {
     const baseError = this._baseWriteError(u, entity);
     if (baseError) return { ok: false, error: baseError };
     item = { ...item };
+    if (entity === 'finance' && (item.source === 'bank' || String(item.bankId || '')
+      || ['bankQueueId', 'bankSignals', 'bankSignalFingerprint', 'bankOriginal', 'appliedRuleId', 'appliedRuleVersion', 'applicationId']
+        .some((key) => item[key] !== undefined && item[key] !== null && item[key] !== ''))) {
+      return { ok: false, error: 'Банковская операция изменяется только специальным действием' };
+    }
     delete item.staffAmount;
     if (u.role !== 'admin') item = sanitizeStaffEventPayload(entity, item);
     if (entity === 'companies' && String(item?.id || '').startsWith(CRM_LEGACY_PREFIX)) {
@@ -1093,6 +1196,11 @@ export class LocalStore {
     const i = db[entity].findIndex((x) => x.id === item.id);
     if (i < 0) return { ok: false, error: 'Не найдено' };
     const before = db[entity][i];
+    if (entity === 'finance' && (before.source === 'bank' || String(before.bankId || '')
+      || ['bankQueueId', 'bankSignals', 'bankSignalFingerprint', 'bankOriginal', 'appliedRuleId', 'appliedRuleVersion', 'applicationId']
+        .some((key) => before[key] !== undefined && before[key] !== null && before[key] !== ''))) {
+      return { ok: false, error: 'Банковская операция изменяется только специальным действием' };
+    }
     if (entity === 'stockMovements') return { ok: false, error: 'Проведённые движения нельзя изменять' };
     if (entity === 'inventories' && before.status === 'completed') return { ok: false, error: 'Завершённую инвентаризацию нельзя изменять' };
     if (entity === 'businesses' && !canAccessBusiness(db, u, before.id)) return { ok: false, error: 'Нет доступа к этому бизнесу' };
@@ -1233,6 +1341,11 @@ export class LocalStore {
     }
     const before = db[entity].find((x) => x.id === id);
     if (!before) return { ok: false, error: 'Не найдено' };
+    if (entity === 'finance' && (before.source === 'bank' || String(before.bankId || '')
+      || ['bankQueueId', 'bankSignals', 'bankSignalFingerprint', 'bankOriginal', 'appliedRuleId', 'appliedRuleVersion', 'applicationId']
+        .some((key) => before[key] !== undefined && before[key] !== null && before[key] !== ''))) {
+      return { ok: false, error: 'Банковская операция удаляется только безопасной отменой из журнала' };
+    }
     if (entity === 'stockMovements') return { ok: false, error: 'Проведённые движения нельзя удалять' };
     if (entity === 'inventories' && before.status === 'completed') return { ok: false, error: 'Завершённую инвентаризацию нельзя удалять' };
     if (entity === 'businesses' && !canAccessBusiness(db, u, before.id)) return { ok: false, error: 'Нет доступа к этому бизнесу' };
@@ -1397,6 +1510,457 @@ export class LocalStore {
     };
   }
 
+  _bankFingerprint(value) {
+    const source = canonicalJson(value || {});
+    let hash = 2166136261;
+    for (let i = 0; i < source.length; i++) {
+      hash ^= source.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+    return `demo:${(hash >>> 0).toString(16).padStart(8, '0')}`;
+  }
+
+  _ensureLegacyBankApplications(db) {
+    let changed = false;
+    for (const finance of db.finance || []) {
+      if (!isBankManagedFinance(finance) || (db.bankRuleApplications || []).some((item) => item.financeId === finance.id)) continue;
+      const suffix = this._bankFingerprint(finance).replace('demo:', '');
+      db.bankRuleApplications.push({
+        id: `bank-application:legacy:${suffix}`, idempotencyKey: `legacy:${suffix}`,
+        operation: 'legacy_backfill', decision: 'legacy', state: 'applied', financeId: finance.id,
+        financeFingerprint: this._bankFingerprint(finance), operationDate: finance.date,
+        businessId: businessIdOf(finance), category: finance.category, method: finance.method,
+        auditRef: `legacy-${suffix}`, canReverse: false, actor: 'migration', created: finance.updated || finance.created || 0,
+      });
+      changed = true;
+    }
+    return changed;
+  }
+
+  _bankSettings(db) {
+    if (!db.bankRuleSettings.length) db.bankRuleSettings.push({ ...DEFAULT_BANK_RULE_SETTINGS, created: Date.now(), updated: Date.now() });
+    return safeBankRuleSettings(db.bankRuleSettings[0]);
+  }
+
+  _validateBankRuleActions(db, u, actions = {}, requireClassification = true) {
+    const businessId = String(actions.businessId || '').trim();
+    if (!businessId) return 'Не указан бизнес';
+    const business = db.businesses.find((item) => item.id === businessId && item.active !== false);
+    if (!business) return 'Бизнес не найден или находится в архиве';
+    const accessDeny = this._scopeWriteError(db, u, { businessId, unit: businessId });
+    if (accessDeny) return accessDeny;
+    if ((requireClassification && !String(actions.category || '').trim()) || String(actions.category || '').length > 120) return 'Не указана категория';
+    if (actions.owner && !db.businessOwners.some((item) => businessIdOf(item) === businessId
+      && item.businessId === businessId && item.unit === businessId && item.ownerId === actions.owner && item.active !== false)) {
+      return 'Владелец не относится к этому бизнесу';
+    }
+    const links = actions.links || {};
+    const refs = [['playerId', 'players'], ['companyId', 'companies'], ['contactId', 'contacts'], ['dealId', 'deals']];
+    for (const [field, entity] of refs) {
+      if (!links[field]) continue;
+      const item = db[entity].find((candidate) => candidate.id === links[field]);
+      if (!item || businessIdOf(item) !== businessId || item.businessId !== businessId || item.unit !== businessId) return 'Связанная запись не относится к этому бизнесу';
+    }
+    const contact = db.contacts.find((item) => item.id === links.contactId);
+    const deal = db.deals.find((item) => item.id === links.dealId);
+    if (contact && links.companyId && contact.companyId !== links.companyId) return 'Контакт не относится к выбранной компании';
+    if (deal && links.companyId && deal.companyId && deal.companyId !== links.companyId) return 'Сделка не относится к выбранной компании';
+    if (deal && links.contactId && deal.contactId && deal.contactId !== links.contactId) return 'Сделка не относится к выбранному контакту';
+    const eventLink = links.event;
+    if (eventLink?.eventId) {
+      if (!business.modules?.includes('events')) return 'Модуль «События» выключен';
+      const event = db.events.find((item) => item.id === eventLink.eventId);
+      if (!event || businessIdOf(event) !== businessId || event.businessId !== businessId || event.unit !== businessId || event.settlementStatus === 'closed') return 'Событие недоступно для этого бизнеса';
+      const registration = eventLink.registrationId && db.eventRegistrations.find((item) => item.id === eventLink.registrationId);
+      if (eventLink.registrationId && (!registration || registration.eventId !== event.id || businessIdOf(registration) !== businessId)) return 'Регистрация не относится к событию';
+      const expectedParticipant = links.playerId || links.companyId || links.contactId;
+      if (registration && expectedParticipant && registration.participantId !== expectedParticipant) return 'Регистрация относится к другому участнику';
+      const budget = eventLink.budgetLineId && db.eventBudgetLines.find((item) => item.id === eventLink.budgetLineId);
+      if (eventLink.budgetLineId && (!budget || budget.eventId !== event.id || businessIdOf(budget) !== businessId)) return 'Строка бюджета не относится к событию';
+    }
+    return null;
+  }
+
+  async bankRulesList(token) {
+    const u = this._user(token);
+    if (!u || u.role !== 'admin') return { ok: false, error: 'Только для админа' };
+    const db = this._db();
+    return { ok: true, rules: structuredClone(db.bankRules), versions: structuredClone(db.bankRuleVersions) };
+  }
+
+  async bankRuleSave(token, source, expectedVersion = 0) {
+    const u = this._user(token);
+    if (!u || u.role !== 'admin') return { ok: false, error: 'Только для админа' };
+    const activationToken = String(source?.activationToken || '');
+    const candidate = { ...(source || {}) }; delete candidate.activationToken;
+    const validation = validateBankRule(candidate);
+    if (!validation.ok) return { ok: false, error: validation.errors[0], errors: validation.errors };
+    const db = this._db();
+    const id = String(validation.rule.id || `bank-rule:${uid()}`);
+    const current = db.bankRules.find((rule) => rule.id === id);
+    if (Number(current?.version || 0) !== Number(expectedVersion || 0)) return { ok: false, error: 'Правило уже изменено' };
+    if (validation.rule.actions?.businessId) {
+      const targetDeny = this._validateBankRuleActions(db, u, validation.rule.actions, validation.rule.decision === 'auto');
+      if (targetDeny) return { ok: false, error: targetDeny };
+    }
+    let activation = {};
+    if (validation.rule.decision === 'auto' && validation.rule.enabled !== false) {
+      const fingerprint = this._bankFingerprint(activationRuleShape(validation.rule));
+      const run = db.bankRuleRuns.find((item) => item.kind === 'dry-run'
+        && item.activation?.tokenHash === this._bankFingerprint(activationToken)
+        && item.activation?.ruleFingerprint === fingerprint
+        && Number(item.activation?.expectedVersion) === Number(expectedVersion || 0)
+        && Number(item.activation?.settingsVersion) === Number(this._bankSettings(db).settingsVersion)
+        && item.actor === u.id && Number(item.activation?.expiresAt || 0) >= Date.now());
+      if (!run) return { ok: false, error: 'Сначала выполните проверку этого auto-правила и явно подтвердите включение' };
+      activation = { activationRunId: run.id, activationFingerprint: fingerprint };
+    }
+    const now = Date.now();
+    const rule = {
+      ...validation.rule, ...activation, id, version: Number(current?.version || 0) + 1,
+      enabled: validation.rule.enabled !== false,
+      createdBy: current?.createdBy || u.id, updatedBy: u.id,
+      created: current?.created || now, updated: now,
+    };
+    rule.checksum = this._bankFingerprint({ ...rule, checksum: undefined, updated: undefined });
+    if (current) db.bankRules[db.bankRules.indexOf(current)] = rule; else db.bankRules.push(rule);
+    db.bankRuleVersions.push({ ...structuredClone(rule), id: `${id}:v${rule.version}`, ruleId: id });
+    this._save(db);
+    return { ok: true, rule };
+  }
+
+  async bankRuleEnable(token, id, enabled, expectedVersion, activationToken = '') {
+    const u = this._user(token);
+    if (!u || u.role !== 'admin') return { ok: false, error: 'Только для админа' };
+    const db = this._db();
+    const current = db.bankRules.find((rule) => rule.id === id);
+    if (!current) return { ok: false, error: 'Правило не найдено' };
+    if (current.deleted === true && enabled === true) return { ok: false, error: 'Архивное правило нельзя включить' };
+    return this.bankRuleSave(token, { ...current, enabled: enabled === true, activationToken }, expectedVersion);
+  }
+
+  async bankRuleDelete(token, id, expectedVersion) {
+    const u = this._user(token);
+    if (!u || u.role !== 'admin') return { ok: false, error: 'Только для админа' };
+    const db = this._db();
+    const current = db.bankRules.find((rule) => rule.id === id);
+    if (!current) return { ok: false, error: 'Правило не найдено' };
+    return this.bankRuleSave(token, { ...current, enabled: false, deleted: true, deletedAt: Date.now() }, expectedVersion);
+  }
+
+  async bankRuleSettingsGet(token) {
+    const u = this._user(token);
+    if (!u || u.role !== 'admin') return { ok: false, error: 'Только для админа' };
+    return { ok: true, settings: structuredClone(this._bankSettings(this._db())) };
+  }
+
+  async bankRuleSettingsUpdate(token, source, expectedVersion) {
+    const u = this._user(token);
+    if (!u || u.role !== 'admin') return { ok: false, error: 'Только для админа' };
+    const db = this._db();
+    const current = this._bankSettings(db);
+    if (Number(current.settingsVersion) !== Number(expectedVersion)) return { ok: false, error: 'Настройки уже изменены' };
+    const settings = safeBankRuleSettings({ ...source, id: current.id, created: current.created, settingsVersion: current.settingsVersion + 1, updatedBy: u.id, updated: Date.now() });
+    if (settings.autoEnabled && (!settings.allowedDirections.length || !settings.maxTransactionsPerDay || !settings.maxTotalAmountMinorPerDay)) {
+      return { ok: false, error: 'Перед включением автопроведения задайте безопасные лимиты' };
+    }
+    db.bankRuleSettings[0] = settings;
+    db.bankRuleSettingVersions.push({ ...structuredClone(settings), id: `bank-rule-settings:v${settings.settingsVersion}`, settingsId: 'bank-rule-settings' });
+    this._save(db);
+    return { ok: true, settings };
+  }
+
+  async bankRulePreviewTransaction(token, transactionId, draft) {
+    const u = this._user(token);
+    if (!u || u.role !== 'admin') return { ok: false, error: 'Только для админа' };
+    const db = this._db();
+    const transaction = db.bankTransactions.find((item) => item.id === transactionId);
+    if (!transaction) return { ok: false, error: 'Банковская операция не найдена' };
+    let rules = db.bankRules;
+    if (draft) {
+      const validation = validateBankRule(draft);
+      if (!validation.ok) return { ok: false, error: validation.errors[0], errors: validation.errors };
+      const id = String(validation.rule.id || 'draft');
+      rules = [{ ...validation.rule, id, version: validation.rule.version || 0 }, ...rules.filter((rule) => rule.id !== id)];
+    }
+    const evaluation = evaluateBankRules(transaction.bankSignals || {}, rules, this._bankSettings(db));
+    return { ok: true, evaluation: publicBankRuleEvaluation(evaluation), evaluationToken: bankRuleEvaluationToken(transaction, evaluation) };
+  }
+
+  async bankRuleDryRun(token, draft, expectedVersion = 0) {
+    const u = this._user(token);
+    if (!u || u.role !== 'admin') return { ok: false, error: 'Только для админа' };
+    const db = this._db();
+    let rules = db.bankRules;
+    let activationToken = '';
+    let activation;
+    if (draft) {
+      const validation = validateBankRule(draft);
+      if (!validation.ok) return { ok: false, error: validation.errors[0], errors: validation.errors };
+      const id = String(validation.rule.id || 'draft');
+      rules = [{ ...validation.rule, id, version: validation.rule.version || 0 }, ...rules.filter((rule) => rule.id !== id)];
+      if (validation.rule.decision === 'auto' && validation.rule.enabled !== false) {
+        activationToken = `activate:${uid()}:${uid()}`;
+        activation = {
+          tokenHash: this._bankFingerprint(activationToken),
+          ruleFingerprint: this._bankFingerprint(activationRuleShape(validation.rule)),
+          expectedVersion: Number(expectedVersion || 0), settingsVersion: this._bankSettings(db).settingsVersion,
+          expiresAt: Date.now() + 15 * 60 * 1000,
+        };
+      }
+    }
+    const summary = aggregateBankRulePreview(db.bankTransactions, rules, this._bankSettings(db));
+    db.bankRuleRuns.push({ id: `bank-rule-run:${uid()}`, kind: 'dry-run', summary, actor: u.id, engineVersion: BANK_RULE_ENGINE_VERSION, created: Date.now(), ...(activation ? { activation } : {}) });
+    this._save(db);
+    return { ok: true, summary, ...(activationToken ? { activationToken, expiresAt: activation.expiresAt } : {}) };
+  }
+
+  _localApplyBankRule(db, u, transaction, evaluation, idempotencyKey, decision = 'suggest') {
+    const existingApplication = db.bankRuleApplications.find((item) => item.idempotencyKey === idempotencyKey);
+    if (existingApplication) {
+      if (existingApplication.sourceQueueId !== transaction.id || existingApplication.operation !== 'apply') {
+        return { ok: false, error: 'Ключ повторяемости использован для другого действия' };
+      }
+      const item = db.finance.find((finance) => finance.id === existingApplication.financeId);
+      return { ok: true, item, application: existingApplication, alreadyProcessed: true };
+    }
+    const queueState = transaction.bankRuleState || 'pending';
+    const signalError = bankQueueSignalError(transaction);
+    if (signalError) return { ok: false, error: signalError };
+    if ((decision === 'manual' && !['pending', 'manual'].includes(queueState))
+      || (decision !== 'manual' && queueState !== 'pending')) return { ok: false, error: 'Сначала верните операцию к проверке' };
+    if (evaluation.conflict || !evaluation.actions?.businessId || !evaluation.actions?.category) return { ok: false, error: 'Правила конфликтуют' };
+    const targetDeny = this._validateBankRuleActions(db, u, evaluation.actions);
+    if (targetDeny) return { ok: false, error: targetDeny };
+    const businessId = evaluation.actions.businessId;
+    const accessDeny = this._scopeWriteError(db, u, { businessId, unit: businessId });
+    if (accessDeny) return { ok: false, error: accessDeny };
+    const existingFinance = db.finance.find((item) => transaction.bankId && item.bankId === transaction.bankId);
+    if (existingFinance) {
+      const application = {
+        id: `bank-application:${uid()}`, idempotencyKey, sourceQueueId: transaction.id, operation: 'apply',
+        decision, state: 'already_processed', financeId: existingFinance.id,
+        financeFingerprint: this._bankFingerprint(existingFinance), actor: u.id, created: Date.now(),
+      };
+      db.bankRuleApplications.push(application);
+      db.bankTransactions = db.bankTransactions.filter((item) => item.id !== transaction.id);
+      this._save(db);
+      return { ok: true, item: existingFinance, application, alreadyProcessed: true };
+    }
+    const now = Date.now();
+    if (!['pending', 'manual'].includes(transaction.bankRuleState || 'pending')) return { ok: false, error: 'Сначала верните операцию к проверке' };
+    const financeId = `bank:${transaction.id}`;
+    const amountMinor = Number(transaction.bankSignals?.amountMinor ?? Math.round(Number(transaction.amount || 0) * 100));
+    const applicationId = `bank-application:${uid()}`;
+    const item = {
+      id: financeId, businessId, unit: businessId, date: transaction.date,
+      type: transaction.type, amount: amountMinor / 100,
+      method: evaluation.actions.methodOverride || transaction.method || 'account', source: 'bank',
+      category: evaluation.actions.category,
+      counterparty: evaluation.actions.counterpartyOverride || transaction.counterparty || '',
+      comment: evaluation.actions.comment
+        ? `${transaction.comment || ''}${transaction.comment ? ' · ' : ''}${evaluation.actions.comment}` : transaction.comment || '',
+      owner: evaluation.actions.owner || undefined, tags: evaluation.actions.tags || [],
+      bankId: transaction.bankId, bankQueueId: transaction.id, bankSignals: transaction.bankSignals,
+      bankSignalFingerprint: this._bankFingerprint(transaction.bankSignals || {}),
+      bankOriginal: { method: transaction.method || 'account', counterparty: transaction.counterparty || '', comment: transaction.comment || '' },
+      appliedRuleId: evaluation.appliedRuleId, appliedRuleVersion: evaluation.appliedRuleVersion,
+      applicationId, created: transaction.created || now, updated: now,
+    };
+    const links = evaluation.actions.links || {};
+    const eventAllocation = links.event?.eventId ? normalizeEventRecord('eventFinanceAllocations', {
+      id: `event-finance:${uid()}`, businessId, unit: businessId, eventId: links.event.eventId, financeId,
+      registrationId: links.event.registrationId || undefined, budgetLineId: links.event.budgetLineId || undefined,
+      purpose: links.event.purpose, amount: Number(links.event.amountMinor || amountMinor) / 100,
+      idempotencyKey: `${idempotencyKey}:event`, createdBy: u.id, created: now, updated: now,
+    }) : null;
+    if (eventAllocation) {
+      const eventDeny = eventRecordError('eventFinanceAllocations', eventAllocation, { ...db, finance: [...db.finance, item] });
+      if (eventDeny) return { ok: false, error: eventDeny };
+    }
+    db.finance.push(item);
+    ['playerId', 'companyId', 'contactId', 'dealId'].forEach((field) => {
+      if (!links[field]) return;
+      db.financeRelations.push({
+        id: `finance-relation:${uid()}`, businessId, unit: businessId, financeId,
+        relationType: field.replace(/Id$/, ''), relationId: links[field], applicationId,
+        idempotencyKey: `${idempotencyKey}:${field}`, created: now,
+      });
+    });
+    if (eventAllocation) db.eventFinanceAllocations.push(eventAllocation);
+    const application = {
+      id: applicationId, idempotencyKey, appliedRuleId: evaluation.appliedRuleId,
+      sourceQueueId: transaction.id, operation: 'apply',
+      appliedRuleVersion: evaluation.appliedRuleVersion,
+      settingsVersion: this._bankSettings(db).settingsVersion,
+      engineVersion: BANK_RULE_ENGINE_VERSION, decision, state: 'applied',
+      confidence: evaluation.confidence, financeId,
+      financeFingerprint: this._bankFingerprint(item),
+      operationDate: transaction.date, businessId, category: item.category, method: item.method,
+      auditRef: `audit-${applicationId.slice(-8)}`, canReverse: true,
+      actor: u.id, day: new Date().toISOString().slice(0, 10), amountMinor, created: now,
+    };
+    db.bankRuleApplications.push(application);
+    db.bankTransactions = db.bankTransactions.filter((entry) => entry.id !== transaction.id);
+    this._save(db);
+    return { ok: true, item, application };
+  }
+
+  async bankRuleApplySuggestion(token, transactionId, expectedEvaluationToken, idempotencyKey) {
+    const u = this._user(token);
+    if (!u || u.role !== 'admin') return { ok: false, error: 'Только для админа' };
+    if (!/^[A-Za-z0-9:_-]{8,160}$/.test(String(idempotencyKey || ''))) return { ok: false, error: 'Некорректный ключ повторяемости' };
+    const db = this._db();
+    const transaction = db.bankTransactions.find((item) => item.id === transactionId);
+    if (!transaction) {
+      const application = db.bankRuleApplications.find((item) => item.idempotencyKey === idempotencyKey);
+      return application && application.sourceQueueId === transactionId && application.operation === 'apply'
+        ? { ok: true, item: db.finance.find((item) => item.id === application.financeId), application, alreadyProcessed: true }
+        : application ? { ok: false, error: 'Ключ повторяемости использован для другого действия' }
+        : { ok: false, error: 'Банковская операция не найдена' };
+    }
+    if (transaction.bankRuleState && transaction.bankRuleState !== 'pending') return { ok: false, error: 'Сначала верните операцию к проверке' };
+    const evaluation = evaluateBankRules(transaction.bankSignals || {}, db.bankRules, this._bankSettings(db));
+    if (!evaluation.appliedRuleId || evaluation.conflict || ['manual', 'ignore'].includes(evaluation.requestedDecision)) {
+      return { ok: false, error: evaluation.conflict ? 'Правила конфликтуют' : 'Эта операция требует ручной обработки' };
+    }
+    if (!expectedEvaluationToken || expectedEvaluationToken !== bankRuleEvaluationToken(transaction, evaluation)) return { ok: false, error: 'Предложение устарело' };
+    return this._localApplyBankRule(db, u, transaction, evaluation, idempotencyKey, 'suggest');
+  }
+
+  async _bankQueueState(token, transactionId, idempotencyKey, state, outcome) {
+    const u = this._user(token);
+    if (!u || u.role !== 'admin') return { ok: false, error: 'Только для админа' };
+    if (!/^[A-Za-z0-9:_-]{8,160}$/.test(String(idempotencyKey || ''))) return { ok: false, error: 'Некорректный ключ повторяемости' };
+    const db = this._db();
+    const existing = db.bankRuleApplications.find((item) => item.idempotencyKey === idempotencyKey);
+    const operation = `queue:${state}:${outcome}`;
+    if (existing) return existing.sourceQueueId === transactionId && existing.operation === operation
+      ? { ok: true, application: existing, alreadyProcessed: true }
+      : { ok: false, error: 'Ключ повторяемости использован для другого действия' };
+    const transaction = db.bankTransactions.find((item) => item.id === transactionId);
+    if (!transaction) return { ok: false, error: 'Банковская операция не найдена' };
+    transaction.bankRuleState = state;
+    transaction.updated = Date.now();
+    const application = { id: `bank-application:${uid()}`, idempotencyKey, sourceQueueId: transaction.id, operation, decision: state, state: outcome, actor: u.id, created: Date.now() };
+    db.bankRuleApplications.push(application);
+    this._save(db);
+    return { ok: true, application };
+  }
+
+  bankRuleRejectSuggestion(token, transactionId, idempotencyKey) { return this._bankQueueState(token, transactionId, idempotencyKey, 'pending', 'rejected'); }
+  bankRuleIgnore(token, transactionId, idempotencyKey) { return this._bankQueueState(token, transactionId, idempotencyKey, 'ignored', 'ignored'); }
+  bankRuleManual(token, transactionId, idempotencyKey) { return this._bankQueueState(token, transactionId, idempotencyKey, 'manual', 'manual'); }
+  bankRuleReevaluate(token, transactionId, idempotencyKey) { return this._bankQueueState(token, transactionId, idempotencyKey, 'pending', 'reevaluated'); }
+
+  async bankRuleJournal(token, limit = 50, cursorSource = '') {
+    const u = this._user(token);
+    if (!u || u.role !== 'admin') return { ok: false, error: 'Только для админа' };
+    const db = this._db();
+    const count = Math.min(100, Math.max(1, Math.floor(Number(limit || 50))));
+    let cursor;
+    try { cursor = decodeBankJournalCursor(cursorSource); } catch (_error) {
+      return { ok: false, error: 'Некорректный курсор журнала' };
+    }
+    const ordered = db.bankRuleApplications.slice().sort((a, b) => bankJournalCreated(b) - bankJournalCreated(a) || String(b.id).localeCompare(String(a.id)));
+    const afterCursor = cursor ? ordered.filter((item) => bankJournalCreated(item) < cursor.created
+      || (bankJournalCreated(item) === cursor.created && String(item.id).localeCompare(cursor.id) < 0)) : ordered;
+    const page = afterCursor.slice(0, count + 1);
+    const hasMore = page.length > count;
+    const pageItems = page.slice(0, count);
+    const applications = pageItems.map((item) => {
+      const finance = db.finance.find((entry) => entry.id === item.financeId);
+      return {
+        id: String(item.id || ''), decision: String(item.decision || ''), state: String(item.state || ''),
+        operation: String(item.operation || ''),
+        appliedRuleId: item.appliedRuleId ? String(item.appliedRuleId) : undefined,
+        appliedRuleVersion: item.appliedRuleVersion === undefined ? undefined : Number(item.appliedRuleVersion),
+        created: Number(item.created || 0), auditRef: item.auditRef || `audit-${String(item.id || '').slice(-8)}`,
+        operationDate: item.operationDate || finance?.date,
+        businessId: item.businessId || businessIdOf(finance), category: item.category || finance?.category,
+        method: item.method || finance?.method,
+        canReverse: item.canReverse !== false && item.operation !== 'legacy_backfill',
+      };
+    });
+    const nextCursor = hasMore && pageItems.length ? encodeBankJournalCursor(pageItems[pageItems.length - 1]) : '';
+    return { ok: true, applications, hasMore, nextCursor };
+  }
+
+  async bankRuleCorrect(token, applicationId, patch, idempotencyKey) {
+    const u = this._user(token);
+    if (!u || u.role !== 'admin') return { ok: false, error: 'Только для админа' };
+    if (!/^[A-Za-z0-9:_-]{8,160}$/.test(String(idempotencyKey || ''))) return { ok: false, error: 'Некорректный ключ повторяемости' };
+    const db = this._db();
+    const existing = db.bankRuleApplications.find((item) => item.idempotencyKey === idempotencyKey);
+    const patchChecksum = this._bankFingerprint(patch || {});
+    if (existing) return existing.sourceApplicationId === applicationId && existing.patchChecksum === patchChecksum
+      ? { ok: true, application: existing, alreadyProcessed: true }
+      : { ok: false, error: 'Ключ повторяемости использован для другого исправления' };
+    const requested = db.bankRuleApplications.find((item) => item.id === applicationId && ['applied', 'corrected'].includes(item.state));
+    const application = requested && db.bankRuleApplications.filter((item) => item.financeId === requested.financeId && ['applied', 'corrected'].includes(item.state))
+      .sort((a, b) => Number(b.created || 0) - Number(a.created || 0) || String(b.id).localeCompare(String(a.id)))[0];
+    const finance = db.finance.find((item) => item.id === application?.financeId);
+    if (!application || !finance || application.financeFingerprint !== this._bankFingerprint(finance)) return { ok: false, error: 'Операция уже изменилась' };
+    const allowed = ['category', 'method', 'owner', 'comment', 'counterparty'];
+    if (Object.keys(patch || {}).some((key) => !allowed.includes(key))) return { ok: false, error: 'Можно исправить только классификацию' };
+    const clearable = new Set(['owner', 'comment', 'counterparty']);
+    if (Object.entries(patch || {}).some(([key, value]) => typeof value !== 'string' && !(value === null && clearable.has(key)))) {
+      return { ok: false, error: 'Поля исправления должны быть строками или явным очищением' };
+    }
+    if (patch.category !== undefined && (!String(patch.category).trim() || String(patch.category).length > 120)) return { ok: false, error: 'Некорректная категория' };
+    if (patch.method !== undefined && !FIN_METHODS.some((item) => item.id === patch.method)) return { ok: false, error: 'Некорректный способ оплаты' };
+    if (patch.owner && !db.businessOwners.some((item) => businessIdOf(item) === finance.businessId && item.ownerId === patch.owner && item.active !== false)) return { ok: false, error: 'Владелец не относится к бизнесу' };
+    if (String(patch.comment || '').length > 300 || String(patch.counterparty || '').length > 160) return { ok: false, error: 'Слишком длинное значение исправления' };
+    const before = Object.fromEntries(allowed.map((key) => [key, finance[key]]));
+    Object.assign(finance, patch, { updated: Date.now() });
+    const audit = {
+      id: `bank-application:${uid()}`, idempotencyKey, decision: 'correct', state: 'corrected',
+      sourceApplicationId: applicationId, patchChecksum,
+      financeId: finance.id, supersedes: application.id, before, after: Object.fromEntries(allowed.map((key) => [key, finance[key]])),
+      actor: u.id, created: Date.now(), financeFingerprint: this._bankFingerprint(finance),
+      operationDate: finance.date, businessId: businessIdOf(finance), category: finance.category, method: finance.method,
+      auditRef: `audit-${this._bankFingerprint(idempotencyKey).slice(-8)}`, canReverse: application.canReverse !== false,
+    };
+    db.bankRuleApplications.push(audit);
+    this._save(db);
+    return { ok: true, item: finance, application: audit };
+  }
+
+  async bankRuleReverse(token, applicationId, idempotencyKey) {
+    const u = this._user(token);
+    if (!u || u.role !== 'admin') return { ok: false, error: 'Только для админа' };
+    if (!/^[A-Za-z0-9:_-]{8,160}$/.test(String(idempotencyKey || ''))) return { ok: false, error: 'Некорректный ключ повторяемости' };
+    const db = this._db();
+    const existing = db.bankRuleApplications.find((item) => item.idempotencyKey === idempotencyKey);
+    if (existing) return existing.sourceApplicationId === applicationId
+      ? { ok: true, application: existing, alreadyProcessed: true }
+      : { ok: false, error: 'Ключ повторяемости использован для другой отмены' };
+    const requested = db.bankRuleApplications.find((item) => item.id === applicationId && ['applied', 'corrected'].includes(item.state));
+    const application = requested && db.bankRuleApplications.filter((item) => item.financeId === requested.financeId && ['applied', 'corrected'].includes(item.state))
+      .sort((a, b) => Number(b.created || 0) - Number(a.created || 0) || String(b.id).localeCompare(String(a.id)))[0];
+    const finance = db.finance.find((item) => item.id === application?.financeId);
+    if (!application || application.canReverse === false || application.operation === 'legacy_backfill'
+      || !finance || application.financeFingerprint !== this._bankFingerprint(finance)
+      || db.financeRelations.some((item) => item.financeId === finance?.id)
+      || db.eventFinanceAllocations.some((item) => item.financeId === finance?.id)
+      || db.stockMovements.some((item) => item.financeId === finance?.id)) {
+      return { ok: false, error: 'Безопасная отмена невозможна: операция или её связи уже изменились' };
+    }
+    const now = Date.now();
+    db.bankTransactions.push({
+      id: finance.bankQueueId, bankId: finance.bankId, date: finance.date, type: finance.type,
+      amount: finance.amount, method: finance.bankOriginal?.method || finance.method, source: 'bank',
+      counterparty: finance.bankOriginal?.counterparty || '', comment: finance.bankOriginal?.comment || '',
+      bankSignals: finance.bankSignals, bankSignalFingerprint: finance.bankSignalFingerprint,
+      bankRuleState: 'pending', created: finance.created, updated: now,
+    });
+    db.finance = db.finance.filter((item) => item.id !== finance.id);
+    const reversal = { id: `bank-application:${uid()}`, idempotencyKey, sourceApplicationId: applicationId, decision: 'reverse', state: 'reversed', supersedes: application.id, actor: u.id, created: now };
+    db.bankRuleApplications.push(reversal);
+    this._save(db);
+    return { ok: true, application: reversal };
+  }
+
   async processBankTransaction(token, id, businessId, category) {
     const u = this._user(token);
     if (!u || u.role !== 'admin') return { ok: false, error: 'Только для админа' };
@@ -1411,6 +1975,9 @@ export class LocalStore {
     if (accessError) return { ok: false, error: accessError };
     const transaction = db.bankTransactions.find((item) => item.id === id);
     if (!transaction) {
+      const application = db.bankRuleApplications.find((item) => item.sourceQueueId === id && item.operation === 'apply' && item.decision === 'manual');
+      const applied = application && db.finance.find((item) => item.id === application.financeId);
+      if (applied) return { ok: true, item: applied, application, alreadyProcessed: true };
       const alreadyProcessed = db.finance.find((item) => item.id === `bank:${id}`);
       return alreadyProcessed
         ? { ok: true, item: alreadyProcessed, alreadyProcessed: true }
@@ -1422,33 +1989,23 @@ export class LocalStore {
     const financeId = `bank:${transaction.id}`;
     const existing = db.finance.find((item) => item.id === financeId || (transaction.bankId && item.bankId === transaction.bankId));
     if (existing) {
+      const idempotencyKey = `manual:${id}:${Number(transaction.updated || 0)}:${this._bankFingerprint(transaction.bankSignals || {})}`;
+      const application = {
+        id: `bank-application:${uid()}`, idempotencyKey, sourceQueueId: transaction.id, operation: 'apply',
+        decision: 'manual', state: 'already_processed', financeId: existing.id,
+        financeFingerprint: this._bankFingerprint(existing), actor: u.id, created: Date.now(),
+      };
+      db.bankRuleApplications.push(application);
       db.bankTransactions = db.bankTransactions.filter((item) => item.id !== id);
       this._save(db);
-      return { ok: true, item: existing, alreadyProcessed: true };
+      return { ok: true, item: existing, application, alreadyProcessed: true };
     }
 
     const now = Date.now();
-    const item = {
-      id: financeId,
-      businessId,
-      unit: businessId,
-      date: transaction.date,
-      type: transaction.type,
-      amount: transaction.amount,
-      method: transaction.method || 'account',
-      source: 'bank',
-      category,
-      counterparty: transaction.counterparty || '',
-      comment: transaction.comment || '',
-      bankId: transaction.bankId,
-      bankQueueId: transaction.id,
-      created: transaction.created || now,
-      updated: now
-    };
-    db.finance.push(item);
-    db.bankTransactions = db.bankTransactions.filter((entry) => entry.id !== id);
-    this._save(db);
-    return { ok: true, item };
+    return this._localApplyBankRule(db, u, transaction, {
+      actions: { businessId, category }, confidence: 1, amountOnly: false, conflict: false,
+      appliedRuleId: undefined, appliedRuleVersion: undefined,
+    }, `manual:${id}:${Number(transaction.updated || 0)}:${this._bankFingerprint(transaction.bankSignals || {})}`, 'manual');
   }
 
   async backup(token) {
@@ -1467,17 +2024,27 @@ export class LocalStore {
     if (current.employees.length && (!u || u.role !== 'admin')) return { ok: false, error: 'Только для админа' };
     const db = structuredClone(current);
     let imported = 0;
-    const ordinaryEntities = LOCAL_ENTITIES.filter((entity) => !EVENT_ENTITIES.includes(entity) && entity !== 'employees');
+    const ordinaryEntities = LOCAL_ENTITIES.filter((entity) => !EVENT_ENTITIES.includes(entity) && !BANK_RULE_ENTITIES.includes(entity) && entity !== 'employees' && entity !== 'bankTransactions');
     ordinaryEntities.forEach((entity) => {
       (data?.[entity] || []).forEach((source) => {
         const item = structuredClone(source);
-        if (!item?.id) return;
+        if (!item?.id || (entity === 'finance' && isBankManagedFinance(item))) return;
         db[entity] = db[entity] || [];
         const i = db[entity].findIndex((x) => x.id === item.id);
         if (i >= 0) db[entity][i] = item; else db[entity].push(item);
         imported++;
       });
     });
+    for (const item of data?.bankTransactions || []) {
+      if (!item?.id || !item?.bankId || !isSafeBankSignals(item.bankSignals || {})
+        || bankQueueSignalError(item)
+        || ['raw', 'payload', 'token'].some((key) => item[key] !== undefined)) return { ok: false, error: 'Резервная копия содержит небезопасную банковскую очередь' };
+      if (item.bankId && db.finance.some((finance) => finance.bankId === item.bankId)) continue;
+      if (!db.bankTransactions.some((candidate) => candidate.id === item.id || (item.bankId && candidate.bankId === item.bankId))) {
+        db.bankTransactions.push(structuredClone(item));
+      }
+      imported++;
+    }
     const exact = (a, b) => JSON.stringify(a) === JSON.stringify(b);
     const normalizeRestoreScope = (source) => {
       const item = structuredClone(source);
@@ -1491,6 +2058,56 @@ export class LocalStore {
       return item;
     };
     try {
+      for (const source of (data?.finance || []).filter(isBankManagedFinance)) {
+        const item = structuredClone(source);
+        if (!item?.id || !item?.bankId || item.source !== 'bank' || !isSafeBankSignals(item.bankSignals || {})
+          || bankQueueSignalError(item) || scopeError(item) || !businessIdOf(item)
+          || !db.businesses.some((business) => business.id === businessIdOf(item))) {
+          throw new Error('Резервная копия содержит небезопасную банковскую финансовую операцию');
+        }
+        const conflict = db.bankTransactions.some((candidate) => candidate.bankId === item.bankId);
+        const existing = db.finance.find((candidate) => candidate.id === item.id || candidate.bankId === item.bankId);
+        if (conflict || (existing && !exact(existing, item))) throw new Error('Конфликт банковской финансовой операции');
+        if (!existing) db.finance.push(item);
+        imported++;
+      }
+      const bankRestoreOrder = ['bankRules', 'bankRuleVersions', 'bankRuleSettingVersions', 'bankRuleApplications', 'bankRuleRuns', 'bankRuleSettings', 'financeRelations'];
+      const settingsComparable = (item) => JSON.stringify({
+        autoEnabled: item.autoEnabled, allowedDirections: item.allowedDirections, maxAmountMinor: item.maxAmountMinor,
+        maxTransactionsPerRun: item.maxTransactionsPerRun, maxTransactionsPerDay: item.maxTransactionsPerDay,
+        maxTotalAmountMinorPerDay: item.maxTotalAmountMinorPerDay,
+      });
+      for (const entity of bankRestoreOrder) {
+        for (const source of data?.[entity] || []) {
+          if (!source?.id) continue;
+          const item = structuredClone(source);
+          const existing = db[entity].find((candidate) => candidate.id === item.id);
+          if (entity === 'bankRuleSettings') {
+            const safe = safeBankRuleSettings(item);
+            if (item.id !== 'bank-rule-settings' || Object.keys(item).some((key) => !(key in safe))) throw new Error('Некорректные настройки правил в резервной копии');
+            const version = db.bankRuleSettingVersions.find((candidate) => Number(candidate.settingsVersion) === Number(safe.settingsVersion));
+            if (!version || settingsComparable(version) !== settingsComparable(safe)) throw new Error('Текущие настройки не подтверждены неизменяемой версией');
+            const pristine = Number(existing?.settingsVersion) === 1 && settingsComparable(existing) === settingsComparable(DEFAULT_BANK_RULE_SETTINGS);
+            if (existing && !pristine && !exact(existing, safe)) throw new Error('Резервная копия не может откатить действующие настройки');
+            if (existing) db[entity][db[entity].indexOf(existing)] = safe; else db[entity].push(safe);
+          } else if (entity === 'bankRuleSettingVersions' && item.id === 'bank-rule-settings:v1' && existing) {
+            if (settingsComparable(existing) !== settingsComparable(item)) throw new Error('Конфликт начальной версии настроек');
+          } else {
+            if (existing && !exact(existing, item)) throw new Error(`Конфликт повторного восстановления ${entity}:${item.id}`);
+            if (!existing) db[entity].push(item);
+          }
+          imported++;
+        }
+      }
+      for (const relation of db.financeRelations) {
+        const businessId = businessIdOf(relation);
+        const entity = { player: 'players', company: 'companies', contact: 'contacts', deal: 'deals' }[relation.relationType];
+        const finance = db.finance.find((item) => item.id === relation.financeId && businessIdOf(item) === businessId);
+        const target = entity && db[entity].find((item) => item.id === relation.relationId && businessIdOf(item) === businessId);
+        if (!businessId || relation.businessId !== businessId || relation.unit !== businessId || !finance || !target) {
+          throw new Error('Финансовая связь резервной копии не относится к бизнесу');
+        }
+      }
       for (const entity of EVENT_ENTITIES) {
         for (const source of data?.[entity] || []) {
           if (!source?.id) continue;
@@ -1551,6 +2168,7 @@ export class LocalStore {
       imported++;
     }
     ensureCoreData(db);
+    this._ensureLegacyBankApplications(db);
     this._save(db);
     return { ok: true, imported };
   }
@@ -1610,6 +2228,24 @@ class RemoteStore {
   status() { return this._call({ action: 'status' }); }
   tochkaSync(token, days = 30) { return this._call({ action: 'tochka_sync', token, days }); }
   processBankTransaction(token, id, businessId, category) { return this._call({ action: 'process_bank_transaction', token, id, businessId, category }); }
+  bankRulesList(token) { return this._call({ action: 'bank_rules_list', token }); }
+  bankRuleSave(token, rule, expectedVersion) { return this._call({ action: 'bank_rule_save', token, rule, expectedVersion }); }
+  bankRuleEnable(token, id, enabled, expectedVersion, activationToken = '') { return this._call({ action: 'bank_rule_enable', token, id, enabled, expectedVersion, activationToken }); }
+  bankRuleDelete(token, id, expectedVersion) { return this._call({ action: 'bank_rule_delete', token, id, expectedVersion }); }
+  bankRuleSettingsGet(token) { return this._call({ action: 'bank_rule_settings_get', token }); }
+  bankRuleSettingsUpdate(token, settings, expectedVersion) { return this._call({ action: 'bank_rule_settings_update', token, settings, expectedVersion }); }
+  bankRulePreviewTransaction(token, transactionId, draft) { return this._call({ action: 'bank_rule_preview_transaction', token, transactionId, draft }); }
+  bankRuleDryRun(token, draft, expectedVersion = 0) { return this._call({ action: 'bank_rule_dry_run', token, draft, expectedVersion }); }
+  bankRuleApplySuggestion(token, transactionId, expectedEvaluationToken, idempotencyKey) {
+    return this._call({ action: 'bank_rule_apply_suggestion', token, transactionId, expectedEvaluationToken, idempotencyKey });
+  }
+  bankRuleRejectSuggestion(token, transactionId, idempotencyKey) { return this._call({ action: 'bank_rule_reject_suggestion', token, transactionId, idempotencyKey }); }
+  bankRuleIgnore(token, transactionId, idempotencyKey) { return this._call({ action: 'bank_rule_ignore', token, transactionId, idempotencyKey }); }
+  bankRuleManual(token, transactionId, idempotencyKey) { return this._call({ action: 'bank_rule_manual', token, transactionId, idempotencyKey }); }
+  bankRuleReevaluate(token, transactionId, idempotencyKey) { return this._call({ action: 'bank_rule_reevaluate', token, transactionId, idempotencyKey }); }
+  bankRuleJournal(token, limit = 50, cursor = '') { return this._call({ action: 'bank_rule_journal', token, limit, cursor }); }
+  bankRuleCorrect(token, applicationId, patch, idempotencyKey) { return this._call({ action: 'bank_rule_correct', token, applicationId, patch, idempotencyKey }); }
+  bankRuleReverse(token, applicationId, idempotencyKey) { return this._call({ action: 'bank_rule_reverse', token, applicationId, idempotencyKey }); }
   allocateEventFinance(token, item) { return this._call({ action: 'allocate_event_finance', token, item }); }
   closeEventSettlement(token, id) { return this._call({ action: 'close_event_settlement', token, id }); }
   backup(token) { return this._call({ action: 'backup', token }); }

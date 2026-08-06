@@ -27,7 +27,8 @@ test("финансовые распределения создаются ато�
   assert.match(events, /eventRpc\("event_allocate_finance"/);
   assert.match(actions, /export async function createEventFinanceAllocation/);
   assert.match(actions, /export async function closeEventSettlement/);
-  assert.match(actions, /restoreEventGraph\(graph\)/);
+  assert.match(actions, /const eventGraph = Object\.fromEntries\(EVENT_ENTITIES/);
+  assert.match(actions, /callRpc\("restore_monetki_backup"/);
   assert.doesNotMatch(actions, /restoreEventChild\(entity, item\)/);
   assert.match(events, /eventRpc\("event_restore_graph"/);
   assert.match(migration, /create or replace function public\.event_restore_child\(p_entity text, p_item jsonb\)/);
@@ -57,8 +58,9 @@ test("восстановление графа атомарно, повторяе
   assert.match(migration, /v_existing is distinct from v_item/);
   assert.match(migration, /p_item->>'businessId' is distinct from v_business.*p_item->>'unit' is distinct from v_business/is);
   assert.match(migration, /v_finance->>'businessId' is distinct from v_business.*v_finance->>'unit' is distinct from v_business/is);
-  assert.match(actions, /const graph = Object\.fromEntries\(EVENT_ENTITIES/);
-  assert.match(actions, /restoreEventGraph\(graph\)/);
+  assert.match(actions, /const eventGraph = Object\.fromEntries\(EVENT_ENTITIES/);
+  assert.match(actions, /p_graph: \{ ordinary, bank: bankGraph, events: eventGraph \}/);
+  assert.match(actions, /callRpc\("restore_monetki_backup"/);
   assert.match(events, /eventRpc\("event_restore_graph"/);
 });
 

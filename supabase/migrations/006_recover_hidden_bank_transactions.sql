@@ -16,6 +16,8 @@ declare
   v_pgcrypto_schema name;
   v_now bigint := floor(extract(epoch from clock_timestamp()) * 1000);
 begin
+  -- Единый первый lock для deploy-recovery, restore и всех банковских RPC.
+  perform pg_advisory_xact_lock(hashtext('bank_mutation_barrier'));
   select namespace.nspname into v_pgcrypto_schema
   from pg_catalog.pg_extension ext
   join pg_catalog.pg_namespace namespace on namespace.oid = ext.extnamespace
