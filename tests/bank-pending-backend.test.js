@@ -137,3 +137,17 @@ test("атомарная функция применяется всеми бан
     assert.match(workflow, /supabase\/migrations\/009_bank_rules\.sql/, path);
   }
 });
+
+test("большие банковские миграции передаются в jq через файл, а не аргумент процесса", async () => {
+  const paths = [
+    "../.github/workflows/deploy-backend.yml",
+    "../.github/workflows/apply-bank-cron-migration.yml",
+    "../.github/workflows/configure-tochka-sync-secret.yml",
+  ];
+  for (const path of paths) {
+    const workflow = await readFile(new URL(path, import.meta.url), "utf8");
+    assert.match(workflow, /migration_query_file=/, path);
+    assert.match(workflow, /jq -n --rawfile query "\$\{migration_query_file\}"/, path);
+    assert.doesNotMatch(workflow, /jq -n --arg query "\$\{migration_query\}"/, path);
+  }
+});
