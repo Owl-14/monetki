@@ -242,11 +242,27 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .bank-pending-summary strong { overflow-wrap: anywhere; }
 .bank-pending-summary strong.green { color: var(--green); }
 .bank-pending-summary strong.red { color: var(--red); }
+.bank-rules-entrybar { display: flex; align-items: center; gap: 12px; margin: -4px 0 10px; }
+.bank-rules-entry { min-height: 44px; box-shadow: 0 8px 20px rgba(42, 91, 215, .2); }
+.bank-rule-tabs { margin-bottom: 14px; }
+.section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 18px 0 10px; }
+.bank-rule-settings { margin-bottom: 18px; }
+.bank-rule-settings .section-head { margin-top: 0; }
+.bank-rule-row, .bank-journal-row { align-items: center; }
+.bank-preview-cards { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.toggle { display: inline-flex; align-items: center; gap: 9px; color: var(--text); font-size: 14px; font-weight: 650; cursor: pointer; }
+.toggle input { width: 18px; height: 18px; accent-color: var(--accent); }
 
 @media (max-width: 560px) {
   .finance-context { align-items: flex-start; flex-wrap: wrap; }
   .finance-context .btn { width: 100%; justify-content: center; }
   .bank-pending-row .btn { width: 100%; justify-content: center; }
+  .bank-rules-entrybar { align-items: stretch; flex-direction: column; gap: 6px; }
+  .bank-rules-entry { width: 100%; justify-content: center; }
+  .bank-rule-row, .bank-journal-row { align-items: stretch; }
+  .bank-rule-row .btn, .bank-journal-row .btn { width: 100%; justify-content: center; }
+  .bank-rule-settings .section-head { align-items: stretch; flex-direction: column; }
+  .bank-preview-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 input:not([type]), input[type="text"], input[type="search"], input[type="number"], input[type="date"], input[type="password"], input[type="tel"], input[type="email"], input[type="url"], select, textarea {

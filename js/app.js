@@ -4,6 +4,7 @@ import { $, closeModal, esc, fmtDate, fmtDT, money, openModal, telHref, toast, t
 import { businessIdFromName, createAppState, createCrudHelpers } from './app-state.js';
 import { CRM_TABS, EVENT_TABS, crmTabFromHash, eventIdFromHash, eventTabFromHash, eventViewFromHash, groupNavItems, NAV_ICONS, pageMeta, pickBottomNavItems } from './app-shell.js';
 import { eventEconomy } from './event-rules.js';
+import { normalizeBankText, normalizeInn, normalizePhone } from './bank-rules.js';
 
 // ---------- Состояние ----------
 const S = createAppState(makeStore());
@@ -1906,6 +1907,17 @@ function viewFinance() {
 }
 
 function renderFinBank(tabsHtml) {
+  const bankSubTab = S.bankSubTab || 'queue';
+  const bankTabs = `<div class="bank-rules-entrybar">
+    <button class="btn primary bank-rules-entry" type="button" data-bank-rules-entry>⚙ Настройки правил/скриптов</button>
+    <span class="small muted">Правила, автоматизация и журнал</span>
+  </div>
+  <div class="chip-row bank-rule-tabs">
+    ${[['queue', 'Очередь'], ['settings', 'Настройки'], ['journal', 'Журнал']].map(([key, label]) =>
+      `<button class="chip ${bankSubTab === key ? 'active' : ''}" data-bank-subtab="${key}">${label}</button>`).join('')}
+  </div>`;
+  if (bankSubTab === 'settings') { renderBankRuleSettings(tabsHtml, bankTabs); return; }
+  if (bankSubTab === 'journal') { void renderBankRuleJournal(tabsHtml, bankTabs); return; }
   const month = S.finMonth;
   const period = S.finPeriod || 'month';
   const monthName = new Date(month + '-01').toLocaleDateString('ru-RU', { month: 'long', year: 'numeric' });
@@ -1921,18 +1933,28 @@ function renderFinBank(tabsHtml) {
   const queueDates = queueDiagnostics.earliestDate
     ? `${fmtDate(queueDiagnostics.earliestDate)} — ${fmtDate(queueDiagnostics.latestDate || queueDiagnostics.earliestDate)}`
     : 'нет дат';
+  const queueFilter = S.bankQueueFilter || 'active';
   const list = (S.data.bankTransactions || [])
     .filter((item) => period === 'all' || (item.date || '').startsWith(month))
+    .filter((item) => queueFilter === 'all' || (queueFilter === 'ignored' ? item.bankRuleState === 'ignored' : item.bankRuleState !== 'ignored'))
     .sort((a, b) => (b.date || '').localeCompare(a.date || ''));
 
   const row = (item, index) => {
     const method = FIN_METHODS.find((entry) => entry.id === item.method)?.name || 'Счёт';
+    const evaluation = item.ruleEvaluation || {};
+    const state = item.bankRuleState || 'pending';
+    const status = state === 'ignored' ? ['Игнорируется', '']
+      : state === 'manual' ? ['Только вручную', 'amber']
+      : evaluation.conflict ? ['Конфликт правил', 'red']
+      : evaluation.state === 'matched' && evaluation.decision === 'suggest' ? ['Есть предложение', 'blue']
+      : evaluation.state === 'unknown' ? ['Не хватает данных', 'amber']
+      : ['Ждёт назначения', 'amber'];
     return `<div class="row-card bank-pending-row" data-bank-index="${index}">
       <div class="grow col">
         <div class="title">${esc(item.counterparty || (item.type === 'income' ? 'Поступление из банка' : 'Списание из банка'))}</div>
         <div class="sub">${fmtDate(item.date)} · ${esc(method)}${item.comment ? ' · ' + esc(item.comment) : ''}</div>
       </div>
-      <span class="badge amber dot">Ждёт назначения</span>
+      <span class="badge ${status[1]} dot">${status[0]}</span>
       <div class="amount ${item.type === 'income' ? 'green' : 'red'}">${item.type === 'income' ? '+' : '−'}${money(item.amount)}</div>
       <button class="btn small primary" type="button" data-process-bank-index="${index}">Назначить</button>
     </div>`;
@@ -1940,6 +1962,7 @@ function renderFinBank(tabsHtml) {
 
   $('#view').innerHTML = `
     ${tabsHtml}
+    ${bankTabs}
     <div class="finance-context" aria-label="Контекст необработанных банковских операций">
       <div class="finance-context-icon">🏦</div>
       <div class="finance-context-copy">
@@ -1960,6 +1983,7 @@ function renderFinBank(tabsHtml) {
       <span class="btn small ghost nowrap" style="cursor:default">${monthName}</span>
       <button class="btn small" id="bank-m-next" aria-label="Следующий месяц">→</button>` : ''}
       <button class="btn small ${period === 'all' ? 'primary' : ''}" id="bank-period-toggle">${period === 'all' ? '📅 по месяцам' : '∑ за всё время'}</button>
+      <button class="btn small ${queueFilter !== 'active' ? 'primary' : ''}" id="bank-queue-filter">${queueFilter === 'active' ? 'Обычная очередь' : queueFilter === 'ignored' ? 'Игнорируемые' : 'Все состояния'}</button>
       <div class="grow"></div>
       <span class="badge amber">${list.length} ${list.length === 1 ? 'операция' : 'операций'}</span>
     </div>
@@ -1975,11 +1999,274 @@ function renderFinBank(tabsHtml) {
   $('#bank-m-prev')?.addEventListener('click', () => shift(-1));
   $('#bank-m-next')?.addEventListener('click', () => shift(1));
   $('#bank-period-toggle').addEventListener('click', () => { S.finPeriod = period === 'all' ? 'month' : 'all'; render(); });
+  $('#bank-queue-filter').addEventListener('click', () => {
+    S.bankQueueFilter = queueFilter === 'active' ? 'ignored' : queueFilter === 'ignored' ? 'all' : 'active';
+    render();
+  });
   $('#view').querySelectorAll('[data-process-bank-index]').forEach((button) => button.addEventListener('click', (event) => {
     event.stopPropagation();
     openBankTransaction(list[Number(button.dataset.processBankIndex)]?.id);
   }));
   $('#view').querySelectorAll('[data-bank-index]').forEach((card) => card.addEventListener('click', () => openBankTransaction(list[Number(card.dataset.bankIndex)]?.id)));
+  bindBankSubTabs();
+}
+
+function bindBankSubTabs() {
+  $('#view').querySelector('[data-bank-rules-entry]')?.addEventListener('click', () => {
+    S.bankSubTab = 'settings';
+    render();
+  });
+  $('#view').querySelectorAll('[data-bank-subtab]').forEach((button) => button.addEventListener('click', () => {
+    S.bankSubTab = button.dataset.bankSubtab;
+    render();
+  }));
+}
+
+function renderBankRuleSettings(tabsHtml, bankTabs) {
+  const settings = (S.data.bankRuleSettings || [])[0] || {
+    settingsVersion: 1, autoEnabled: false, allowedDirections: ['income', 'expense'],
+    maxAmountMinor: { income: 1000000, expense: 1000000 }, maxTransactionsPerRun: 10,
+    maxTransactionsPerDay: 20, maxTotalAmountMinorPerDay: 5000000,
+  };
+  const rules = (S.data.bankRules || []).slice().sort((a, b) => Number(b.priority) - Number(a.priority) || Number(a.order) - Number(b.order));
+  const ruleRow = (rule) => `<div class="row-card bank-rule-row" data-bank-rule-id="${esc(rule.id)}">
+    <div class="grow col"><div class="title">${esc(rule.name)}</div>
+      <div class="sub">Версия ${Number(rule.version || 1)} · приоритет ${Number(rule.priority || 0)} · ${esc(rule.decision || 'suggest')} · условий ${['all', 'any', 'none'].reduce((sum, key) => sum + Number(rule.conditions?.[key]?.length || 0), 0)}</div>
+    </div>
+    <span class="badge ${rule.enabled === false ? '' : 'green'}">${rule.deleted ? 'В архиве' : rule.enabled === false ? 'Выключено' : 'Работает'}</span>
+    <button class="btn small" type="button" data-edit-bank-rule="${esc(rule.id)}">Изменить</button>
+  </div>`;
+  $('#view').innerHTML = `${tabsHtml}${bankTabs}
+    <div class="banner ${settings.autoEnabled ? 'warn' : ''}" data-bank-auto-state="${settings.autoEnabled ? 'on' : 'off'}">
+      <strong>${settings.autoEnabled ? 'Автопроведение включено' : 'Автопроведение выключено'}</strong><br>
+      Правила продолжают подсказывать бизнес и категорию. Сумма без сильного признака никогда не проводится автоматически.
+    </div>
+    <form class="card bank-rule-settings" id="bank-rule-settings-form">
+      <div class="section-head"><div><h3>Безопасные лимиты</h3><p class="muted small">Превышение лимита превращает auto в обычное предложение.</p></div>
+        <label class="toggle"><input name="autoEnabled" type="checkbox" ${settings.autoEnabled ? 'checked' : ''}><span>Автопроведение</span></label></div>
+      <div class="form-row">
+        <label class="field"><span>Максимум операций за запуск</span><input name="maxTransactionsPerRun" type="number" min="1" max="100" value="${Number(settings.maxTransactionsPerRun || 10)}"></label>
+        <label class="field"><span>Максимум операций в день</span><input name="maxTransactionsPerDay" type="number" min="1" max="1000" value="${Number(settings.maxTransactionsPerDay || 20)}"></label>
+        <label class="field"><span>Общая сумма в день, ₽</span><input name="maxTotalAmount" type="number" min="1" step="1" value="${Number(settings.maxTotalAmountMinor || settings.maxTotalAmountMinorPerDay || 0) / 100}"></label>
+      </div>
+      <div class="form-row">
+        <label class="field"><span>Один приход, ₽</span><input name="maxIncome" type="number" min="0" step="1" value="${Number(settings.maxAmountMinor?.income || 0) / 100}"></label>
+        <label class="field"><span>Один расход, ₽</span><input name="maxExpense" type="number" min="0" step="1" value="${Number(settings.maxAmountMinor?.expense || 0) / 100}"></label>
+      </div>
+      <div class="actions"><button class="btn" type="button" id="bank-rule-dry-run">Проверить на очереди</button><button class="btn primary" type="submit">Сохранить настройки</button></div>
+    </form>
+    <div class="section-head"><div><h3>Правила</h3><p class="muted small">Изменение создаёт новую неизменяемую версию.</p></div><button class="btn primary" id="add-bank-rule">+ Правило</button></div>
+    <div class="list">${rules.length ? rules.map(ruleRow).join('') : '<div class="card empty"><div class="big">⚙️</div>Правил пока нет. Ручная очередь продолжает работать.</div>'}</div>`;
+  bindBankSubTabs();
+  $('#add-bank-rule').addEventListener('click', () => openBankRuleForm());
+  $('#view').querySelectorAll('[data-edit-bank-rule]').forEach((button) => button.addEventListener('click', () => openBankRuleForm(rules.find((rule) => rule.id === button.dataset.editBankRule))));
+  $('#bank-rule-dry-run').addEventListener('click', async () => {
+    const button = $('#bank-rule-dry-run'); button.disabled = true;
+    const result = await S.store.bankRuleDryRun(S.token);
+    button.disabled = false;
+    if (!result.ok) { toast(result.error || 'Не удалось проверить правила', true); return; }
+    const x = result.summary;
+    openModal(`<h2>Проверка без изменений</h2><div class="cards-row bank-preview-cards">
+      <div class="card stat"><div class="label">Всего</div><div class="value">${Number(x.total || 0)}</div></div>
+      <div class="card stat"><div class="label">Совпало</div><div class="value">${Number(x.matched || 0)}</div></div>
+      <div class="card stat"><div class="label">Можно auto</div><div class="value green">${Number(x.autoEligible || 0)}</div></div>
+      <div class="card stat"><div class="label">Конфликты</div><div class="value red">${Number(x.conflict || 0)}</div></div>
+    </div><div class="banner">Не хватает признаков: ${Number(x.missingSignals || 0)} · вручную: ${Number(x.manual || 0)} · игнор: ${Number(x.ignored || 0)}. Имена, суммы, телефоны, счета и банковские идентификаторы в результат не включены.</div><div class="actions"><button class="btn primary" id="modal-cancel">Понятно</button></div>`, (root) => $('#modal-cancel', root).addEventListener('click', closeModal));
+  });
+  $('#bank-rule-settings-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const nextAuto = form.elements.autoEnabled.checked;
+    if (nextAuto && !settings.autoEnabled && !confirm('Включить автопроведение с указанными лимитами? Неоднозначные операции всё равно останутся в очереди.')) return;
+    const next = {
+      ...settings, autoEnabled: nextAuto,
+      allowedDirections: Array.isArray(settings.allowedDirections) ? [...settings.allowedDirections] : ['income', 'expense'],
+      maxTransactionsPerRun: Number(form.elements.maxTransactionsPerRun.value),
+      maxTransactionsPerDay: Number(form.elements.maxTransactionsPerDay.value),
+      maxTotalAmountMinorPerDay: Math.round(Number(form.elements.maxTotalAmount.value) * 100),
+      maxAmountMinor: { income: Math.round(Number(form.elements.maxIncome.value) * 100), expense: Math.round(Number(form.elements.maxExpense.value) * 100) },
+    };
+    const submit = form.querySelector('[type=submit]'); submit.disabled = true;
+    const result = await S.store.bankRuleSettingsUpdate(S.token, next, settings.settingsVersion);
+    submit.disabled = false;
+    if (!result.ok) { toast(result.error || 'Не удалось сохранить настройки', true); return; }
+    toast('Настройки правил сохранены'); await refresh(true); S.bankSubTab = 'settings'; render();
+  });
+}
+
+function openBankRuleForm(rule = null, transaction = null) {
+  const isNew = !rule;
+  const editableOps = {
+    direction: 'exact', amountMinor: 'exact', detectedMethod: 'exact',
+    'sender.nameNormalized': 'contains', 'recipient.nameNormalized': 'contains',
+    'sender.phoneE164': 'exact', 'recipient.phoneE164': 'exact',
+    'sender.inn': 'exact', 'recipient.inn': 'exact', descriptionNormalized: 'contains',
+  };
+  const allConditions = Array.isArray(rule?.conditions?.all) ? rule.conditions.all : [];
+  const conditionFields = allConditions.map((condition) => condition?.field);
+  const advancedRule = !!rule && (
+    (rule?.conditions?.any?.length || 0) > 0 || (rule?.conditions?.none?.length || 0) > 0 ||
+    allConditions.some((condition) => editableOps[condition?.field] !== condition?.op) ||
+    new Set(conditionFields).size !== conditionFields.length ||
+    Object.keys(rule?.actions || {}).some((key) => !['businessId', 'category', 'owner', 'counterpartyOverride', 'comment', 'links'].includes(key))
+  );
+  const advancedDisabled = advancedRule ? 'disabled' : '';
+  const suggested = transaction?.ruleEvaluation?.actions || {};
+  const direction = rule?.conditions?.all?.find((condition) => condition.field === 'direction')?.value || transaction?.type || 'income';
+  const amountMinor = rule?.conditions?.all?.find((condition) => condition.field === 'amountMinor')?.value;
+  const description = rule?.conditions?.all?.find((condition) => condition.field === 'descriptionNormalized')?.value || '';
+  const conditionValue = (field) => rule?.conditions?.all?.find((condition) => condition.field === field)?.value || '';
+  const detectedMethod = conditionValue('detectedMethod');
+  const businessId = rule?.actions?.businessId || suggested.businessId || (S.unit !== 'all' ? S.unit : myUnits()[0]);
+  const category = rule?.actions?.category || suggested.category || '';
+  const links = rule?.actions?.links || {};
+  const ownerOptions = (S.data.businessOwners || []).filter((item) => item.active !== false)
+    .map((item) => ({ id: item.ownerId, name: `${item.name || ownerLabel(item.ownerId)} · ${businessName(businessIdOf(item))}` }));
+  const optionList = (items, selected, label) => `<option value="">— не связывать —</option>${(items || []).map((item) => `<option value="${esc(item.id)}" ${item.id === selected ? 'selected' : ''}>${esc(label(item))}</option>`).join('')}`;
+  openModal(`<h2>${isNew ? 'Новое правило' : 'Изменить правило'}</h2>
+    ${transaction ? '<div class="banner">Создаётся безопасный черновик по направлению и сумме. Он будет только предлагать действие, пока вы не добавите сильный точный признак.</div>' : ''}
+    ${advancedRule ? '<div class="banner warn">У этого правила есть расширенные условия или действия. Они защищены от тихой перезаписи: здесь можно изменить только название, решение, приоритет и состояние. Расширенная часть сохранится без изменений.</div>' : ''}
+    <form id="bank-rule-form">
+      <label class="field"><span>Название</span><input name="name" required maxlength="120" value="${esc(rule?.name || (transaction ? `Операция ${transaction.type === 'income' ? 'приход' : 'расход'}` : ''))}"></label>
+      <div class="form-row"><label class="field"><span>Направление</span><select name="direction" ${advancedDisabled}><option value="income" ${direction === 'income' ? 'selected' : ''}>Приход</option><option value="expense" ${direction === 'expense' ? 'selected' : ''}>Расход</option></select></label>
+        <label class="field"><span>Точная сумма, ₽ (необязательно)</span><input name="amount" type="number" min="0" step="0.01" value="${amountMinor !== undefined ? Number(amountMinor) / 100 : transaction ? Number(transaction.amount || 0) : ''}" ${advancedDisabled}></label></div>
+      <div class="form-row"><label class="field"><span>Способ оплаты (необязательно)</span><select name="detectedMethod" ${advancedDisabled}><option value="">— любой —</option>${FIN_METHODS.map((item) => `<option value="${esc(item.id)}" ${item.id === detectedMethod ? 'selected' : ''}>${esc(item.name)}</option>`).join('')}</select></label>
+        <label class="field"><span>Получатель содержит имя</span><input name="recipientName" maxlength="160" value="${esc(conditionValue('recipient.nameNormalized'))}" placeholder="Например: Андрей" ${advancedDisabled}></label></div>
+      <div class="form-row"><label class="field"><span>Телефон получателя</span><input name="recipientPhone" type="tel" maxlength="40" value="${esc(conditionValue('recipient.phoneE164'))}" placeholder="+7 900 000-00-00" ${advancedDisabled}></label>
+        <label class="field"><span>ИНН получателя</span><input name="recipientInn" inputmode="numeric" maxlength="12" value="${esc(conditionValue('recipient.inn'))}" ${advancedDisabled}></label></div>
+      <div class="form-row"><label class="field"><span>Отправитель содержит имя</span><input name="senderName" maxlength="160" value="${esc(conditionValue('sender.nameNormalized'))}" ${advancedDisabled}></label>
+        <label class="field"><span>Телефон отправителя</span><input name="senderPhone" type="tel" maxlength="40" value="${esc(conditionValue('sender.phoneE164'))}" placeholder="+7 900 000-00-00" ${advancedDisabled}></label></div>
+      <label class="field"><span>ИНН отправителя (необязательно)</span><input name="senderInn" inputmode="numeric" maxlength="12" value="${esc(conditionValue('sender.inn'))}" ${advancedDisabled}></label>
+      <label class="field"><span>Назначение содержит (необязательно)</span><input name="description" maxlength="120" value="${esc(description)}" placeholder="Например: турнир август" ${advancedDisabled}></label>
+      <div class="form-row"><label class="field"><span>Решение</span><select name="decision"><option value="suggest" ${!rule || rule.decision === 'suggest' ? 'selected' : ''}>Предложить</option><option value="auto" ${rule?.decision === 'auto' ? 'selected' : ''}>Автоматически при строгих условиях</option><option value="manual" ${rule?.decision === 'manual' ? 'selected' : ''}>Только вручную</option><option value="ignore" ${rule?.decision === 'ignore' ? 'selected' : ''}>Игнорировать</option></select></label>
+        <label class="field"><span>Приоритет</span><input name="priority" type="number" min="-1000" max="1000" value="${Number(rule?.priority || 0)}"></label></div>
+      <div class="form-row"><label class="field"><span>Бизнес</span><select name="businessId" ${advancedDisabled}>${myUnits().map((id) => `<option value="${esc(id)}" ${id === businessId ? 'selected' : ''}>${esc(businessEmoji(id))} ${esc(businessName(id))}</option>`).join('')}</select></label>
+        <label class="field"><span>Категория</span><select name="category" ${advancedDisabled}><option value="">— без назначения —</option>${FIN_CATEGORIES.map((item) => `<option value="${esc(item)}" ${item === category ? 'selected' : ''}>${esc(item)}</option>`).join('')}</select></label></div>
+      <div class="form-row"><label class="field"><span>Чей личный расход</span><select name="owner" ${advancedDisabled}><option value="">— общий —</option>${ownerOptions.map((item) => `<option value="${esc(item.id)}" ${item.id === rule?.actions?.owner ? 'selected' : ''}>${esc(item.name)}</option>`).join('')}</select></label>
+        <label class="field"><span>Подменить название контрагента</span><input name="counterpartyOverride" maxlength="160" value="${esc(rule?.actions?.counterpartyOverride || '')}" ${advancedDisabled}></label></div>
+      <label class="field"><span>Комментарий правила</span><input name="actionComment" maxlength="300" value="${esc(rule?.actions?.comment || '')}" ${advancedDisabled}></label>
+      <details class="card"><summary>Связать с CRM, игроком или событием</summary>
+        <div class="form-row"><label class="field"><span>Игрок</span><select name="playerId" ${advancedDisabled}>${optionList(S.data.players, links.playerId, (item) => `${item.name} · ${businessName(businessIdOf(item))}`)}</select></label>
+          <label class="field"><span>Контрагент</span><select name="companyId" ${advancedDisabled}>${optionList(S.data.companies, links.companyId, (item) => `${item.name} · ${businessName(businessIdOf(item))}`)}</select></label></div>
+        <div class="form-row"><label class="field"><span>Контакт</span><select name="contactId" ${advancedDisabled}>${optionList(S.data.contacts, links.contactId, (item) => `${item.name} · ${businessName(businessIdOf(item))}`)}</select></label>
+          <label class="field"><span>Сделка</span><select name="dealId" ${advancedDisabled}>${optionList(S.data.deals, links.dealId, (item) => `${item.title || item.name} · ${businessName(businessIdOf(item))}`)}</select></label></div>
+        <div class="form-row"><label class="field"><span>Событие</span><select name="eventId" ${advancedDisabled}>${optionList(S.data.events, links.event?.eventId, (item) => `${item.title || item.name} · ${businessName(businessIdOf(item))}`)}</select></label>
+          <label class="field"><span>Регистрация участника</span><select name="registrationId" ${advancedDisabled}>${optionList(S.data.eventRegistrations, links.event?.registrationId, (item) => `${eventParticipant(item)} · ${item.eventId}`)}</select></label></div>
+        <label class="field"><span>Назначение связи события</span><select name="eventPurpose" ${advancedDisabled}><option value="payment" ${links.event?.purpose === 'payment' ? 'selected' : ''}>Оплата</option><option value="deposit" ${links.event?.purpose === 'deposit' ? 'selected' : ''}>Депозит</option><option value="expense" ${links.event?.purpose === 'expense' ? 'selected' : ''}>Расход</option><option value="refund" ${links.event?.purpose === 'refund' ? 'selected' : ''}>Возврат</option></select></label>
+      </details>
+      <label class="toggle"><input name="enabled" type="checkbox" ${rule?.enabled === false || rule?.deleted ? '' : 'checked'} ${rule?.deleted ? 'disabled' : ''}><span>${rule?.deleted ? 'Правило в архиве' : 'Правило включено'}</span></label>
+      <p class="muted small">Auto с одной суммой или неизвестными признаками всегда понижается до предложения. Для автопроведения укажите точный телефон/ИНН либо два независимых контекстных признака. Псевдоним банковского счёта создаётся системой и доступен только расширенным интеграциям.</p>
+      <div class="actions">${rule ? '<button class="btn danger ghost" type="button" id="bank-rule-delete">В архив</button>' : ''}<button class="btn" type="button" id="modal-cancel">Отмена</button><button class="btn primary" type="submit">Сохранить версию</button></div>
+    </form>`, (root) => {
+    $('#modal-cancel', root).addEventListener('click', closeModal);
+    $('#bank-rule-delete', root)?.addEventListener('click', async () => {
+      if (!confirm('Перенести правило в архив? Его версии и журнал сохранятся.')) return;
+      const result = await S.store.bankRuleDelete(S.token, rule.id, Number(rule.version || 0));
+      if (!result.ok) { toast(result.error || 'Не удалось архивировать правило', true); return; }
+      closeModal(); toast('Правило перенесено в архив'); await refresh(true); S.bankSubTab = 'settings'; render();
+    });
+    $('#bank-rule-form', root).addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const conditions = advancedRule ? null : [{ field: 'direction', op: 'exact', value: form.elements.direction.value }];
+      if (!advancedRule && form.elements.amount.value !== '') conditions.push({ field: 'amountMinor', op: 'exact', value: Math.round(Number(form.elements.amount.value) * 100) });
+      if (!advancedRule && form.elements.detectedMethod.value) conditions.push({ field: 'detectedMethod', op: 'exact', value: form.elements.detectedMethod.value });
+      const addTextCondition = (field, element, op = 'contains', normalize = normalizeBankText) => {
+        const raw = element.value.trim();
+        if (!raw) return true;
+        const value = normalize(raw);
+        if (!value) { toast(`Проверьте значение поля «${element.closest('label')?.querySelector('span')?.textContent || field}»`, true); return false; }
+        conditions.push({ field, op, value }); return true;
+      };
+      if (!advancedRule && ![
+        addTextCondition('recipient.nameNormalized', form.elements.recipientName),
+        addTextCondition('recipient.phoneE164', form.elements.recipientPhone, 'exact', normalizePhone),
+        addTextCondition('recipient.inn', form.elements.recipientInn, 'exact', normalizeInn),
+        addTextCondition('sender.nameNormalized', form.elements.senderName),
+        addTextCondition('sender.phoneE164', form.elements.senderPhone, 'exact', normalizePhone),
+        addTextCondition('sender.inn', form.elements.senderInn, 'exact', normalizeInn),
+      ].every(Boolean)) return;
+      if (!advancedRule && form.elements.description.value.trim()) conditions.push({ field: 'descriptionNormalized', op: 'contains', value: normalizeBankText(form.elements.description.value) });
+      const actionLinks = advancedRule ? null : Object.fromEntries(['playerId', 'companyId', 'contactId', 'dealId']
+        .map((field) => [field, form.elements[field].value]).filter(([, value]) => value));
+      if (!advancedRule && form.elements.eventId.value) actionLinks.event = {
+        eventId: form.elements.eventId.value,
+        registrationId: form.elements.registrationId.value || undefined,
+        purpose: form.elements.eventPurpose.value,
+      };
+      if (!advancedRule && actionLinks.event && ['payment', 'deposit', 'refund'].includes(actionLinks.event.purpose) && !actionLinks.event.registrationId) {
+        toast('Для оплаты, депозита или возврата выберите регистрацию участника', true); return;
+      }
+      const actions = advancedRule ? rule.actions : {
+        businessId: form.elements.businessId.value, category: form.elements.category.value,
+        ...(form.elements.owner.value ? { owner: form.elements.owner.value } : {}),
+        ...(form.elements.counterpartyOverride.value.trim() ? { counterpartyOverride: form.elements.counterpartyOverride.value.trim() } : {}),
+        ...(form.elements.actionComment.value.trim() ? { comment: form.elements.actionComment.value.trim() } : {}),
+        ...(Object.keys(actionLinks).length ? { links: actionLinks } : {}),
+      };
+      const next = {
+        ...(rule || {}), name: form.elements.name.value.trim(), enabled: rule?.deleted ? false : form.elements.enabled.checked,
+        priority: Number(form.elements.priority.value), order: Number(rule?.order || 0), stopOnMatch: rule?.stopOnMatch === true,
+        decision: form.elements.decision.value,
+        conditions: advancedRule ? rule.conditions : { all: conditions, any: [], none: [] },
+        actions: advancedRule ? rule.actions : actions,
+        autoLimits: rule?.autoLimits || { maxTransactionsPerDay: 10, maxAmountMinor: 1000000 },
+      };
+      const submit = form.querySelector('[type=submit]'); submit.disabled = true;
+      const result = await S.store.bankRuleSave(S.token, next, Number(rule?.version || 0));
+      submit.disabled = false;
+      if (!result.ok) { toast(result.error || 'Не удалось сохранить правило', true); return; }
+      closeModal(); toast('Новая версия правила сохранена'); await refresh(true); S.bankSubTab = 'settings'; render();
+    });
+  });
+}
+
+async function renderBankRuleJournal(tabsHtml, bankTabs) {
+  $('#view').innerHTML = `${tabsHtml}${bankTabs}<div class="card empty"><div class="big">⏳</div>Загружаю безопасный журнал…</div>`;
+  bindBankSubTabs();
+  const result = await S.store.bankRuleJournal(S.token, 100);
+  if (currentRoute() !== 'finance' || S.finTab !== 'bank' || S.bankSubTab !== 'journal') return;
+  if (!result.ok) { $('#view').insertAdjacentHTML('beforeend', `<div class="banner warn">${esc(result.error || 'Журнал недоступен')}</div>`); return; }
+  const rows = result.applications || [];
+  $('#view').innerHTML = `${tabsHtml}${bankTabs}<div class="banner">Журнал не содержит банковских идентификаторов, реквизитов, имён, телефонов, ИНН и сумм.</div>
+    <div class="list">${rows.length ? rows.map((item) => `<div class="row-card bank-journal-row">
+      <div class="grow col"><div class="title">${esc(item.decision || 'Действие')} · ${esc(item.state || '')}</div><div class="sub">${fmtDT(Number(item.created || 0))}${item.appliedRuleId ? ` · правило ${esc(item.appliedRuleId)} v${Number(item.appliedRuleVersion || 0)}` : ''}</div></div>
+      ${['applied', 'corrected'].includes(item.state) ? `<button class="btn small" data-correct-bank="${esc(item.id)}">Исправить</button><button class="btn small danger ghost" data-reverse-bank="${esc(item.id)}">Безопасно отменить</button>` : ''}
+    </div>`).join('') : '<div class="card empty"><div class="big">📋</div>Журнал пока пуст</div>'}</div>`;
+  bindBankSubTabs();
+  $('#view').querySelectorAll('[data-reverse-bank]').forEach((button) => button.addEventListener('click', async () => {
+    if (!confirm('Вернуть операцию в очередь? Отмена сработает только если финансовая запись и её связи не менялись.')) return;
+    button.disabled = true;
+    const outcome = await S.store.bankRuleReverse(S.token, button.dataset.reverseBank, `reverse:${uid()}`);
+    button.disabled = false;
+    if (!outcome.ok) { toast(outcome.error || 'Безопасная отмена недоступна', true); return; }
+    toast('Операция возвращена в очередь'); await refresh(true); render();
+  }));
+  $('#view').querySelectorAll('[data-correct-bank]').forEach((button) => button.addEventListener('click', () => openBankCorrection(button.dataset.correctBank)));
+}
+
+function openBankCorrection(applicationId) {
+  openModal(`<h2>Исправить классификацию</h2><div class="banner">Сумма, направление и банковская связь останутся неизменными. Исправление будет записано в журнал.</div>
+    <form id="bank-correct-form">
+      <label class="field"><span>Категория</span><select name="category"><option value="">— не менять —</option>${FIN_CATEGORIES.map((item) => `<option value="${esc(item)}">${esc(item)}</option>`).join('')}</select></label>
+      <div class="form-row"><label class="field"><span>Способ оплаты</span><select name="method"><option value="">— не менять —</option>${FIN_METHODS.map((item) => `<option value="${esc(item.id)}">${esc(item.name)}</option>`).join('')}</select></label>
+        <label class="field"><span>Чей личный расход</span><select name="owner"><option value="">— не менять —</option>${(S.data.businessOwners || []).filter((item) => item.active !== false).map((item) => `<option value="${esc(item.ownerId)}">${esc(item.name || ownerLabel(item.ownerId))} · ${esc(businessName(businessIdOf(item)))}</option>`).join('')}</select></label></div>
+      <label class="field"><span>Контрагент</span><input name="counterparty" maxlength="160" placeholder="Оставьте пустым, чтобы не менять"></label>
+      <label class="field"><span>Комментарий</span><textarea name="comment" maxlength="300" placeholder="Оставьте пустым, чтобы не менять"></textarea></label>
+      <div class="actions"><button class="btn" type="button" id="modal-cancel">Отмена</button><button class="btn primary" type="submit">Записать исправление</button></div>
+    </form>`, (root) => {
+    $('#modal-cancel', root).addEventListener('click', closeModal);
+    $('#bank-correct-form', root).addEventListener('submit', async (event) => {
+      event.preventDefault(); const form = event.currentTarget; const submit = form.querySelector('[type=submit]'); submit.disabled = true;
+      const patch = Object.fromEntries(['category', 'method', 'owner', 'counterparty', 'comment']
+        .map((field) => [field, form.elements[field].value.trim()]).filter(([, value]) => value));
+      if (!Object.keys(patch).length) { submit.disabled = false; toast('Выберите хотя бы одно исправление', true); return; }
+      const outcome = await S.store.bankRuleCorrect(S.token, applicationId, patch, `correct:${uid()}`);
+      submit.disabled = false;
+      if (!outcome.ok) { toast(outcome.error || 'Исправление недоступно', true); return; }
+      closeModal(); toast('Исправление записано'); await refresh(true); S.bankSubTab = 'journal'; render();
+    });
+  });
 }
 
 function openBankTransaction(id) {
@@ -1987,6 +2274,9 @@ function openBankTransaction(id) {
   if (!transaction) return;
   const defaultBusinessId = S.unit !== 'all' && myUnits().includes(S.unit) ? S.unit : myUnits()[0];
   const method = FIN_METHODS.find((item) => item.id === transaction.method)?.name || 'Счёт';
+  const evaluation = transaction.ruleEvaluation || {};
+  const suggestedBusinessId = evaluation.actions?.businessId;
+  const suggestedCategory = evaluation.actions?.category;
   openModal(`
     <h2>Провести банковскую операцию</h2>
     <div class="bank-pending-summary">
@@ -1996,26 +2286,55 @@ function openBankTransaction(id) {
       <div><span>Способ</span><strong>${esc(method)}</strong></div>
     </div>
     <div class="banner">${esc(transaction.counterparty || 'Контрагент не указан')}${transaction.comment ? '<br><span class="small">' + esc(transaction.comment) + '</span>' : ''}</div>
+    ${evaluation.appliedRuleId ? `<div class="banner ${evaluation.conflict ? 'warn' : ''}"><strong>${evaluation.conflict ? 'Правила конфликтуют — автопроведение запрещено' : `Предложение правила · уверенность ${Math.round(Number(evaluation.confidence || 0) * 100)}%`}</strong><br>${evaluation.amountOnly ? 'Совпадение только по слабым признакам: требуется подтверждение.' : 'Сервер повторно проверит правило и его версию перед проведением.'}</div>` : ''}
     <form id="bank-process-form">
       <label class="field"><span>Бизнес</span>
         <select name="businessId" required>
-          ${myUnits().map((businessId) => `<option value="${esc(businessId)}" ${businessId === defaultBusinessId ? 'selected' : ''}>${esc(businessEmoji(businessId))} ${esc(businessName(businessId))}</option>`).join('')}
+          ${myUnits().map((businessId) => `<option value="${esc(businessId)}" ${businessId === (suggestedBusinessId || defaultBusinessId) ? 'selected' : ''}>${esc(businessEmoji(businessId))} ${esc(businessName(businessId))}</option>`).join('')}
         </select>
       </label>
       <label class="field"><span>Категория</span>
         <select name="category" required>
-          <option value="" selected disabled>— выберите категорию —</option>
-          ${FIN_CATEGORIES.map((category) => `<option value="${esc(category)}">${esc(category)}</option>`).join('')}
+          <option value="" ${suggestedCategory ? '' : 'selected'} disabled>— выберите категорию —</option>
+          ${FIN_CATEGORIES.map((category) => `<option value="${esc(category)}" ${category === suggestedCategory ? 'selected' : ''}>${esc(category)}</option>`).join('')}
         </select>
       </label>
       <p class="muted small">После проведения операция появится во вкладке «Операции» и начнёт участвовать в финансовых итогах.</p>
       <div class="actions">
+        <button type="button" class="btn" id="bank-create-rule">Создать правило</button>
+        ${transaction.bankRuleState === 'ignored' || transaction.bankRuleState === 'manual'
+          ? '<button type="button" class="btn" id="bank-reevaluate">Вернуть к проверке</button>'
+          : '<button type="button" class="btn ghost" id="bank-ignore">Игнорировать</button><button type="button" class="btn ghost" id="bank-manual-only">Только вручную</button>'}
         <button type="button" class="btn" id="modal-cancel">Отмена</button>
-        <button type="submit" class="btn primary">Провести операцию</button>
+        ${evaluation.appliedRuleId && !evaluation.conflict && !['manual', 'ignore'].includes(evaluation.requestedDecision) ? '<button type="button" class="btn primary" id="bank-apply-suggestion">Применить предложение</button>' : ''}
+        ${transaction.bankRuleState === 'ignored' ? '' : '<button type="submit" class="btn primary">Провести операцию</button>'}
       </div>
     </form>
   `, (root) => {
     $('#modal-cancel', root).addEventListener('click', closeModal);
+    $('#bank-create-rule', root).addEventListener('click', () => { closeModal(); openBankRuleForm(null, transaction); });
+    $('#bank-ignore', root)?.addEventListener('click', async () => {
+      const result = await S.store.bankRuleIgnore(S.token, transaction.id, `ignore:${uid()}`);
+      if (!result.ok) { toast(result.error || 'Не удалось игнорировать операцию', true); return; }
+      closeModal(); toast('Операция скрыта из обычной обработки'); await refresh(true); render();
+    });
+    $('#bank-manual-only', root)?.addEventListener('click', async () => {
+      const result = await S.store.bankRuleManual(S.token, transaction.id, `manual-state:${uid()}`);
+      if (!result.ok) { toast(result.error || 'Не удалось зафиксировать ручной режим', true); return; }
+      closeModal(); toast('Нижестоящие правила для операции остановлены'); await refresh(true); render();
+    });
+    $('#bank-reevaluate', root)?.addEventListener('click', async () => {
+      const result = await S.store.bankRuleReevaluate(S.token, transaction.id, `reevaluate:${uid()}`);
+      if (!result.ok) { toast(result.error || 'Не удалось вернуть операцию', true); return; }
+      closeModal(); toast('Операция снова проверяется правилами'); await refresh(true); render();
+    });
+    $('#bank-apply-suggestion', root)?.addEventListener('click', async () => {
+      const button = $('#bank-apply-suggestion', root); button.disabled = true;
+      const result = await S.store.bankRuleApplySuggestion(S.token, transaction.id, transaction.ruleEvaluationToken, `suggest:${uid()}`);
+      button.disabled = false;
+      if (!result.ok) { toast(result.error || 'Предложение устарело', true); return; }
+      closeModal(); toast('Предложение применено'); await refresh(true); render();
+    });
     $('#bank-process-form', root).addEventListener('submit', async (event) => {
       event.preventDefault();
       const values = Object.fromEntries(new FormData(event.target).entries());
@@ -2293,21 +2612,42 @@ function openCashForm(c) {
 function openFinForm(f) {
   const isNew = !f;
   const units = myUnits();
+  const bankManaged = !!f && (f.source === 'bank' || f.bankId || f.bankQueueId || f.applicationId || f.appliedRuleId);
+  if (bankManaged) {
+    const method = FIN_METHODS.find((item) => item.id === f.method)?.name || f.method || 'Счёт';
+    openModal(`
+      <h2>Банковская операция</h2>
+      <div class="banner">Эта запись защищена от обычного редактирования и удаления. Исправить категорию, способ, владельца, контрагента или комментарий можно только через журнал — так сохранится история изменений.</div>
+      <div class="bank-pending-summary">
+        <div><span>Дата</span><strong>${fmtDate(f.date)}</strong></div>
+        <div><span>Тип</span><strong>${f.type === 'income' ? 'Поступление' : 'Списание'}</strong></div>
+        <div><span>Сумма</span><strong class="${f.type === 'income' ? 'green' : 'red'}">${money(f.amount)}</strong></div>
+        <div><span>Способ</span><strong>${esc(method)}</strong></div>
+      </div>
+      <div class="card"><strong>${esc(f.category || 'Без категории')}</strong><div class="muted small">${esc(f.counterparty || 'Контрагент не указан')}</div>${f.comment ? `<div class="small">${esc(f.comment)}</div>` : ''}</div>
+      <div class="actions"><button type="button" class="btn" id="modal-cancel">Закрыть</button><button type="button" class="btn primary" id="open-bank-journal">Открыть журнал</button></div>
+    `, (root) => {
+      $('#modal-cancel', root).addEventListener('click', closeModal);
+      $('#open-bank-journal', root).addEventListener('click', () => {
+        closeModal(); S.finTab = 'bank'; S.bankSubTab = 'journal'; render();
+      });
+    });
+    return;
+  }
   openModal(`
     <h2>${isNew ? 'Новая операция' : 'Операция'}</h2>
-    ${f?.source === 'bank' ? `<div class="banner">Операция из банка — можно поменять направление и категорию, суммы редактировать нельзя.</div>` : ''}
     <form id="ent-form">
       <div class="form-row">
         <label class="field"><span>Тип</span>
-          <select name="type" ${f?.source === 'bank' ? 'disabled' : ''}>
+          <select name="type">
             <option value="income" ${(f?.type || 'income') === 'income' ? 'selected' : ''}>Доход</option>
             <option value="expense" ${f?.type === 'expense' ? 'selected' : ''}>Расход</option>
           </select>
         </label>
-        <label class="field"><span>Сумма, ₽</span><input type="number" name="amount" required step="0.01" value="${esc(f?.amount || '')}" ${f?.source === 'bank' ? 'disabled' : ''}></label>
+        <label class="field"><span>Сумма, ₽</span><input type="number" name="amount" required step="0.01" value="${esc(f?.amount || '')}"></label>
       </div>
       <div class="form-row">
-        <label class="field"><span>Дата</span><input type="date" name="date" required value="${esc(f?.date || today())}" ${f?.source === 'bank' ? 'disabled' : ''}></label>
+        <label class="field"><span>Дата</span><input type="date" name="date" required value="${esc(f?.date || today())}"></label>
         <label class="field"><span>Способ</span>
           <select name="method">${FIN_METHODS.map((x) => `<option value="${x.id}" ${(f?.method || 'account') === x.id ? 'selected' : ''}>${x.name}</option>`).join('')}</select>
         </label>
@@ -2337,7 +2677,7 @@ function openFinForm(f) {
       <div id="salary-extra"></div>
       <label class="field"><span>Комментарий</span><input type="text" name="comment" value="${esc(f?.comment || '')}"></label>
       <div class="actions">
-        ${!isNew && f?.source !== 'bank' ? `<button type="button" class="btn danger ghost left" id="ent-del">Удалить</button>` : ''}
+        ${!isNew ? `<button type="button" class="btn danger ghost left" id="ent-del">Удалить</button>` : ''}
         <button type="button" class="btn" id="modal-cancel">Отмена</button>
         <button type="submit" class="btn primary">${isNew ? 'Добавить' : 'Сохранить'}</button>
       </div>

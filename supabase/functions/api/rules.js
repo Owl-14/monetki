@@ -1,11 +1,13 @@
 import { EVENT_ENTITIES, visibleEventCollections } from "./event-rules.js";
+import { DEFAULT_BANK_RULE_SETTINGS, bankRuleEvaluationToken, evaluateBankRules, publicBankRuleEvaluation, safeBankRuleSettings } from "./bank-rules.js";
 
 export const ENTITIES = [
   "businesses", "memberships", "businessOwners",
   "employees", "clients", "companies", "contacts", "leads", "deals",
   "pipelines", "stages", "dealItems", "venues", "players",
   "tasks", "finance", "staffExpenses", "cash", "notifications",
-  "bankTransactions", "warehouses", "stockItems", "stockMovements", "stockBalances", "reservations", "inventories",
+  "bankTransactions", "bankRules", "bankRuleVersions", "bankRuleApplications", "bankRuleRuns", "bankRuleSettings", "bankRuleSettingVersions", "financeRelations",
+  "warehouses", "stockItems", "stockMovements", "stockBalances", "reservations", "inventories",
   ...EVENT_ENTITIES,
 ];
 export const BACKUP_ENTITIES = [...ENTITIES, "files"];
@@ -15,8 +17,11 @@ export const CRM_ENTITIES = ["companies", "contacts", "leads", "deals", "pipelin
 export const STOCK_ENTITIES = [
   "warehouses", "stockItems", "stockMovements", "stockBalances", "reservations", "inventories",
 ];
+export const BANK_RULE_ENTITIES = [
+  "bankRules", "bankRuleVersions", "bankRuleApplications", "bankRuleRuns", "bankRuleSettings", "bankRuleSettingVersions", "financeRelations",
+];
 export const BUSINESS_SCOPED_ENTITIES = [
-  "clients", ...CRM_ENTITIES, "venues", "players", "tasks", "finance", "staffExpenses", ...STOCK_ENTITIES, ...EVENT_ENTITIES,
+  "clients", ...CRM_ENTITIES, "venues", "players", "tasks", "finance", "staffExpenses", "financeRelations", ...STOCK_ENTITIES, ...EVENT_ENTITIES,
 ];
 
 export const DEFAULT_CRM_STAGES = [
@@ -243,6 +248,12 @@ export function visibleBootstrapData(user, data, bankBalance = null) {
     eventBudgetLines: eventItems(data.eventBudgetLines),
     eventFinanceAllocations: eventItems(data.eventFinanceAllocations),
   }, admin);
+  const bankSettings = safeBankRuleSettings((data.bankRuleSettings || [])[0] || DEFAULT_BANK_RULE_SETTINGS);
+  const visibleBankTransactions = (data.bankTransactions || []).map((item) => {
+    const evaluation = evaluateBankRules(item.bankSignals || {}, data.bankRules || [], bankSettings);
+    const { bankSignals: _signals, bankId: _bankId, bankSignalFingerprint: _fingerprint, ...safe } = item;
+    return { ...safe, ruleEvaluation: publicBankRuleEvaluation(evaluation), ruleEvaluationToken: bankRuleEvaluationToken(item, evaluation) };
+  });
   const sharesBusiness = (leftId, rightId) => {
     const left = accessSet(memberships, leftId);
     return activeMemberships(memberships, rightId).some((membership) => left.has(businessIdOf(membership)));
@@ -302,7 +313,14 @@ export function visibleBootstrapData(user, data, bankBalance = null) {
     ...visibleEvents,
     tasks: scopedItems(data.tasks).filter((task) => admin || task.assigneeId === user.id),
     finance: scopedItems(data.finance).filter((item) => admin || item.employeeId === user.id),
-    bankTransactions: admin ? (data.bankTransactions || []) : [],
+    bankTransactions: admin ? visibleBankTransactions : [],
+    bankRules: admin ? (data.bankRules || []) : [],
+    bankRuleVersions: admin ? (data.bankRuleVersions || []) : [],
+    bankRuleApplications: [],
+    bankRuleRuns: [],
+    bankRuleSettings: admin ? (data.bankRuleSettings || []) : [],
+    bankRuleSettingVersions: admin ? (data.bankRuleSettingVersions || []) : [],
+    financeRelations: admin ? scopedItems(data.financeRelations) : [],
     bankDiagnostics: admin ? bankScopeDiagnostics(user, data) : null,
     staffExpenses: scopedItems(data.staffExpenses).filter((item) => admin || item.employeeId === user.id),
     warehouses: stockItems(data.warehouses),
@@ -319,6 +337,7 @@ export function visibleBootstrapData(user, data, bankBalance = null) {
 
 export function baseWriteError(user, entity) {
   if (entity === "bankTransactions") return "Банковскую операцию можно только провести";
+  if (BANK_RULE_ENTITIES.includes(entity)) return "Правила банка изменяются только отдельным безопасным действием";
   if (entity === "eventFinanceAllocations") return "Финансовое распределение создаётся отдельным безопасным действием";
   if (!ENTITIES.includes(entity)) return "Неизвестная сущность";
   if (entity === "stockBalances") return "Остатки изменяются только складскими операциями";

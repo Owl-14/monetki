@@ -20,6 +20,24 @@ import {
 } from "./actions.ts";
 import { runTochkaSync } from "./bank.ts";
 import { readAll } from "./db/repositories.ts";
+import {
+  applyBankRuleSuggestion,
+  bankRuleJournal,
+  correctBankRuleApplication,
+  dryRunBankRules,
+  deleteBankRule,
+  enableBankRule,
+  getBankRuleSettings,
+  ignoreBankTransaction,
+  listBankRules,
+  previewBankRuleTransaction,
+  reevaluateBankTransaction,
+  rejectBankRuleSuggestion,
+  requireManualBankTransaction,
+  reverseBankRuleApplication,
+  saveBankRule,
+  updateBankRuleSettings,
+} from "./bank-rule-actions.ts";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -76,14 +94,31 @@ export async function handleRequest(req: Request) {
       case "mark_read": return json(await markRead(user, body.ids));
       case "resolve_expense": return json(await resolveExpense(user, body.id, body.how));
       case "process_bank_transaction": return json(await processBankTransaction(user, body.id, body.businessId, body.category));
+      case "bank_rules_list": return json(await listBankRules(user));
+      case "bank_rule_save": return json(await saveBankRule(user, body.rule, body.expectedVersion));
+      case "bank_rule_enable": return json(await enableBankRule(user, body.id, body.enabled, body.expectedVersion));
+      case "bank_rule_delete": return json(await deleteBankRule(user, body.id, body.expectedVersion));
+      case "bank_rule_settings_get": return json(await getBankRuleSettings(user));
+      case "bank_rule_settings_update": return json(await updateBankRuleSettings(user, body.settings, body.expectedVersion));
+      case "bank_rule_preview_transaction": return json(await previewBankRuleTransaction(user, body.transactionId, body.draft));
+      case "bank_rule_dry_run": return json(await dryRunBankRules(user, body.draft));
+      case "bank_rule_apply_suggestion": return json(await applyBankRuleSuggestion(user, body.transactionId, body.expectedEvaluationToken, body.idempotencyKey));
+      case "bank_rule_reject_suggestion": return json(await rejectBankRuleSuggestion(user, body.transactionId, body.idempotencyKey));
+      case "bank_rule_ignore": return json(await ignoreBankTransaction(user, body.transactionId, body.idempotencyKey));
+      case "bank_rule_manual": return json(await requireManualBankTransaction(user, body.transactionId, body.idempotencyKey));
+      case "bank_rule_reevaluate": return json(await reevaluateBankTransaction(user, body.transactionId, body.idempotencyKey));
+      case "bank_rule_journal": return json(await bankRuleJournal(user, body.limit));
+      case "bank_rule_correct": return json(await correctBankRuleApplication(user, body.applicationId, body.patch, body.idempotencyKey));
+      case "bank_rule_reverse": return json(await reverseBankRuleApplication(user, body.applicationId, body.idempotencyKey));
       case "allocate_event_finance": return json(await createEventFinanceAllocation(user, body.item));
       case "close_event_settlement": return json(await closeEventSettlement(user, body.id));
       case "upload_file": return json(await uploadFile(user, body.b64));
       case "get_file": return json(await getFile(user, body.id));
       default: return json({ ok: false, error: "Неизвестное действие" });
     }
-  } catch (e) {
-    return json({ ok: false, error: "Ошибка сервера: " + (e as Error).message });
+  } catch (_error) {
+    // Внутренняя ошибка может содержать фрагмент банковского ответа или SQL-контекст.
+    return json({ ok: false, error: "Ошибка сервера" });
   }
 }
 

@@ -18,6 +18,7 @@ declare
   v_next numeric;
   v_reserved numeric;
   v_inserted integer;
+  v_finance jsonb;
 begin
   if v_business = '' or p_item->>'businessId' is distinct from v_business
       or p_item->>'unit' is distinct from v_business then
@@ -35,6 +36,17 @@ begin
   end;
   if v_qty is null or v_qty <= 0 then
     raise exception using errcode = 'P0001', message = 'Количество должно быть больше нуля';
+  end if;
+  if coalesce(p_item->>'financeId', '') <> '' then
+    select data into v_finance from records
+    where entity = 'finance' and id = p_item->>'financeId' for update;
+    if v_finance is null
+        or coalesce(v_finance->>'businessId', v_finance->>'unit') is distinct from v_business
+        or v_finance->>'businessId' is distinct from v_business
+        or v_finance->>'unit' is distinct from v_business
+        or v_finance->>'type' is distinct from 'expense' then
+      raise exception using errcode = 'P0001', message = 'Связанный расход не найден в этом бизнесе';
+    end if;
   end if;
   if v_type = 'transfer' then
     if coalesce(p_item->>'fromWarehouseId', '') = ''
