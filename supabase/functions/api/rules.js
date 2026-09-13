@@ -1,13 +1,11 @@
 import { EVENT_ENTITIES, visibleEventCollections } from "./event-rules.js";
-import { DEFAULT_BANK_RULE_SETTINGS, bankRuleEvaluationToken, evaluateBankRules, publicBankRuleEvaluation, safeBankRuleSettings } from "./bank-rules.js";
 
 export const ENTITIES = [
   "businesses", "memberships", "businessOwners",
   "employees", "clients", "companies", "contacts", "leads", "deals",
   "pipelines", "stages", "dealItems", "venues", "players",
   "tasks", "finance", "staffExpenses", "cash", "notifications",
-  "bankTransactions", "bankRules", "bankRuleVersions", "bankRuleApplications", "bankRuleRuns", "bankRuleSettings", "bankRuleSettingVersions", "financeRelations",
-  "warehouses", "stockItems", "stockMovements", "stockBalances", "reservations", "inventories",
+  "bankTransactions", "bankAutoRules", "warehouses", "stockItems", "stockMovements", "stockBalances", "reservations", "inventories",
   ...EVENT_ENTITIES,
 ];
 export const BACKUP_ENTITIES = [...ENTITIES, "files"];
@@ -17,11 +15,8 @@ export const CRM_ENTITIES = ["companies", "contacts", "leads", "deals", "pipelin
 export const STOCK_ENTITIES = [
   "warehouses", "stockItems", "stockMovements", "stockBalances", "reservations", "inventories",
 ];
-export const BANK_RULE_ENTITIES = [
-  "bankRules", "bankRuleVersions", "bankRuleApplications", "bankRuleRuns", "bankRuleSettings", "bankRuleSettingVersions", "financeRelations",
-];
 export const BUSINESS_SCOPED_ENTITIES = [
-  "clients", ...CRM_ENTITIES, "venues", "players", "tasks", "finance", "staffExpenses", "financeRelations", ...STOCK_ENTITIES, ...EVENT_ENTITIES,
+  "clients", ...CRM_ENTITIES, "venues", "players", "tasks", "finance", "staffExpenses", ...STOCK_ENTITIES, ...EVENT_ENTITIES,
 ];
 
 export const DEFAULT_CRM_STAGES = [
@@ -248,12 +243,6 @@ export function visibleBootstrapData(user, data, bankBalance = null) {
     eventBudgetLines: eventItems(data.eventBudgetLines),
     eventFinanceAllocations: eventItems(data.eventFinanceAllocations),
   }, admin);
-  const bankSettings = safeBankRuleSettings((data.bankRuleSettings || [])[0] || DEFAULT_BANK_RULE_SETTINGS);
-  const visibleBankTransactions = (data.bankTransactions || []).map((item) => {
-    const evaluation = evaluateBankRules(item.bankSignals || {}, data.bankRules || [], bankSettings);
-    const { bankSignals: _signals, bankId: _bankId, bankSignalFingerprint: _fingerprint, ...safe } = item;
-    return { ...safe, ruleEvaluation: publicBankRuleEvaluation(evaluation), ruleEvaluationToken: bankRuleEvaluationToken(item, evaluation) };
-  });
   const sharesBusiness = (leftId, rightId) => {
     const left = accessSet(memberships, leftId);
     return activeMemberships(memberships, rightId).some((membership) => left.has(businessIdOf(membership)));
@@ -313,14 +302,8 @@ export function visibleBootstrapData(user, data, bankBalance = null) {
     ...visibleEvents,
     tasks: scopedItems(data.tasks).filter((task) => admin || task.assigneeId === user.id),
     finance: scopedItems(data.finance).filter((item) => admin || item.employeeId === user.id),
-    bankTransactions: admin ? visibleBankTransactions : [],
-    bankRules: admin ? (data.bankRules || []) : [],
-    bankRuleVersions: admin ? (data.bankRuleVersions || []) : [],
-    bankRuleApplications: [],
-    bankRuleRuns: [],
-    bankRuleSettings: admin ? (data.bankRuleSettings || []) : [],
-    bankRuleSettingVersions: admin ? (data.bankRuleSettingVersions || []) : [],
-    financeRelations: admin ? scopedItems(data.financeRelations) : [],
+    bankTransactions: admin ? (data.bankTransactions || []) : [],
+    bankAutoRules: admin ? (data.bankAutoRules || []) : [],
     bankDiagnostics: admin ? bankScopeDiagnostics(user, data) : null,
     staffExpenses: scopedItems(data.staffExpenses).filter((item) => admin || item.employeeId === user.id),
     warehouses: stockItems(data.warehouses),
@@ -337,15 +320,57 @@ export function visibleBootstrapData(user, data, bankBalance = null) {
 
 export function baseWriteError(user, entity) {
   if (entity === "bankTransactions") return "Банковскую операцию можно только провести";
-  if (BANK_RULE_ENTITIES.includes(entity)) return "Правила банка изменяются только отдельным безопасным действием";
   if (entity === "eventFinanceAllocations") return "Финансовое распределение создаётся отдельным безопасным действием";
   if (!ENTITIES.includes(entity)) return "Неизвестная сущность";
   if (entity === "stockBalances") return "Остатки изменяются только складскими операциями";
-  if ([...CORE_ENTITIES, "employees", "finance", "cash", "eventTypes", "eventBudgetLines"].includes(entity) && !isAdmin(user)) {
+  if ([...CORE_ENTITIES, "employees", "finance", "cash", "bankAutoRules", "eventTypes", "eventBudgetLines"].includes(entity) && !isAdmin(user)) {
     return "Только для админа";
   }
   if (entity === "notifications") return "Нельзя";
   return null;
+}
+
+// ---------- Правила авторазбора банка ----------
+// Правило: «если в контрагенте или назначении платежа есть текст X» → бизнес + категория.
+// Та же логика продублирована в js/store.js (демо-режим) — менять оба места.
+
+export const normalizeBankRuleText = (value) => String(value ?? "").toLocaleLowerCase("ru-RU").replace(/ё/g, "е").replace(/\s+/g, " ").trim();
+
+export function normalizeBankAutoRule(item) {
+  const businessId = String(item?.businessId || item?.unit || "").trim();
+  return {
+    ...item,
+    match: String(item?.match || "").trim().slice(0, 120),
+    type: ["income", "expense"].includes(item?.type) ? item.type : "any",
+    businessId,
+    unit: businessId,
+    category: String(item?.category || "").trim().slice(0, 120),
+    owner: String(item?.owner || "").trim(),
+    active: item?.active !== false,
+  };
+}
+
+export function bankAutoRuleError(item, businesses = []) {
+  if (!normalizeBankRuleText(item?.match)) return "Укажите, какой текст искать в операции";
+  if (!item?.category) return "Укажите категорию";
+  const business = (businesses || []).find((candidate) => candidate.id === item?.businessId);
+  if (!business || business.active === false) return "Бизнес не найден или находится в архиве";
+  return null;
+}
+
+/** Первое активное правило, чей текст встречается в контрагенте или назначении операции. */
+export function matchBankAutoRule(transaction, rules = [], businesses = []) {
+  const haystack = normalizeBankRuleText(`${transaction?.counterparty || ""} ${transaction?.comment || ""}`);
+  if (!haystack) return null;
+  const activeBusinesses = new Set((businesses || []).filter((business) => business.active !== false).map((business) => business.id));
+  return (rules || [])
+    .filter((rule) => rule?.active !== false && activeBusinesses.has(rule?.businessId) && rule?.category)
+    .filter((rule) => !rule.type || rule.type === "any" || rule.type === transaction?.type)
+    .sort((a, b) => Number(a.created || 0) - Number(b.created || 0))
+    .find((rule) => {
+      const needle = normalizeBankRuleText(rule.match);
+      return needle && haystack.includes(needle);
+    }) || null;
 }
 
 /** @param {Array<{ id?: unknown, active?: unknown }> | null} businesses */

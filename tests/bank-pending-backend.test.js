@@ -59,18 +59,17 @@ test("синхронизация пишет очередь и дедуплици
   const bank = await source("bank.ts");
   assert.match(bank, /readAll\("finance"\).*readAll\("bankTransactions"\)/s);
   assert.match(bank, /new Set\(\[\.\.\.existing, \.\.\.queued\]/);
-  assert.match(bank, /callRpc\("bank_enqueue_transaction"/);
+  assert.match(bank, /writeRow\("bankTransactions"/);
   assert.match(bank, /crypto\.subtle\.digest\("SHA-256"/);
   assert.match(bank, /id: await bankQueueRecordId\(bankId\)/);
   assert.doesNotMatch(bank, /writeRow\("finance"/);
 });
 
 test("проведение проверяет права, сохраняет bankId и защищено от дубля", async () => {
-  const [actions, bankActions, http, migration] = await Promise.all([
+  const [actions, http, migration] = await Promise.all([
     source("actions.ts"),
-    source("bank-rule-actions.ts"),
     source("http.ts"),
-    readFile(new URL("../supabase/migrations/009_bank_rules.sql", import.meta.url), "utf8"),
+    readFile(new URL("../supabase/migrations/005_process_bank_transaction.sql", import.meta.url), "utf8"),
   ]);
   const start = actions.indexOf("export async function processBankTransaction");
   const end = actions.indexOf("async function coreValidationError", start);
@@ -78,16 +77,16 @@ test("проведение проверяет права, сохраняет ban
 
   assert.match(http, /case "process_bank_transaction"/);
   assert.match(block, /if \(!isAdmin\(u\)\)/);
-  assert.match(block, /manualProcessBankTransaction/);
-  assert.match(bankActions, /scopeWriteError\(/);
-  assert.match(bankActions, /callRpc\("apply_bank_rule_transaction"/);
+  assert.match(block, /scopeWriteError\(/);
+  assert.match(block, /callRpc\("process_bank_transaction"/);
   assert.doesNotMatch(block, /console\.|error\.message/);
   assert.match(migration, /for update/);
   assert.match(migration, /pg_advisory_xact_lock/);
-  assert.match(migration, /data->>'bankId' = v_bank_id/);
+  assert.match(migration, /data ->> 'bankId' = v_bank_id/);
+  assert.match(migration, /'bank:' \|\| p_queue_id/);
   assert.match(migration, /delete from public\.records where entity = 'bankTransactions'/);
-  assert.match(migration, /revoke all on function public\.apply_bank_rule_transaction\(jsonb\) from public, anon, authenticated/);
-  assert.match(migration, /grant execute on function public\.apply_bank_rule_transaction[\s\S]*to service_role/);
+  assert.match(migration, /revoke all on function public\.process_bank_transaction\(text, text, text\) from public, anon, authenticated/);
+  assert.match(migration, /grant execute on function public\.process_bank_transaction[\s\S]*to service_role/);
 });
 
 test("ошибка Точки не включает тело банковского ответа", async () => {
@@ -134,20 +133,5 @@ test("атомарная функция применяется всеми бан
     const workflow = await readFile(new URL(path, import.meta.url), "utf8");
     assert.match(workflow, /supabase\/migrations\/005_process_bank_transaction\.sql/, path);
     assert.match(workflow, /supabase\/migrations\/006_recover_hidden_bank_transactions\.sql/, path);
-    assert.match(workflow, /supabase\/migrations\/009_bank_rules\.sql/, path);
-  }
-});
-
-test("большие банковские миграции передаются в jq через файл, а не аргумент процесса", async () => {
-  const paths = [
-    "../.github/workflows/deploy-backend.yml",
-    "../.github/workflows/apply-bank-cron-migration.yml",
-    "../.github/workflows/configure-tochka-sync-secret.yml",
-  ];
-  for (const path of paths) {
-    const workflow = await readFile(new URL(path, import.meta.url), "utf8");
-    assert.match(workflow, /migration_query_file=/, path);
-    assert.match(workflow, /jq -n --rawfile query "\$\{migration_query_file\}"/, path);
-    assert.doesNotMatch(workflow, /jq -n --arg query "\$\{migration_query\}"/, path);
   }
 });
