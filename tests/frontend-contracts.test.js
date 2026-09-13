@@ -107,17 +107,17 @@ test('финансы явно показывают бизнес и период 
   assert.doesNotMatch(finance, /55 операций|21\.07|04\.08/);
 });
 
-test('PWA v27 кэширует entrypoint, оболочку и общие правила', async () => {
+test('PWA v28 кэширует entrypoint, оболочку и правила событий', async () => {
   const sw = await read('../sw.js');
 
-  assert.match(sw, /const CACHE = 'monetki-v27'/);
-  for (const path of ['./js/app.js', './js/app-shell.js', './js/app-state.js', './js/event-rules.js', './js/bank-rules.js', './js/store.js', './js/ui.js', './supabase/functions/api/event-rules.js', './supabase/functions/api/bank-rules.js']) {
+  assert.match(sw, /const CACHE = 'monetki-v28'/);
+  for (const path of ['./js/app.js', './js/app-shell.js', './js/app-state.js', './js/event-rules.js', './js/store.js', './js/ui.js', './supabase/functions/api/event-rules.js']) {
     assert.match(sw, new RegExp(`['"]${path.replaceAll('.', '\\.')}['"]`));
   }
 });
 
 test('текущий релиз получает minor-версию config', async () => {
-  assert.match(await read('../config.js'), /version:\s*"0\.6\.0"/);
+  assert.match(await read('../config.js'), /version:\s*"0\.6\.1"/);
 });
 
 test('PWA manifest использует палитру новой оболочки и сохраняет установку приложения', async () => {

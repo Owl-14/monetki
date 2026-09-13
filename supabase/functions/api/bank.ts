@@ -7,27 +7,11 @@ import {
   statementRequestBudget,
   sumBankBalances,
 } from "./rules.js";
-import { remindDeadlines } from "./actions.ts";
-import { normalizeBankSignals } from "./bank-rules.js";
-import { autoProcessBankQueue, bankSignalFingerprint } from "./bank-rule-actions.ts";
-import { callRpc, kvSet, readAll } from "./db/repositories.ts";
+import { applyBankAutoRules, remindDeadlines } from "./actions.ts";
+import { callRpc, kvSet, readAll, writeRow } from "./db/repositories.ts";
 import type { Rec } from "./types.ts";
 
 const TOCHKA = "https://enter.tochka.com/uapi";
-
-async function hmacAccountKey(value: string) {
-  const secret = Deno.env.get("BANK_SIGNAL_HMAC_SECRET") || Deno.env.get("TOCHKA_SYNC_SECRET");
-  if (!secret || secret.length < 32) return "";
-  const key = await crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  const digest = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`account:${value}`));
-  return `h1:${[...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
-}
 
 async function bankQueueRecordId(bankId: string) {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(bankId));
@@ -47,6 +31,21 @@ async function tochkaFetch(path: string, init?: RequestInit) {
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+function safeSyncErrorReason(error: unknown) {
+  const message = String((error as Error)?.message || "");
+  const status = message.match(/^Точка API (\d{3})$/);
+  if (status) {
+    return ["401", "403"].includes(status[1])
+      ? `банк отклонил токен (HTTP ${status[1]}) — нужно выпустить новый TOCHKA_TOKEN`
+      : `банк ответил ошибкой HTTP ${status[1]}`;
+  }
+  if (message === "Не задан секрет TOCHKA_TOKEN") return message;
+  const name = (error as Error)?.name;
+  if (name === "TimeoutError" || name === "AbortError") return "банк не ответил вовремя";
+  if (error instanceof SyntaxError) return "банк вернул некорректный ответ";
+  return "внутренняя ошибка сервера";
+}
 
 const TOCHKA_STATEMENT_REQUEST_LIMIT = 32;
 const TOCHKA_STATEMENT_SPLIT_DEPTH = 8;
@@ -139,7 +138,7 @@ async function tochkaSync(days = 30, deadline = Date.now() + TOCHKA_SYNC_DEADLIN
       ranges: [] as Array<Record<string, unknown>>,
     },
     transactions: {
-      seen: 0, duplicates: 0, pending: 0,
+      seen: 0, duplicates: 0, pending: 0, saveFailed: 0,
       overall: {
         rawSeen: 0,
         uniqueSeen: 0,
@@ -163,7 +162,6 @@ async function tochkaSync(days = 30, deadline = Date.now() + TOCHKA_SYNC_DEADLIN
 
   const [existing, queued] = await Promise.all([readAll("finance"), readAll("bankTransactions")]);
   const known = new Set([...existing, ...queued].map((f) => f.bankId).filter(Boolean));
-  const queuedByBankId = new Map(queued.filter((item) => item.bankId).map((item) => [String(item.bankId), item]));
   const syncSeenIds = new Set<string>();
   let added = 0;
   let deadlineStopped = false;
@@ -262,25 +260,8 @@ async function tochkaSync(days = 30, deadline = Date.now() + TOCHKA_SYNC_DEADLIN
         diagnostics.transactions.pending++;
         continue;
       }
-      const transactionBankId = bankTransactionId(t);
-      const detectedMethod = classifyMethod(t);
-      const bankSignals = await normalizeBankSignals(t, {
-        detectedMethod,
-        sourceAccountId: accountId,
-        accountKey: hmacAccountKey,
-      });
-      if (known.has(transactionBankId)) {
+      if (known.has(bankTransactionId(t))) {
         diagnostics.transactions.duplicates++;
-        const queuedDuplicate = queuedByBankId.get(transactionBankId);
-        if (queuedDuplicate && !queuedDuplicate.bankSignals?.schemaVersion) {
-          const enriched = {
-            ...queuedDuplicate,
-            bankSignals,
-            bankSignalFingerprint: await bankSignalFingerprint(bankSignals),
-            updated: Date.now(),
-          };
-          await callRpc("bank_enqueue_transaction", { p_item: enriched });
-        }
         continue;
       }
       const accepted = acceptBankTransaction(t, known);
@@ -290,21 +271,29 @@ async function tochkaSync(days = 30, deadline = Date.now() + TOCHKA_SYNC_DEADLIN
       const cp = isIncome
         ? ((t.DebtorParty as Rec)?.name || "")
         : ((t.CreditorParty as Rec)?.name || "");
-      const queueItem = {
-        id: await bankQueueRecordId(bankId),
-        date: String(t.documentProcessDate || fmt(new Date())).slice(0, 10),
-        type: isIncome ? "income" : "expense",
-        amount,
-        method: detectedMethod,
-        source: "bank",
-        counterparty: cp,
-        comment: String(t.description || "").slice(0, 300),
-        bankId, bankSignals, bankSignalFingerprint: await bankSignalFingerprint(bankSignals),
-        bankRuleState: "pending", created: Date.now(), updated: Date.now(),
-      };
-      const { data: enqueued, error: enqueueError } = await callRpc("bank_enqueue_transaction", { p_item: queueItem });
-      if (enqueueError) throw new Error("Не удалось безопасно сохранить банковскую операцию");
-      if ((enqueued as Rec)?.added) added++;
+      // Одна «странная» операция не должна останавливать всю выписку.
+      try {
+        await writeRow("bankTransactions", {
+          id: await bankQueueRecordId(bankId),
+          date: String(t.documentProcessDate || fmt(new Date())).slice(0, 10),
+          type: isIncome ? "income" : "expense",
+          amount,
+          method: classifyMethod(t),
+          source: "bank",
+          counterparty: String(cp).slice(0, 300),
+          comment: String(t.description || "").slice(0, 300),
+          bankId, created: Date.now(), updated: Date.now(),
+        });
+        added++;
+      } catch (_error) {
+        known.delete(bankId);
+        diagnostics.transactions.saveFailed++;
+        diagnostics.errors++;
+        if (!accountPartial) {
+          diagnostics.accounts.partial++;
+          accountPartial = true;
+        }
+      }
     }
     if (deadlineStopped) break;
   }
@@ -320,12 +309,16 @@ async function tochkaSync(days = 30, deadline = Date.now() + TOCHKA_SYNC_DEADLIN
     await kvSet("BANK_BALANCE", { amount: total, updated: new Date().toISOString() });
   } catch (_e) { /* остаток не критичен */ }
 
-  const result = bankSyncResult(diagnostics, added);
-  if (added > 0) await autoProcessBankQueue();
+  let autoApplied = 0;
+  try {
+    autoApplied = (await applyBankAutoRules()).applied;
+  } catch (_e) { /* правила — удобство; очередь останется для ручного разбора */ }
+
+  const result = { ...bankSyncResult(diagnostics, added), autoApplied };
   if (result.ok && result.outcome !== "partial") {
     await kvSet(
       "LAST_SYNC",
-      `${new Date().toISOString()} | добавлено: ${added} | результат: ${result.outcome} | обработано счетов: ${diagnostics.accounts.processed}/${diagnostics.accounts.total}`,
+      `${new Date().toISOString()} | добавлено: ${added} | разнесено правилами: ${autoApplied} | результат: ${result.outcome} | обработано счетов: ${diagnostics.accounts.processed}/${diagnostics.accounts.total}`,
     );
   }
   return result;
@@ -351,10 +344,11 @@ export async function runTochkaSync(days = 30) {
         complete ? null : `${attemptedAt} | Синхронизация с Точка Банком выполнена не полностью`,
       );
       return result;
-    } catch (_error) {
-      // Не сохраняем исходный текст ошибки: ответ банка может содержать чувствительные данные.
-      await kvSet("LAST_SYNC_ERROR", `${attemptedAt} | Синхронизация с Точка Банком не выполнена`);
-      return { ok: false, error: "Синхронизация с Точка Банком не выполнена", outcome: "failed" };
+    } catch (error) {
+      // Тело ответа банка не сохраняем — только безопасную причину (код HTTP, таймаут).
+      const reason = safeSyncErrorReason(error);
+      await kvSet("LAST_SYNC_ERROR", `${attemptedAt} | Синхронизация с Точка Банком не выполнена: ${reason}`);
+      return { ok: false, error: `Синхронизация с Точка Банком не выполнена: ${reason}`, outcome: "failed" };
     }
   } catch (_error) {
     return { ok: false, error: "Синхронизация с Точка Банком не выполнена", outcome: "failed" };
