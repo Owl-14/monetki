@@ -8,6 +8,7 @@ import {
   sumBankBalances,
 } from "./rules.js";
 import { applyBankAutoRules, remindDeadlines } from "./actions.ts";
+import { RUSSIAN_TRUSTED_ROOT_CA, RUSSIAN_TRUSTED_SUB_CA } from "./tochka-ca.ts";
 import { callRpc, kvSet, readAll, writeRow } from "./db/repositories.ts";
 import type { Rec } from "./types.ts";
 
@@ -18,13 +19,30 @@ async function bankQueueRecordId(bankId: string) {
   return `bankq:${[...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }
 
+// Отдельный HTTP-клиент для Точки, доверяющий сертификатам Минцифры (см. tochka-ca.ts).
+// Если среда не умеет createHttpClient, запрос уходит обычным fetch.
+let tochkaClient: unknown = null;
+function tochkaHttpClient() {
+  if (tochkaClient) return tochkaClient;
+  const create = (Deno as unknown as { createHttpClient?: (options: { caCerts: string[] }) => unknown }).createHttpClient;
+  if (typeof create !== "function") return null;
+  try {
+    tochkaClient = create({ caCerts: [RUSSIAN_TRUSTED_ROOT_CA, RUSSIAN_TRUSTED_SUB_CA] });
+  } catch (_error) {
+    tochkaClient = null;
+  }
+  return tochkaClient;
+}
+
 async function tochkaFetch(path: string, init?: RequestInit) {
   const token = Deno.env.get("TOCHKA_TOKEN");
   if (!token) throw new Error("Не задан секрет TOCHKA_TOKEN");
+  const client = tochkaHttpClient();
   const resp = await fetch(TOCHKA + path, {
     ...init,
+    ...(client ? { client } : {}),
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-  });
+  } as RequestInit);
   const body = await resp.text();
   if (!resp.ok) throw new Error(`Точка API ${resp.status}`);
   return JSON.parse(body);
