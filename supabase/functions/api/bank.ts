@@ -44,7 +44,17 @@ function safeSyncErrorReason(error: unknown) {
   const name = (error as Error)?.name;
   if (name === "TimeoutError" || name === "AbortError") return "банк не ответил вовремя";
   if (error instanceof SyntaxError) return "банк вернул некорректный ответ";
-  return "внутренняя ошибка сервера";
+  return `внутренняя ошибка на этапе «${syncStage}»: ${maskedErrorText(error)}`;
+}
+
+// Этап синхронизации — чтобы по LAST_SYNC_ERROR было видно, где именно сломалось.
+let syncStage = "старт";
+
+// Текст JS/SQL-ошибки без цифр (суммы, счета, телефоны не утекут) и с ограничением длины.
+function maskedErrorText(error: unknown) {
+  const name = String((error as Error)?.name || "Error");
+  const message = String((error as Error)?.message || "").replace(/\d/g, "#").slice(0, 140);
+  return `${name}: ${message}`;
 }
 
 const TOCHKA_STATEMENT_REQUEST_LIMIT = 32;
@@ -124,6 +134,7 @@ async function fetchTochkaStatement(
 
 async function tochkaSync(days = 30, deadline = Date.now() + TOCHKA_SYNC_DEADLINE_MS) {
   if (Date.now() >= deadline) throw new Error("Истёк безопасный срок синхронизации");
+  syncStage = "список счетов";
   const accountsRes = await tochkaFetch("/open-banking/v1.0/accounts", {
     signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())),
   });
@@ -154,12 +165,14 @@ async function tochkaSync(days = 30, deadline = Date.now() + TOCHKA_SYNC_DEADLIN
       deadlineReached: 0,
     },
     errors: 0,
+    lastError: "",
   };
 
   const end = new Date();
   const start = new Date(end.getTime() - days * 864e5);
   const fmt = (d: Date) => d.toISOString().slice(0, 10);
 
+  syncStage = "чтение базы";
   const [existing, queued] = await Promise.all([readAll("finance"), readAll("bankTransactions")]);
   const known = new Set([...existing, ...queued].map((f) => f.bankId).filter(Boolean));
   const syncSeenIds = new Set<string>();
@@ -192,15 +205,25 @@ async function tochkaSync(days = 30, deadline = Date.now() + TOCHKA_SYNC_DEADLIN
       continue;
     }
     const accountId = String(acc.accountId);
-    const collected = await collectStatementTransactions({
-      startDate: fmt(start),
-      endDate: fmt(end),
-      maxDepth: TOCHKA_STATEMENT_SPLIT_DEPTH,
-      maxRequests: accountRequestLimit,
-      deadline,
-      fetchRange: (rangeStart: string, rangeEnd: string) =>
-        fetchTochkaStatement(accountId, rangeStart, rangeEnd, deadline),
-    });
+    syncStage = "выписка";
+    let collected;
+    try {
+      collected = await collectStatementTransactions({
+        startDate: fmt(start),
+        endDate: fmt(end),
+        maxDepth: TOCHKA_STATEMENT_SPLIT_DEPTH,
+        maxRequests: accountRequestLimit,
+        deadline,
+        fetchRange: (rangeStart: string, rangeEnd: string) =>
+          fetchTochkaStatement(accountId, rangeStart, rangeEnd, deadline),
+      });
+    } catch (error) {
+      // Сбой разбора выписки одного счёта не должен останавливать остальные.
+      diagnostics.accounts.failed++;
+      diagnostics.errors++;
+      diagnostics.lastError = `выписка: ${maskedErrorText(error)}`;
+      continue;
+    }
     const statementDiagnostics = collected.diagnostics;
     diagnostics.statements.requested += statementDiagnostics.requested;
     diagnostics.statements.ready += statementDiagnostics.ready;
@@ -242,7 +265,10 @@ async function tochkaSync(days = 30, deadline = Date.now() + TOCHKA_SYNC_DEADLIN
 
     const transactions = collected.transactions as Rec[];
     diagnostics.transactions.seen += transactions.length;
-    for (const transaction of transactions) syncSeenIds.add(bankTransactionId(transaction));
+    syncStage = "обработка операций";
+    for (const transaction of transactions) {
+      try { syncSeenIds.add(bankTransactionId(transaction)); } catch (_e) { /* учтём ниже как ошибку операции */ }
+    }
     diagnostics.transactions.overall.uniqueSeen = syncSeenIds.size;
 
     for (const t of transactions) {
@@ -256,23 +282,26 @@ async function tochkaSync(days = 30, deadline = Date.now() + TOCHKA_SYNC_DEADLIN
         deadlineStopped = true;
         break;
       }
-      if (t.status === "Pending") {
-        diagnostics.transactions.pending++;
-        continue;
-      }
-      if (known.has(bankTransactionId(t))) {
-        diagnostics.transactions.duplicates++;
-        continue;
-      }
-      const accepted = acceptBankTransaction(t, known);
-      if (!accepted) continue;
-      const { amount, bankId } = accepted;
-      const isIncome = t.creditDebitIndicator === "Credit";
-      const cp = isIncome
-        ? ((t.DebtorParty as Rec)?.name || "")
-        : ((t.CreditorParty as Rec)?.name || "");
       // Одна «странная» операция не должна останавливать всю выписку.
+      let bankId = "";
       try {
+        if (!t || typeof t !== "object") throw new TypeError("операция в выписке не является объектом");
+        if (t.status === "Pending") {
+          diagnostics.transactions.pending++;
+          continue;
+        }
+        if (known.has(bankTransactionId(t))) {
+          diagnostics.transactions.duplicates++;
+          continue;
+        }
+        const accepted = acceptBankTransaction(t, known);
+        if (!accepted) continue;
+        bankId = accepted.bankId;
+        const amount = accepted.amount;
+        const isIncome = t.creditDebitIndicator === "Credit";
+        const cp = isIncome
+          ? ((t.DebtorParty as Rec)?.name || "")
+          : ((t.CreditorParty as Rec)?.name || "");
         await writeRow("bankTransactions", {
           id: await bankQueueRecordId(bankId),
           date: String(t.documentProcessDate || fmt(new Date())).slice(0, 10),
@@ -285,10 +314,11 @@ async function tochkaSync(days = 30, deadline = Date.now() + TOCHKA_SYNC_DEADLIN
           bankId, created: Date.now(), updated: Date.now(),
         });
         added++;
-      } catch (_error) {
-        known.delete(bankId);
+      } catch (error) {
+        if (bankId) known.delete(bankId);
         diagnostics.transactions.saveFailed++;
         diagnostics.errors++;
+        diagnostics.lastError = `операция: ${maskedErrorText(error)}`;
         if (!accountPartial) {
           diagnostics.accounts.partial++;
           accountPartial = true;
@@ -314,6 +344,7 @@ async function tochkaSync(days = 30, deadline = Date.now() + TOCHKA_SYNC_DEADLIN
     autoApplied = (await applyBankAutoRules()).applied;
   } catch (_e) { /* правила — удобство; очередь останется для ручного разбора */ }
 
+  syncStage = "итог";
   const result = { ...bankSyncResult(diagnostics, added), autoApplied };
   if (result.ok && result.outcome !== "partial") {
     await kvSet(
@@ -336,12 +367,14 @@ export async function runTochkaSync(days = 30) {
     const deadline = Date.now() + TOCHKA_SYNC_DEADLINE_MS;
     await kvSet("LAST_SYNC_ATTEMPT", attemptedAt);
     try {
+      syncStage = "напоминания";
       await remindDeadlines();
       const result = await tochkaSync(days, deadline);
       const complete = result.ok && "outcome" in result && result.outcome !== "partial";
+      const lastError = "diagnostics" in result ? (result.diagnostics as { lastError?: string }).lastError : "";
       await kvSet(
         "LAST_SYNC_ERROR",
-        complete ? null : `${attemptedAt} | Синхронизация с Точка Банком выполнена не полностью`,
+        complete ? null : `${attemptedAt} | Синхронизация с Точка Банком выполнена не полностью${lastError ? `: ${lastError}` : ""}`,
       );
       return result;
     } catch (error) {

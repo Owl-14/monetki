@@ -790,6 +790,7 @@ export async function collectStatementTransactions({
       (!diagnostics.overall.latest || rangeDiagnostics.latestDate > diagnostics.overall.latest)
     ) diagnostics.overall.latest = rangeDiagnostics.latestDate;
     for (const transaction of rangeTransactions) {
+      if (!transaction || typeof transaction !== "object") continue;
       const transactionId = bankTransactionId(transaction);
       node.ids.add(transactionId);
       // Более узкий диапазон обрабатывается позже и может содержать более свежий
