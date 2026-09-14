@@ -26,6 +26,7 @@ import {
   visibleBootstrapData,
 } from "./rules.js";
 import { stockModuleWriteError, stockRecordError } from "./stock-rules.js";
+import { financeLinkError, walletError } from "./ledger-rules.js";
 import {
   EVENT_ENTITIES,
   eventDeleteError,
@@ -114,6 +115,11 @@ export async function processBankTransaction(u: Rec, id: unknown, businessId: un
   });
   if (error) return { ok: false, error: "Не удалось безопасно провести банковскую операцию" };
   return data as Rec;
+}
+
+async function readLedgerLinks() {
+  const [wallets, events, players] = await Promise.all([readAll("wallets"), readAll("events"), readAll("players")]);
+  return { wallets, events, players };
 }
 
 /** Разносит очередь банка по активным правилам. Вызывается после синхронизации и по кнопке. */
@@ -318,6 +324,16 @@ export async function createItem(u: Rec, entity: string, item: Rec) {
     const ruleDeny = bankAutoRuleError(item, businesses);
     if (ruleDeny) return { ok: false, error: ruleDeny };
   }
+  if (entity === "wallets") {
+    const walletDeny = walletError(item);
+    if (walletDeny) return { ok: false, error: walletDeny };
+    item.opening = Number(item.opening || 0);
+    item.active = item.active !== false;
+  }
+  if (entity === "finance") {
+    const linkDeny = financeLinkError(item, await readLedgerLinks());
+    if (linkDeny) return { ok: false, error: linkDeny };
+  }
   if (entity === "staffExpenses" && !isAdmin(u) && !businessIdOf(item)) {
     item = normalizeScope(item, String(u.unit || "")) as Rec;
   }
@@ -478,6 +494,14 @@ export async function updateItem(u: Rec, entity: string, item: Rec) {
     item = normalizeBankAutoRule({ ...before, ...item }) as Rec;
     const ruleDeny = bankAutoRuleError(item, businesses);
     if (ruleDeny) return { ok: false, error: ruleDeny };
+  }
+  if (entity === "wallets") {
+    const walletDeny = walletError({ ...before, ...item });
+    if (walletDeny) return { ok: false, error: walletDeny };
+  }
+  if (entity === "finance") {
+    const linkDeny = financeLinkError({ ...before, ...item }, await readLedgerLinks());
+    if (linkDeny) return { ok: false, error: linkDeny };
   }
   if (STOCK_ENTITIES.includes(entity)) {
     const moduleDeny = stockModuleWriteError(businesses, before);

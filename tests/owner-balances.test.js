@@ -103,5 +103,7 @@ test("наличная касса не передаётся в расчёт сч
   assert.equal(balances.andrey.total, 50);
 
   const appSource = await readFile(new URL("../js/app.js", import.meta.url), "utf8");
-  assert.match(appSource, /ownerBalances\(S\.data\.finance \|\| \[\], businessOwners\)/);
+  // В расчёт идут только операции finance (без cash); бизнесы с учётом «как в таблице» считаются отдельно.
+  assert.match(appSource, /ownerBalances\(\s*\(S\.data\.finance \|\| \[\]\)\.filter\(\(item\) => !ledgerIds\.has\(businessIdOf\(item\)\)\)/);
+  assert.doesNotMatch(appSource, /ownerBalances\([^)]*S\.data\.cash/);
 });
