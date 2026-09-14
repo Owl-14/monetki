@@ -78,8 +78,9 @@ body {
   font-size: 15px;
   line-height: 1.45;
   -webkit-tap-highlight-color: transparent;
-  overflow-x: hidden;
-  overscroll-behavior: none;
+  /* clip, а не hidden: hidden делает body отдельной прокручиваемой областью,
+     и вместе с overscroll-behavior колесо/тачпад переставали листать страницу */
+  overflow-x: clip;
   touch-action: pan-y;
 }
 a { color: var(--blue); text-decoration: none; }
