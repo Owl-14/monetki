@@ -2450,7 +2450,7 @@ function ledgerAccountsHtml(businessId) {
     </div>
     <div class="actions"><button type="button" class="btn small" data-add-wallet="${esc(businessId)}">+ Кошелёк</button></div>
     ${recent.length ? `<div class="section-title">Прибыль турниров</div><div class="list">${recent.map((item) => `<button type="button" class="row-card" data-ledger-event="${esc(item.eventId)}"><span class="grow col"><b>${esc(item.event?.title || 'Турнир')}</b><small>${fmtDate(String(item.event?.startsAt || '').slice(0, 10))}${item.split ? ` · ${esc(item.split)}` : ''}</small></span><strong class="${item.profit >= 0 ? 'green' : 'red'}">${money(item.profit)}</strong></button>`).join('')}</div>` : ''}
-    <p class="muted small">Общие хозяйственные расходы: ${money(generalTotal)}, делятся ${esc(generalText)}.</p>
+    <p class="muted small">Общие хозяйственные расходы: ${money(generalTotal)}. Каждый относится к ближайшему турниру в этот день или позже: турнир ДШ — целиком на Дмитрия, ОБЩ — по долям ОБЩ. Если турниров не было — ${esc(generalText)}.</p>
   </section>`;
 }
 
