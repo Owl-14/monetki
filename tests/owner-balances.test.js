@@ -107,3 +107,13 @@ test("наличная касса не передаётся в расчёт сч
   assert.match(appSource, /ownerBalances\(\s*\(S\.data\.finance \|\| \[\]\)\.filter\(\(item\) => !ledgerIds\.has\(businessIdOf\(item\)\)\)/);
   assert.doesNotMatch(appSource, /ownerBalances\([^)]*S\.data\.cash/);
 });
+
+test("приход с «Чей» (возврат личной траты) засчитывается целиком этому владельцу", () => {
+  const balances = ownerBalances([
+    { unit: "dev", type: "income", amount: 1000 },
+    { unit: "dev", type: "expense", amount: 400, owner: "andrey" },
+    { unit: "dev", type: "income", amount: 100, owner: "andrey" },
+  ]);
+  assert.equal(balances.savva.total, 500);
+  assert.equal(balances.andrey.total, 500 - 400 + 100);
+});

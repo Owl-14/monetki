@@ -215,7 +215,13 @@ export function ownerBalances(finance, businessOwners = []) {
     const businessId = businessIdOf(f);
     if (!amt) continue;
     if (f.category === 'Перевод между счетами') continue;
-    if (f.type === 'income') {
+    if (f.type === 'income' && ownerParts(f.owner)) {
+      // приход с «Чей»: возврат личной траты — целиком в пользу этого владельца
+      for (const [oid, sh] of ownerParts(f.owner)) {
+        const balance = res.get(oid);
+        if (balance) balance.set('personal', Number(balance.get('personal') || 0) - amt * sh);
+      }
+    } else if (f.type === 'income') {
       shares(businessId).forEach(([ownerId, share]) => {
         const balance = res.get(ownerId);
         if (balance && share) balance.set(businessId, Number(balance.get(businessId) || 0) + amt * share);

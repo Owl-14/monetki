@@ -2412,7 +2412,7 @@ function renderFinAccounts(tabsHtml) {
           <div class="value ${b.total >= 0 ? '' : 'red'}">${money(b.total)}</div>
           <div class="hint">💻 Разработка: ${money(b.dev)}</div>
           ${ledgerIds.has('padel') ? '' : `<div class="hint">🎾 Падел: ${money(b.padel)}</div>`}
-          ${b.personal ? `<div class="hint" style="color:var(--red)">личные расходы: −${money(b.personal)}</div>` : ''}
+          ${b.personal > 0 ? `<div class="hint" style="color:var(--red)">личные расходы: −${money(b.personal)}</div>` : b.personal < 0 ? `<div class="hint" style="color:var(--green)">личные возвраты: +${money(-b.personal)}</div>` : ''}
         </div>`;
       }).join('')}
     </div>
