@@ -51,6 +51,21 @@ export function eventSplitShares(event, business) {
   return Array.isArray(preset) ? preset.filter((share) => share?.ownerId && Number(share.share) > 0) : [];
 }
 
+/**
+ * Доли общего хозяйственного расхода: по ближайшему турниру в этот день или позже (отменённые пропускаются),
+ * если турниров после расхода нет — по последнему прошедшему; без турниров с пометкой — `generalShares`.
+ */
+export function generalExpenseShares(item, events = [], business = null) {
+  const day = String(item?.date || '').slice(0, 10);
+  const dated = (events || [])
+    .filter((event) => event?.status !== 'cancelled' && event?.split && eventSplitShares(event, business).length)
+    .map((event) => ({ event, day: String(event.startsAt || '').slice(0, 10) }))
+    .filter((entry) => entry.day)
+    .sort((left, right) => left.day.localeCompare(right.day));
+  const target = dated.find((entry) => entry.day >= day) || [...dated].reverse().find((entry) => entry.day < day);
+  return target ? eventSplitShares(target.event, business) : generalShares(business);
+}
+
 /** Кошелёк операции: явный или банковский кошелёк с автосинхронизацией для операций из выписки. */
 export function walletIdOf(item, wallets = []) {
   if (item?.wallet) return String(item.wallet);
@@ -104,16 +119,24 @@ export function ledgerFounderBalances(business, { finance = [], events = [], bus
     return result.get(ownerId);
   };
 
+  const businessEvents = (events || []).filter((item) => scopeOf(item) === businessId);
   let generalTotalCents = 0;
   for (const item of rows) {
     if (item.category === FOUNDERS_ARTICLE && item.responsible && result.has(item.responsible)) ensure(item.responsible).ddsCents += signedCents(item);
-    if (item.category === GENERAL_ARTICLE) generalTotalCents += signedCents(item);
-  }
-  for (const share of generalShares(business)) {
-    if (result.has(share.ownerId)) ensure(share.ownerId).generalCents += Math.round(generalTotalCents * Number(share.share || 0));
+    if (item.category !== GENERAL_ARTICLE) continue;
+    const amountCents = signedCents(item);
+    generalTotalCents += amountCents;
+    // Общий расход делается под ближайший турнир: ДШ — целиком Дмитрию, ОБЩ — по долям ОБЩ.
+    const shares = generalExpenseShares(item, businessEvents, business);
+    let distributed = 0;
+    shares.forEach((share, index) => {
+      const part = index === shares.length - 1 ? amountCents - distributed : Math.round(amountCents * Number(share.share || 0));
+      distributed += part;
+      ensure(share.ownerId).generalCents += part;
+    });
   }
   const tournaments = [];
-  for (const event of (events || []).filter((item) => scopeOf(item) === businessId)) {
+  for (const event of businessEvents) {
     const ledger = eventLedger(event.id, rows);
     const profitCents = cents(ledger.profit);
     const shares = eventSplitShares(event, business);

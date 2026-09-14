@@ -13,8 +13,9 @@ const owners = [
   { businessId: 'padel', ownerId: 'savva', name: 'Савва', opening: 0 },
 ];
 const events = [
-  { id: 'e1', businessId: 'padel', split: 'ДШ' },
-  { id: 'e2', businessId: 'padel', split: 'ОБЩ' },
+  { id: 'e1', businessId: 'padel', split: 'ДШ', status: 'completed', startsAt: '2026-04-01T19:00' },
+  { id: 'e2', businessId: 'padel', split: 'ОБЩ', status: 'completed', startsAt: '2026-04-04T12:00' },
+  { id: 'e3', businessId: 'padel', split: 'ДШ', status: 'cancelled', startsAt: '2026-04-03T19:00' },
 ];
 const op = (id, type, amount, extra = {}) => ({ id, businessId: 'padel', unit: 'padel', type, amount, ...extra });
 const finance = [
@@ -23,7 +24,8 @@ const finance = [
   op('f3', 'income', 10000, { category: 'Взносы игроков', eventId: 'e2' }),
   op('f4', 'expense', 4000, { category: 'Оплата кортов', eventId: 'e2' }),
   op('f5', 'income', 3000, { category: 'Расчеты с учредителями', responsible: 'savva', wallet: 'w-cash' }),
-  op('f6', 'expense', 600, { category: 'Общие хозяйственные', wallet: 'w-cash' }),
+  op('f6', 'expense', 600, { category: 'Общие хозяйственные', wallet: 'w-cash', date: '2026-04-02' }),
+  op('f9', 'expense', 300, { category: 'Общие хозяйственные', date: '2026-03-30' }),
   op('f7', 'expense', 1320, { category: 'На складе' }),
   op('f8', 'income', 5500, { category: 'Депозит клиента', source: 'bank' }),
 ];
@@ -40,16 +42,27 @@ test('прибыль турнира — сумма операций с его п
 test('счета учредителей считаются как в «Своде»', () => {
   const { founders, generalTotal } = ledgerFounderBalances(padel, { finance, events, businessOwners: owners });
   const byId = Object.fromEntries(founders.map((item) => [item.ownerId, item]));
-  assert.equal(generalTotal, -600);
-  // ДШ: вся прибыль e1 (5000) Дмитрию; ОБЩ: 6000 × 33/34/33; общие −600 × 2/3 и по 1/6.
+  assert.equal(generalTotal, -900);
+  // ДШ: вся прибыль e1 (5000) Дмитрию; ОБЩ: 6000 × 33/34/33.
   assert.equal(byId.dmitry.result, 5000 + 1980);
   assert.equal(byId.andrey.result, 2040);
   assert.equal(byId.savva.result, 1980);
-  assert.equal(byId.dmitry.general, -400);
-  assert.equal(byId.andrey.general, -100);
+  // Общий расход идёт под ближайший турнир: −300 от 30.03 → турнир ДШ 01.04 (только Дмитрий);
+  // −600 от 02.04 → отменённый 03.04 пропускается → ОБЩ 04.04 (33/34/33).
+  assert.equal(byId.dmitry.general, -300 - 198);
+  assert.equal(byId.andrey.general, -204);
+  assert.equal(byId.savva.general, -198);
   assert.equal(byId.savva.dds, 3000);
-  assert.equal(byId.andrey.total, 1000 + 2040 - 100);
-  assert.equal(byId.savva.total, 3000 + 1980 - 100);
+  assert.equal(byId.andrey.total, 1000 + 2040 - 204);
+  assert.equal(byId.savva.total, 3000 + 1980 - 198);
+});
+
+test('общий расход после последнего турнира делится по последнему прошедшему, без турниров — по generalShares', () => {
+  const late = [op('g1', 'expense', 900, { category: 'Общие хозяйственные', date: '2026-09-01' })];
+  const afterAll = Object.fromEntries(ledgerFounderBalances(padel, { finance: late, events, businessOwners: owners }).founders.map((item) => [item.ownerId, item.general]));
+  assert.deepEqual(afterAll, { dmitry: -297, andrey: -306, savva: -297 });
+  const noEvents = Object.fromEntries(ledgerFounderBalances(padel, { finance: late, events: [], businessOwners: owners }).founders.map((item) => [item.ownerId, item.general]));
+  assert.deepEqual(noEvents, { dmitry: -600, andrey: -150, savva: -150 });
 });
 
 test('кошельки, склад и депозиты', () => {
@@ -57,7 +70,7 @@ test('кошельки, склад и депозиты', () => {
     { id: 'w-bank', businessId: 'padel', name: 'Точка', kind: 'bank', bankSync: true, opening: 0 },
     { id: 'w-cash', businessId: 'padel', name: 'Касса', kind: 'cash', opening: 500 },
   ];
-  assert.equal(walletIdOf(finance[7], wallets), 'w-bank');
+  assert.equal(walletIdOf(finance.find((item) => item.id === 'f8'), wallets), 'w-bank');
   const balances = Object.fromEntries(walletBalances(padel, { wallets, finance }).map((item) => [item.id, item.balance]));
   assert.equal(balances['w-cash'], 500 + 3000 - 600);
   assert.equal(balances['w-bank'], 5500);
