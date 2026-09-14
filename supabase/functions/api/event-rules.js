@@ -1,3 +1,5 @@
+import { eventSplitShares, isLedgerBusiness } from "./ledger-rules.js";
+
 export const EVENT_ENTITIES = [
   "eventTypes", "events", "eventRegistrations", "eventBudgetLines", "eventFinanceAllocations",
 ];
@@ -34,6 +36,12 @@ export function eventModuleWriteError(businesses, item) {
 }
 
 export function ownerSharesForEvent(event, data) {
+  // Учёт «как в таблице»: доли задаются пометкой ДШ/ОБЩ на самом событии.
+  const business = (data.businesses || []).find((candidate) => candidate.id === scopeOf(event));
+  if (isLedgerBusiness(business) && event?.split) {
+    const names = new Map((data.businessOwners || []).filter((owner) => scopeOf(owner) === scopeOf(event)).map((owner) => [owner.ownerId, owner.name]));
+    return eventSplitShares(event, business).map((share) => ({ ownerId: share.ownerId, name: names.get(share.ownerId) || "", share: Number(share.share) }));
+  }
   const type = sameBusinessRecord(data.eventTypes, event?.eventTypeId, scopeOf(event));
   const configured = Array.isArray(type?.ownerShares) ? type.ownerShares : [];
   const shares = configured.length ? configured : (data.businessOwners || [])
@@ -56,14 +64,22 @@ export function eventEconomy(event, data) {
   let incomeCents = 0;
   let expenseCents = 0;
   let refundCents = 0;
+  const allocatedFinanceIds = new Set();
   for (const allocation of allocations) {
     const finance = financeById.get(allocation.financeId);
     if (!finance) continue;
+    allocatedFinanceIds.add(finance.id);
     const amount = cents(allocation.amount);
     if (finance.type === "income") incomeCents += amount;
     if (finance.type === "income" && allocation.purpose === "deposit") depositCents += amount;
     if (finance.type === "expense" && allocation.purpose === "refund") refundCents += amount;
     if (finance.type === "expense" && allocation.purpose !== "refund") expenseCents += amount;
+  }
+  // Операции журнала, помеченные этим турниром (как колонка «Турнир» в таблице).
+  for (const finance of (data.finance || [])) {
+    if (finance.eventId !== event.id || allocatedFinanceIds.has(finance.id)) continue;
+    if (finance.type === "income") incomeCents += cents(finance.amount);
+    if (finance.type === "expense") expenseCents += cents(finance.amount);
   }
   const paidCents = incomeCents;
   const debtCents = Math.max(0, accruedCents - paidCents);

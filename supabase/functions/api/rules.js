@@ -5,7 +5,7 @@ export const ENTITIES = [
   "employees", "clients", "companies", "contacts", "leads", "deals",
   "pipelines", "stages", "dealItems", "venues", "players",
   "tasks", "finance", "staffExpenses", "cash", "notifications",
-  "bankTransactions", "bankAutoRules", "warehouses", "stockItems", "stockMovements", "stockBalances", "reservations", "inventories",
+  "bankTransactions", "bankAutoRules", "wallets", "deposits", "warehouses", "stockItems", "stockMovements", "stockBalances", "reservations", "inventories",
   ...EVENT_ENTITIES,
 ];
 export const BACKUP_ENTITIES = [...ENTITIES, "files"];
@@ -16,7 +16,7 @@ export const STOCK_ENTITIES = [
   "warehouses", "stockItems", "stockMovements", "stockBalances", "reservations", "inventories",
 ];
 export const BUSINESS_SCOPED_ENTITIES = [
-  "clients", ...CRM_ENTITIES, "venues", "players", "tasks", "finance", "staffExpenses", ...STOCK_ENTITIES, ...EVENT_ENTITIES,
+  "clients", ...CRM_ENTITIES, "venues", "players", "tasks", "finance", "staffExpenses", "wallets", "deposits", ...STOCK_ENTITIES, ...EVENT_ENTITIES,
 ];
 
 export const DEFAULT_CRM_STAGES = [
@@ -304,6 +304,8 @@ export function visibleBootstrapData(user, data, bankBalance = null) {
     finance: scopedItems(data.finance).filter((item) => admin || item.employeeId === user.id),
     bankTransactions: admin ? (data.bankTransactions || []) : [],
     bankAutoRules: admin ? (data.bankAutoRules || []) : [],
+    wallets: admin ? scopedItems(data.wallets) : [],
+    deposits: admin ? scopedItems(data.deposits) : [],
     bankDiagnostics: admin ? bankScopeDiagnostics(user, data) : null,
     staffExpenses: scopedItems(data.staffExpenses).filter((item) => admin || item.employeeId === user.id),
     warehouses: stockItems(data.warehouses),
@@ -323,7 +325,7 @@ export function baseWriteError(user, entity) {
   if (entity === "eventFinanceAllocations") return "Финансовое распределение создаётся отдельным безопасным действием";
   if (!ENTITIES.includes(entity)) return "Неизвестная сущность";
   if (entity === "stockBalances") return "Остатки изменяются только складскими операциями";
-  if ([...CORE_ENTITIES, "employees", "finance", "cash", "bankAutoRules", "eventTypes", "eventBudgetLines"].includes(entity) && !isAdmin(user)) {
+  if ([...CORE_ENTITIES, "employees", "finance", "cash", "bankAutoRules", "wallets", "deposits", "eventTypes", "eventBudgetLines"].includes(entity) && !isAdmin(user)) {
     return "Только для админа";
   }
   if (entity === "notifications") return "Нельзя";

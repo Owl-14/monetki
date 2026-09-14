@@ -65,7 +65,10 @@ POST на `backendUrl`, `Content-Type: text/plain` (чтобы без preflight)
 - `eventBudgetLines`: businessId/unit, eventId, direction `income|expense`, name, plannedAmount, category, note — только план, не денежный факт.
 - `eventFinanceAllocations`: неизменяемая связь события с существующим `finance`: eventId, financeId, optional registrationId/budgetLineId, purpose `payment|deposit|expense|refund`, amount, idempotencyKey. Прямая CRUD-запись запрещена; SQL под блокировкой не даёт распределить больше суммы операции. Связанные сумма/type/business у `finance` защищены от изменения и удаления.
 - `tasks`: assigneeId, authorId, status `new`(«Не видел», красный)`|progress|question`(жёлтый)`|done`, priority, due, comments[]
-- `finance`: unit, date, type `income|expense`, amount, method `account|card|sbp|cash|other`, source `bank|manual`, category, counterparty, comment, bankId (дедуп банка), employeeId (зарплата/компенсация), owner (`savva|andrey|dmitry` — чей расход)
+- `finance`: unit, date, type `income|expense`, amount, method `account|card|sbp|cash|other`, source `bank|manual`, category, counterparty, comment, bankId (дедуп банка), employeeId (зарплата/компенсация), owner (`savva|andrey|dmitry` — чей расход). Для бизнеса с `accounting:'ledger'` ещё: wallet (id кошелька; операции из выписки без wallet относятся к кошельку с `bankSync`), responsible (ownerId учредителя или имя), eventId (турнир), playerId, importedFrom
+- `wallets`: businessId/unit, name, kind `bank|cash`, opening (остаток на начало), bankSync (сюда падает выписка Точки; остаток берётся из банка), active. Только админ.
+- `deposits`: businessId/unit, playerKey/playerId, paidAt, amount, usedAt, usedAmount, note — депозиты игроков из таблицы. Только админ.
+- `events` (+ `eventTypes`, `eventRegistrations`): у события `split` (`ДШ|ОБЩ` — ключ пресета долей бизнеса); у регистрации `place`, `points`
 - `bankTransactions`: необработанная очередь банка; id, bankId, date, type, amount, method, source `bank`, counterparty, comment, created, updated. До проведения намеренно нет `businessId`/`unit`/`category`, поэтому запись не участвует в отчётах и личных счетах. В bootstrap очередь получает только администратор; обычный CRUD запрещён. `ignored:true` — скрыта из очереди кнопкой «Не учитывать» (остаётся для дедупа).
 - `bankAutoRules`: простые правила авторазбора (только админ, обычный CRUD): match (текст, ищется без учёта регистра/ё в counterparty + comment), type `any|income|expense`, businessId/unit, category, owner (необязательно), active. Срабатывает самое старое подходящее правило. Логика `matchBankAutoRule` продублирована в `js/store.js` и `supabase/functions/api/rules.js`.
 - Сложный движок MON-010 (`bankRules`, `bankRuleVersions`, `bankRuleApplications`, журнал, триггер защиты) удалён миграцией `010_remove_bank_rule_engine.sql`; старые записи этих сущностей лежат в базе, но не читаются. Не возвращать.
@@ -89,6 +92,15 @@ POST на `backendUrl`, `Content-Type: text/plain` (чтобы без preflight)
 - Player/company/contact/venue нельзя физически удалить, пока на запись ссылается событие; это сохраняет ссылки закрытой истории. Создание дочерней строки и удаление события сериализуются блокировкой родителя: ни одна из двух очередностей гонки не оставляет сироту.
 
 ## Бизнес-логика финансов
+
+### Учёт «как в таблице» (Падел, `businesses.accounting = 'ledger'`)
+Логика перенесена из Google-таблицы «Падел. Реестр» (листы «сводсч», «Свод»). Чистые функции — `supabase/functions/api/ledger-rules.js` (браузер берёт через `js/ledger-rules.js` → re-export), тесты — `tests/ledger-rules.test.js`.
+- Один журнал денег: все операции `finance` бизнеса по кошелькам (Точка_5659 — выписка, ТБанк_5947, Касса Андрея, Касса Саввы). Статьи — `LEDGER_ARTICLES` (справочник таблицы).
+- Прибыль турнира = сумма операций с `eventId` (приход +, расход −). Доли — пресет `splitPresets[event.split]` (по умолчанию ДШ = dmitry 100%, ОБЩ = dmitry 33 / andrey 34 / savva 33).
+- Счёт учредителя = `businessOwners.opening` + операции «Расчеты с учредителями» с его `responsible` + его доля прибыли всех турниров + «Общие хозяйственные» × `generalShares` (dmitry 2/3, andrey 1/6, savva 1/6).
+- «Деньги»: остатки кошельков, «На складе» = −Σ статьи «На складе», депозиты = −Σ «Депозит клиента».
+- Для ledger-бизнесов старый `ownerBalances()` не применяется (вкладка «Счета» показывает отдельный блок). «Разработка» считается по-старому.
+- Импорт из таблицы выполнялся разово 2026-09-14 (детерминированные id `imp-*`, резервная копия в `backup.records_padel_import_20260914`).
 
 - Личные счета («Счета»): `ownerBalances()` в store.js — по каждому бизнесу (доходы − расходы) × доли из `businessOwners`, с fallback на прежний `OWNERS`, если CORE-данных ещё нет:
   Разработка 50/50 Савва/Андрей; Падел 34% Андрей / 33% Савва / 33% Дмитрий.

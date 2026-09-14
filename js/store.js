@@ -14,6 +14,7 @@ import {
   staffEventManageError,
   visibleEventCollections,
 } from './event-rules.js';
+import { financeLinkError, walletError } from './ledger-rules.js';
 
 export const UNITS = {
   padel: { id: 'padel', name: 'Падел', emoji: '🎾' },
@@ -26,7 +27,7 @@ export const BUSINESS_MODULES = {
 };
 
 export const DEFAULT_BUSINESSES = [
-  { id: 'padel', name: 'Падел', emoji: '🎾', modules: ['dashboard', 'tasks', 'events', 'venues', 'players', 'stock', 'finance', 'money', 'team'], active: true },
+  { id: 'padel', name: 'Падел', emoji: '🎾', modules: ['dashboard', 'tasks', 'events', 'venues', 'players', 'stock', 'finance', 'money', 'team'], active: true, accounting: 'ledger' },
   { id: 'dev', name: 'Разработка', emoji: '💻', modules: ['dashboard', 'tasks', 'clients', 'finance', 'money', 'team'], active: true }
 ];
 
@@ -99,7 +100,7 @@ function legacyBusinessIds(employee) {
 function ensureCoreData(db) {
   let changed = false;
   [
-    'businesses', 'memberships', 'businessOwners', 'staffExpenses', 'cash', 'files', 'bankTransactions', 'bankAutoRules', ...CRM_ENTITIES,
+    'businesses', 'memberships', 'businessOwners', 'staffExpenses', 'cash', 'files', 'bankTransactions', 'bankAutoRules', 'wallets', 'deposits', ...CRM_ENTITIES,
     'warehouses', 'stockItems', 'stockMovements', 'stockBalances', 'reservations', 'inventories', ...EVENT_ENTITIES
   ].forEach((key) => {
     if (!Array.isArray(db[key])) { db[key] = []; changed = true; }
@@ -379,6 +380,13 @@ function seedData() {
       { id: 'bank-demo-expense', bankId: 'demo-bank-expense', date: d(-2), type: 'expense', amount: 6900, method: 'card', source: 'bank', counterparty: 'Магазин инвентаря', comment: 'Покупка оборудования', created: now, updated: now }
     ],
     bankAutoRules: [],
+    wallets: [
+      { id: 'wallet-padel-tochka', businessId: 'padel', unit: 'padel', name: 'Точка_5659', kind: 'bank', bankSync: true, opening: 0, active: true, created: now, updated: now },
+      { id: 'wallet-padel-tbank', businessId: 'padel', unit: 'padel', name: 'ТБанк_5947', kind: 'bank', opening: 0, active: true, created: now, updated: now },
+      { id: 'wallet-padel-cash-andrey', businessId: 'padel', unit: 'padel', name: 'Касса Андрея', kind: 'cash', opening: 0, active: true, created: now, updated: now },
+      { id: 'wallet-padel-cash-savva', businessId: 'padel', unit: 'padel', name: 'Касса Саввы', kind: 'cash', opening: 0, active: true, created: now, updated: now }
+    ],
+    deposits: [],
     notifications: [
       { id: uid(), toId: 'u-admin', text: 'Демо-режим: это пример уведомления. Подключите базу — и они станут настоящими.', link: '#/tasks', read: false, created: now }
     ]
@@ -389,7 +397,7 @@ function seedData() {
 const LS_KEY = 'monetki_demo_db';
 const CORE_ENTITIES = ['businesses', 'memberships', 'businessOwners'];
 const STOCK_ENTITIES = ['warehouses', 'stockItems', 'stockMovements', 'stockBalances', 'reservations', 'inventories'];
-const BUSINESS_SCOPED_ENTITIES = ['clients', 'venues', 'players', 'tasks', 'finance', 'staffExpenses', ...CRM_ENTITIES, ...STOCK_ENTITIES, ...EVENT_ENTITIES];
+const BUSINESS_SCOPED_ENTITIES = ['clients', 'venues', 'players', 'tasks', 'finance', 'staffExpenses', 'wallets', 'deposits', ...CRM_ENTITIES, ...STOCK_ENTITIES, ...EVENT_ENTITIES];
 const LOCAL_ENTITIES = [
   ...CORE_ENTITIES, 'employees', ...BUSINESS_SCOPED_ENTITIES, 'bankTransactions', 'bankAutoRules', 'cash', 'files', 'notifications'
 ];
@@ -850,6 +858,8 @@ export class LocalStore {
         finance: db.finance.filter((f) => canSee(f) && (isAdmin || f.employeeId === u.id)),
         bankTransactions: isAdmin ? db.bankTransactions : [],
         bankAutoRules: isAdmin ? db.bankAutoRules : [],
+        wallets: isAdmin ? db.wallets.filter(canSee) : [],
+        deposits: isAdmin ? db.deposits.filter(canSee) : [],
         bankDiagnostics: isAdmin ? bankScopeDiagnostics(db, u) : null,
         staffExpenses: db.staffExpenses.filter((e) => canSee(e) && (isAdmin || e.employeeId === u.id)),
         warehouses: db.warehouses.filter(canSeeStock),
@@ -871,7 +881,7 @@ export class LocalStore {
     if (entity === 'eventFinanceAllocations') return 'Финансовое распределение создаётся отдельным безопасным действием';
     if (entity === 'notifications') return 'Нельзя';
     if (entity === 'stockBalances') return 'Остатки меняются только складскими операциями';
-    if ([...CORE_ENTITIES, 'employees', 'finance', 'bankTransactions', 'bankAutoRules', 'cash', 'eventTypes', 'eventBudgetLines'].includes(entity) && u.role !== 'admin') return 'Только для админа';
+    if ([...CORE_ENTITIES, 'employees', 'finance', 'bankTransactions', 'bankAutoRules', 'wallets', 'deposits', 'cash', 'eventTypes', 'eventBudgetLines'].includes(entity) && u.role !== 'admin') return 'Только для админа';
     return null;
   }
 
@@ -1027,6 +1037,16 @@ export class LocalStore {
       const ruleError = bankAutoRuleError(item, db.businesses);
       if (ruleError) return { ok: false, error: ruleError };
     }
+    if (entity === 'wallets') {
+      const error = walletError(item);
+      if (error) return { ok: false, error };
+      item.opening = Number(item.opening || 0);
+      item.active = item.active !== false;
+    }
+    if (entity === 'finance') {
+      const linkError = financeLinkError(item, db);
+      if (linkError) return { ok: false, error: linkError };
+    }
     if (entity === 'staffExpenses' && u.role !== 'admin' && !businessIdOf(item)) scopedItem(item, u.unit);
     if (BUSINESS_SCOPED_ENTITIES.includes(entity)) {
       const accessError = STOCK_ENTITIES.includes(entity) ? this._stockWriteError(db, u, item) : this._scopeWriteError(db, u, item);
@@ -1164,6 +1184,14 @@ export class LocalStore {
       item = normalizeBankAutoRule({ ...before, ...item });
       const ruleError = bankAutoRuleError(item, db.businesses);
       if (ruleError) return { ok: false, error: ruleError };
+    }
+    if (entity === 'wallets') {
+      const error = walletError({ ...before, ...item });
+      if (error) return { ok: false, error };
+    }
+    if (entity === 'finance') {
+      const linkError = financeLinkError({ ...before, ...item }, db);
+      if (linkError) return { ok: false, error: linkError };
     }
     const mergedForValidation = CRM_ENTITIES.includes(entity)
       ? crmDefaults(entity, { ...before, ...item })
